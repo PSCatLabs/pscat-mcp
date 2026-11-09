@@ -1,0 +1,70 @@
+[package]
+name = "pscat-mcp-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A Model Context Protocol server that renders PostScript with the PSCat interpreter"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PSCatLabs/pscat-mcp"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "pscat_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pscat-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# The renderer. Pinned to an exact commit (tag v0.7.0-rc.4): crates.io only has
+# 0.6.3, which predates `Interp::set_limits` and `Interp::set_read_roots`.
+# `default-features = false` drops the desktop window (winit/softbuffer).
+pscat = { git = "https://github.com/PSCatLabs/pscat", rev = "df39114f1223cf475c0c2350c47d7475274c72ee", default-features = false }
+
+rmcp = { version = "3.9.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "signal", "sync", "time", "net"] }
+tokio-util = "0.7"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["request-id", "trace", "limit", "util"] }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+clap = { version = "4", features = ["derive", "env"] }
+base64 = "0.22"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rmcp = { version = "3.9.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+png = "0.17"
+
+# The interpreter is ~14x slower unoptimized and the tests run real renders.
+[profile.dev.package.pscat]
+opt-level = 3
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

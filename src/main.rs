@@ -1,0 +1,104 @@
+//! `pscat-mcp-server`: `serve-http`, `serve-stdio`, and the internal
+//! `render-worker` subcommand.
+
+use clap::{Parser, Subcommand};
+use pscat_mcp::config::{HttpConfig, LimitsConfig, WorkerConfig};
+use pscat_mcp::telemetry::{self, LogFormat};
+
+// PSCat's memory limit needs its counting allocator. Each render runs in its
+// own worker process, so the count covers exactly one program.
+#[global_allocator]
+static ALLOC: pscat::TrackingAllocator = pscat::TrackingAllocator;
+
+/// Largest job the worker reads from stdin (JSON-escaped source + framing).
+const MAX_WORKER_JOB_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Parser)]
+#[command(name = "pscat-mcp-server", version, about = "MCP server for the PSCat PostScript renderer")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serve MCP over Streamable HTTP (remote use).
+    ServeHttp {
+        #[command(flatten)]
+        http: HttpConfig,
+        #[command(flatten)]
+        limits: LimitsConfig,
+        #[command(flatten)]
+        worker: WorkerConfig,
+        /// Log format.
+        #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Json)]
+        log_format: LogFormat,
+    },
+    /// Serve MCP over stdin/stdout (local agents such as Claude Code).
+    ServeStdio {
+        #[command(flatten)]
+        limits: LimitsConfig,
+        #[command(flatten)]
+        worker: WorkerConfig,
+        /// Log format (logs go to stderr).
+        #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
+        log_format: LogFormat,
+    },
+    /// Internal: run one render job read from stdin. Started by the server.
+    #[command(hide = true)]
+    RenderWorker {
+        /// Ignored; lets tests find a specific worker process.
+        #[arg(long)]
+        tag: Option<String>,
+    },
+}
+
+fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        // No async runtime in the worker: one thread, one program.
+        Command::RenderWorker { .. } => {
+            let code = pscat_mcp::worker::run_stdio(MAX_WORKER_JOB_BYTES);
+            std::process::ExitCode::from(code as u8)
+        }
+        Command::ServeHttp {
+            http,
+            limits,
+            worker,
+            log_format,
+        } => run(log_format, async move {
+            let service = pscat_mcp::build_service(limits, &worker)?;
+            pscat_mcp::http::serve(http, service).await
+        }),
+        Command::ServeStdio {
+            limits,
+            worker,
+            log_format,
+        } => run(log_format, async move {
+            let service = pscat_mcp::build_service(limits, &worker)?;
+            pscat_mcp::mcp::serve_stdio(service).await
+        }),
+    }
+}
+
+fn run(
+    log_format: LogFormat,
+    fut: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> std::process::ExitCode {
+    telemetry::init(log_format);
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("pscat-mcp-server: cannot start the runtime: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(fut) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "fatal");
+            eprintln!("pscat-mcp-server: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
