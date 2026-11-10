@@ -417,6 +417,50 @@ async fn rejects_bad_requests_before_execution() {
     client.cancel().await.ok();
 }
 
+/// Arguments that do not deserialize (rmcp rejects them before the tool
+/// body runs) still get the structured failure envelope (issue #4).
+#[tokio::test]
+async fn argument_type_errors_get_the_structured_envelope() {
+    let client = start().await;
+    let output_schemas: std::collections::HashMap<String, serde_json::Map<String, Value>> =
+        tools(&client)
+            .await
+            .into_iter()
+            .filter_map(|t| Some((t.name.to_string(), (*t.output_schema?).clone())))
+            .collect();
+    let cases = [
+        (
+            "render_postscript",
+            json!({"source": "showpage", "width": -5}),
+        ),
+        (
+            "render_postscript",
+            json!({"source": "showpage", "dpi": "high"}),
+        ),
+        ("render_postscript", json!({"format": "png"})),
+        ("validate_postscript", json!({"source": 42})),
+        (
+            "render_postscript",
+            json!({"source": "showpage", "width": "x".repeat(100_000)}),
+        ),
+    ];
+    for (tool, args) in cases {
+        let r = call(&client, tool, args.clone()).await;
+        assert_eq!(r.is_error, Some(true), "{tool} {args}");
+        assert!(!has_image(&r), "{tool} {args}");
+        let s = structured(&r);
+        assert_eq!(s["ok"], false, "{tool} {args}: {s}");
+        assert_eq!(error_code(&r), "invalid_request", "{tool} {args}");
+        assert_eq!(s["renderer"]["engine"], "pscat");
+        let message = s["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("invalid arguments:"), "{message}");
+        assert!(message.chars().count() < 400, "detail not truncated");
+        assert!(text_of(&r).contains("invalid_request"), "{}", text_of(&r));
+        assert_conforms(&output_schemas[tool], s);
+    }
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn validates_programs() {
     let client = start().await;
