@@ -30,11 +30,17 @@ There is deliberately no build argument or environment variable that overrides t
 
    The daily run follows PSCat **pre-release** tags too (`v0.7.0-rc.N`), and it doesn't change the server's version. Before merging a scheduled bump that you want to release, set the version: re-run the workflow with `release_version`, or push a commit to the bump branch with `scripts/bump-pscat.sh --latest --release-version X.Y.Z`. The tag check in step 3 rejects a release whose tag doesn't match `Cargo.toml`.
 
-   The workflow runs `cargo test --all --locked`, pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request. It also starts CI and the container build on that branch: pushes made with the workflow token don't trigger workflows on their own, so it starts them with `workflow_dispatch`.
+   The workflow runs `cargo test --all --locked`, pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request as `github-actions[bot]`.
 
-   If the repository setting *Settings → Actions → General → Allow GitHub Actions to create and approve pull requests* is off, the workflow can't open the pull request. It pushes the branch and puts an "Open the pull request" link in the run summary instead.
+   **Approve the checks.** GitHub holds the workflows of a pull request opened by a workflow. Open the pull request and click **Approve workflows to run**. The five required checks then run: fmt + clippy, tests on Linux and macOS, MSRV, and the amd64 image with the smoke test.
 
-2. **Review and merge** once CI and the container smoke test are green. PSCat release notes may change rendering. Check the README examples, or `examples/*.ps`, against the new version if anything looks different.
+   The workflow can open pull requests only while *Allow GitHub Actions to create and approve pull requests* is on, both in the organization's and the repository's *Settings → Actions → General*. If either is off, it pushes the branch and puts an "Open the pull request" link in the run summary. A pull request you open from that link runs its checks without approval.
+
+2. **Review and merge** once CI and the container smoke test are green. `main` is protected:
+   - every change goes through a pull request, which can be merged without an approving review;
+   - those five checks must pass, for admins too;
+   - merges are squash-only, with linear history;
+   - no force-pushes or deletion. PSCat release notes may change rendering. Check the README examples, or `examples/*.ps`, against the new version if anything looks different.
 
 3. **Tag the release** from the merged `main`:
 
