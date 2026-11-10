@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 tokio-util = "0.7"
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["request-id", "trace", "limit", "util"] }
+tower-http = { version = "0.7", features = ["request-id", "trace", "limit", "util"] }
 http = "1"
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
