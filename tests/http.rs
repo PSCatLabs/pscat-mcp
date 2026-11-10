@@ -843,12 +843,21 @@ async fn huge_declared_length_is_refused_unread() {
          Content-Length: 1000000000\r\n\r\n"
     );
     s.write_all(head.as_bytes()).await.expect("headers");
-    // No body is sent: the answer must not wait for one.
-    let mut response = vec![0; 64];
-    let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut response))
+    // No body is sent: the answer must not wait for one. Read until the
+    // status line is complete (or EOF).
+    let mut response = Vec::new();
+    let read_status_line = async {
+        let mut chunk = [0u8; 256];
+        while !response.windows(2).any(|w| w == b"\r\n") {
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read_status_line)
         .await
-        .expect("answered without the body")
-        .expect("read");
-    let text = String::from_utf8_lossy(&response[..n]);
+        .expect("answered without the body");
+    let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 413"), "{text}");
 }
