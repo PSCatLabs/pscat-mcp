@@ -54,7 +54,7 @@ libc = "0.2"
 [dev-dependencies]
 rmcp = { version = "3.9.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-png = "0.17"
+png = "0.18"
 
 # The interpreter is ~14x slower unoptimized and the tests run real renders.
 [profile.dev.package.pscat]
