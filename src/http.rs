@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -25,7 +26,6 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
@@ -150,11 +150,11 @@ pub fn router(
         Arc::new(LocalSessionManager::default()),
         mcp_config,
     );
-    // Outer to inner: authenticate (before the body is read), then limit
-    // the body, then rmcp.
+    // Outer to inner: authenticate (before the body is read), then read the
+    // body under the limit, then rmcp.
     let mcp = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(auth, require_auth))
-        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(middleware::from_fn_with_state(body_limit, limit_body))
         .service(mcp);
 
     Router::new()
@@ -182,6 +182,44 @@ pub fn router(
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
+}
+
+/// Read the whole request body, at most `limit` bytes, before rmcp sees it.
+///
+/// `413` when it is larger: at once from `Content-Length`, or as soon as a
+/// chunked body (no `Content-Length`) passes the limit. A body cut off or
+/// malformed in transit is a `400`. rmcp reads the whole body anyway, so
+/// buffering it here costs nothing extra. Doing it here means an oversized
+/// chunked body can't reach rmcp, which would turn the length error into a
+/// `500` (issue #10).
+async fn limit_body(State(limit): State<usize>, req: Request, next: Next) -> Response {
+    let too_large = || {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body is larger than {limit} bytes"),
+        )
+            .into_response()
+    };
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > limit as u64) {
+        return too_large();
+    }
+    let (parts, body) = req.into_parts();
+    match http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit)).await {
+        Ok(collected) => {
+            next.run(Request::from_parts(parts, Body::from(collected.to_bytes())))
+                .await
+        }
+        Err(e) if e.is::<http_body_util::LengthLimitError>() => too_large(),
+        Err(e) => {
+            tracing::debug!(error = %e, "reading the request body failed");
+            (StatusCode::BAD_REQUEST, "could not read the request body").into_response()
+        }
+    }
 }
 
 async fn healthz() -> impl IntoResponse {
