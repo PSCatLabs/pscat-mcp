@@ -1,0 +1,100 @@
+name: Container image
+
+# Builds the linux/amd64 image (the Cloud Run target), runs the container
+# smoke test against it, and pushes it to GHCR. Pull requests build and test
+# only; pushes to main and v* tags also publish.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pscat-mcp
+
+jobs:
+  image:
+    runs-on: ubuntu-latest   # x86_64 runner: a native linux/amd64 build, no QEMU
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PSCat version from Cargo.lock
+        id: pscat
+        run: |
+          version=$(awk '/^name = "pscat"$/ {found=1; next} found && /^version = / {gsub(/"/, "", $3); print $3; exit}' Cargo.lock)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+          echo "PSCat $version"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.pscat.outputs.image }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=pscat-${{ steps.pscat.outputs.version }},enable=${{ github.event_name != 'pull_request' }}
+          labels: |
+            org.opencontainers.image.title=pscat-mcp-server
+            io.pscat.renderer.version=${{ steps.pscat.outputs.version }}
+
+      - name: Build (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: pscat-mcp:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container smoke test
+        run: SKIP_BUILD=1 IMAGE=pscat-mcp:ci scripts/container-smoke.sh
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same inputs and cache as the tested build, so this reuses its layers.
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Published image (PSCat ${{ steps.pscat.outputs.version }})"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

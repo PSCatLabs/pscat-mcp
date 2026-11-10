@@ -5,8 +5,27 @@ This document lists what that deployment must get right for this image.
 
 ## Image
 
-* Build for `linux/amd64` (`docker buildx build --platform linux/amd64 .` or
-  Cloud Build). The local smoke test builds for the host architecture.
+* The `Container image` GitHub Actions workflow builds `linux/amd64`, runs
+  `scripts/container-smoke.sh` against that exact image, and publishes it to
+  `ghcr.io/pscatlabs/pscat-mcp` on pushes to `main` and on `v*` tags. Tags:
+  * `sha-<commit>`
+  * `main`
+  * `latest`
+  * `<version>` (from a `v<version>` git tag)
+  * `pscat-<pscat version>`
+
+  Pull requests build and test the image but never push.
+* Deploy by digest or by `sha-` / version tag, not by `latest`.
+* Cloud Run pulls from Artifact Registry. To use the GHCR image, create an
+  Artifact Registry *remote repository* whose upstream is `https://ghcr.io`
+  and deploy
+  `LOCATION-docker.pkg.dev/PROJECT/REPO/pscatlabs/pscat-mcp:TAG`. The
+  alternative is to copy the image into a standard Artifact Registry
+  repository (`docker pull`, `docker tag`, `docker push`). That setup
+  belongs in `pscat-cloud`.
+* To build locally for Cloud Run, run
+  `docker buildx build --platform linux/amd64 .`. The local smoke test
+  builds for the host architecture.
 * The container listens on `0.0.0.0:$PORT` (Cloud Run sets `PORT`), runs as
   uid 65532, and needs no writable filesystem or volumes.
 * Startup and liveness probe: `GET /healthz` (unauthenticated, does no work).
