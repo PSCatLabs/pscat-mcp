@@ -243,6 +243,8 @@ docker run -d --name "$NAME" \
   --env-file "$TMP/env" \
   -e PSCAT_MCP_ALLOWED_HOSTS=localhost,127.0.0.1 \
   -e PSCAT_MCP_RENDER_TIMEOUT_MS=3000 \
+  -e PSCAT_MCP_INTERP_TIME_LIMIT_MS=0 \
+  -e PSCAT_MCP_MAX_STEPS=0 \
   -p "127.0.0.1:$PORT:8080" \
   "$IMAGE" >/dev/null
 CONTAINER_STARTED=1
@@ -371,15 +373,18 @@ else
   fail "render_postscript pdf failed: $(head -c 600 "$TMP/pdf.json" 2>/dev/null)"
 fi
 
-# 5. Runaway program is stopped (PSCAT_MCP_RENDER_TIMEOUT_MS=3000)
+# 5. Runaway program is stopped by the server's SIGKILL at the deadline.
+#    PSCat's own time and step limits are off in this container
+#    (PSCAT_MCP_INTERP_TIME_LIMIT_MS=0, PSCAT_MCP_MAX_STEPS=0), so only the
+#    external kill (PSCAT_MCP_RENDER_TIMEOUT_MS=3000) can stop it.
 printf '%%!PS\n{ } loop\n' >"$TMP/loop.ps"
 start=$(date +%s)
 if call_tool loop 4 render_postscript "$TMP/loop.ps" '{}' \
   && code="$(py error-code "$TMP/loop.json")"; then
   elapsed=$(( $(date +%s) - start ))
   case "$code" in
-    "tool_error timeout" | "tool_error limit_exceeded")
-      pass "infinite loop stopped in ${elapsed}s with structured error ${code#tool_error }" ;;
+    "tool_error timeout")
+      pass "infinite loop killed at the deadline in ${elapsed}s (structured error timeout)" ;;
     *) fail "infinite loop: unexpected result '$code'" ;;
   esac
 else
@@ -390,9 +395,14 @@ fi
 if [[ "$(healthz)" == 200 ]]; then pass "/healthz still 200 after the runaway"; else fail "/healthz after the runaway"; fi
 render_png_check "render after runaway" 5
 
-# PIDs in use (renders above ran under --pids-limit 64)
+# No worker survives: the container is back to its idle process count.
 pids_now="$(docker stats --no-stream --format '{{.PIDs}}' "$NAME" 2>/dev/null || echo '?')"
-info "container PIDs now: $pids_now (limit 64)"
+procs="$(docker top "$NAME" -o pid,args 2>/dev/null | grep -c render-worker || true)"
+if [[ "$procs" == 0 ]]; then
+  pass "no render-worker process left running (container PIDs: $pids_now, limit 64)"
+else
+  fail "$procs render-worker process(es) still running after the deadline"
+fi
 
 if [[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == true ]]; then
   pass "container still running"
