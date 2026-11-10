@@ -681,3 +681,127 @@ async fn body_limit_lets_slightly_large_sources_reach_the_tool() {
     assert_eq!(status, 401);
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
 }
+
+// ------------------------------------------- cancellation and chunked bodies
+
+/// Processes whose command line contains `tag`.
+fn processes_with(tag: &str) -> Vec<String> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(tag)
+        .output()
+        .expect("pgrep runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+async fn wait_for(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !cond() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Stateless HTTP has no session to route `notifications/cancelled` to, so
+/// on a deployment the client giving up means closing the connection. That
+/// must kill the worker and free the slot (issue #5).
+#[tokio::test(flavor = "multi_thread")]
+async fn client_disconnect_kills_the_worker_and_frees_the_slot() {
+    let tag = format!("pscat-mcp-disconnect-{}", uuid::Uuid::new_v4());
+    let limits = LimitsConfig {
+        max_concurrent_renders: Some(1),
+        queue_timeout_ms: 500,
+        // Only the disconnect can stop the loop within the test's time frame.
+        render_timeout_ms: 60_000,
+        interp_time_limit_ms: Some(0),
+        max_steps: 0,
+        ..LimitsConfig::default()
+    };
+    let backend = SubprocessBackend::new(worker_exe(), limits.clone()).with_tag(tag.clone());
+    let srv = start(Arc::new(RenderService::new(Arc::new(backend), limits))).await;
+
+    let url = srv.mcp();
+    let request = tokio::spawn(async move {
+        post(&url, Some(TOKEN), None, &render_call(1, "{ } loop", 20, 20)).await
+    });
+    wait_for("worker started", Duration::from_secs(10), || {
+        !processes_with(&tag).is_empty()
+    })
+    .await;
+
+    // Dropping the task drops its reqwest client and closes the connection.
+    request.abort();
+    let _ = request.await;
+
+    wait_for(
+        "worker killed after disconnect",
+        Duration::from_secs(5),
+        || processes_with(&tag).is_empty(),
+    )
+    .await;
+
+    let (status, _, resp) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &render_call(2, &solid(0, 1, 0), 20, 20),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(resp["result"]["isError"], false, "{resp}");
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 2);
+}
+
+/// Send `body` as a chunked POST /mcp over a raw socket (no Content-Length)
+/// and return the response status code.
+async fn post_chunked(base: &str, body: &[u8]) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("http://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Type: application/json\r\nAccept: {ACCEPT}\r\n\
+         Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+    );
+    s.write_all(head.as_bytes()).await.expect("headers");
+    // The server may answer and close before the whole body is sent, so
+    // write errors are expected and ignored.
+    for chunk in body.chunks(8192) {
+        let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
+        if s.write_all(&frame).await.is_err() {
+            break;
+        }
+    }
+    let _ = s.write_all(b"0\r\n\r\n").await;
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut response)).await;
+    let text = String::from_utf8_lossy(&response);
+    text.split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or_else(|| panic!("no HTTP status in {text:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chunked_body_over_the_limit_is_413_and_never_renders() {
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+
+    // Control: a small chunked request goes through, so the raw client is
+    // a valid HTTP client.
+    let small = render_call(1, &solid(1, 0, 0), 10, 10).to_string();
+    assert_eq!(post_chunked(&srv.base, small.as_bytes()).await, 200);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+
+    // Far over the body limit (1024 * 6 + 64 KiB), with no Content-Length.
+    let huge = format!("% {}\nshowpage", "x".repeat(200 * 1024));
+    let body = render_call(2, &huge, 10, 10).to_string();
+    assert_eq!(post_chunked(&srv.base, body.as_bytes()).await, 413);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+}

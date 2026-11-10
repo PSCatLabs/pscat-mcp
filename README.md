@@ -299,8 +299,9 @@ GitHub Actions runs these on every pull request and push to `main`:
 | Suite | Covers |
 |---|---|
 | `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, deadline kill and no surviving process, cancel kills the worker, PSCat step and memory limits, file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd |
-| `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list, annotations and schemas, PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, validation, renderer info |
-| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit |
+| `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list, annotations and schemas, PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
+| `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
+| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render), client disconnect kills the worker and frees the slot |
 
 ## License
 
