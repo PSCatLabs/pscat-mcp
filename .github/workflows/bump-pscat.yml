@@ -3,6 +3,10 @@ name: Bump PSCat
 # Moves the PSCat dependency to a newer release tag, runs the tests, pushes a
 # bump/pscat-<tag> branch and opens a pull request for it. Runs daily (newest
 # PSCat tag, pre-releases included) and on demand. See docs/RELEASING.md.
+#
+# GitHub holds the checks on a pull request opened by this workflow until a
+# maintainer approves the workflows awaiting approval on the PR page. That is the review gate;
+# main's branch protection requires those checks before merging.
 
 on:
   schedule:
@@ -21,7 +25,6 @@ on:
 permissions:
   contents: write        # push the bump branch
   pull-requests: write   # open the pull request
-  actions: write         # start CI on the branch (see below)
 
 concurrency:
   group: bump-pscat
@@ -89,20 +92,18 @@ jobs:
 
           Made by the **Bump PSCat** workflow with \`scripts/bump-pscat.sh\`. \`cargo test --all --locked\` passed in that run.
 
-          After merging, follow docs/RELEASING.md to tag the release.
+          **To run the required checks, approve the workflows awaiting approval (banner near the merge box).** GitHub holds checks on pull requests opened by a workflow. After merging, follow docs/RELEASING.md to tag the release.
           EOF
           )
-          if gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"; then
-            echo "### Opened a pull request for \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          if pr_url=$(gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"); then
+            echo "### Opened $pr_url" >> "$GITHUB_STEP_SUMMARY"
+            echo "Approve its workflows on the pull request page to run the required checks." >> "$GITHUB_STEP_SUMMARY"
           else
-            # Happens when the repository setting "Allow GitHub Actions to
-            # create and approve pull requests" is off.
+            # Happens when "Allow GitHub Actions to create and approve pull
+            # requests" is off (repository or organization setting). A pull
+            # request opened by a person from this link runs its checks
+            # normally.
             url="https://github.com/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
             echo "::warning::Could not open the pull request automatically. Open it here: $url"
             echo "### Branch \`$BRANCH\` pushed. [Open the pull request]($url)" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          # Pushes made with GITHUB_TOKEN do not trigger workflows, but
-          # workflow_dispatch does, so start the checks on the branch.
-          gh workflow run ci.yml --ref "$BRANCH"
-          gh workflow run container.yml --ref "$BRANCH"
