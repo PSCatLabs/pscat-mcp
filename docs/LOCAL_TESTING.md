@@ -17,8 +17,9 @@ BIN="$PWD/target/release/pscat-mcp-server"
 "$BIN" --version
 ```
 
-The commands below use `$BIN`. Clients store the path you give them, so it
-must be absolute.
+The commands below use `$BIN`. It exists only in the shell where you set
+it, so set it again in any new terminal (or paste the absolute path
+instead). Clients store the path you give them, so it must be absolute.
 
 ## 2. Pick a name that doesn't clash
 
@@ -77,22 +78,42 @@ no `tool_timeout_sec` is needed.
 
 ## 4. Streamable HTTP
 
-This is the transport a hosted deployment uses, so test it too. In its own
-terminal:
+This is the transport a hosted deployment uses, so test it too. The server
+and the clients run in different terminals, so keep the bearer token in a
+file they can all read:
 
 ```bash
-export PSCAT_MCP_TOKEN="$(openssl rand -hex 32)"
-PSCAT_MCP_AUTH_TOKENS="$PSCAT_MCP_TOKEN" PSCAT_MCP_LOG_FORMAT=pretty \
+(umask 077; openssl rand -hex 32 > "$HOME/.pscat-mcp-test-token")
+```
+
+Start the server in its own terminal:
+
+```bash
+PSCAT_MCP_AUTH_TOKEN_FILE="$HOME/.pscat-mcp-test-token" PSCAT_MCP_LOG_FORMAT=pretty \
   "$BIN" serve-http        # 127.0.0.1:8080, endpoint /mcp
 ```
+
+In each terminal where you run `claude mcp add`, `codex mcp add` or
+`codex`:
+
+```bash
+export PSCAT_MCP_TOKEN="$(cat "$HOME/.pscat-mcp-test-token")"
+```
+
+If `PSCAT_MCP_TOKEN` is empty there, the client sends `Bearer ` with no
+token and every call gets 401.
 
 Leave it running and watch its log: every request is one line with its
 status. A client that gets **406** is
 [issue #17](https://github.com/PSCatLabs/pscat-mcp/issues/17) (a client
 that doesn't send `Accept: text/event-stream`); note which client it was.
 
-The token is a throwaway for this test. Clients store it in their own
-configuration.
+The token is a throwaway for this test.
+
+An HTTP test counts only if the server's terminal logs a `POST /mcp` for
+each tool call. With the stdio entry and PSCat's plugin also registered, the
+agent may answer through one of those instead. Remove or disable them while
+testing HTTP if that happens.
 
 ### Claude Code
 
@@ -170,4 +191,5 @@ claude mcp remove -s user pscat-render
 claude mcp remove -s user pscat-render-http
 codex mcp remove pscat-render
 codex mcp remove pscat-render-http
+rm "$HOME/.pscat-mcp-test-token"
 ```

@@ -144,7 +144,7 @@ Client configuration for a remote server:
 ```
 
 ```bash
-claude mcp add --transport http pscat https://your-host.example/mcp \
+claude mcp add --transport http pscat-render https://your-host.example/mcp \
   --header "Authorization: Bearer $PSCAT_MCP_TOKEN"
 ```
 
