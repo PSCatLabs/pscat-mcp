@@ -22,6 +22,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use http::{HeaderValue, StatusCode, header};
+use http_body_util::BodyExt as _;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
@@ -184,14 +185,22 @@ pub fn router(
         )
 }
 
+/// Most bytes of an oversized body read and thrown away before answering
+/// `413`, and the longest that may take. Answering while the client is still
+/// uploading makes the server close a connection with unread data, which the
+/// client can see as a TCP reset instead of the `413` (issue #20). Bodies
+/// declared larger than this are refused without reading.
+const DRAIN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const DRAIN_MAX_TIME: Duration = Duration::from_secs(5);
+
 /// Read the whole request body, at most `limit` bytes, before rmcp sees it.
 ///
-/// `413` when it is larger: at once from `Content-Length`, or as soon as a
-/// chunked body (no `Content-Length`) passes the limit. A body cut off or
-/// malformed in transit is a `400`. rmcp reads the whole body anyway, so
-/// buffering it here costs nothing extra. Doing it here means an oversized
-/// chunked body can't reach rmcp, which would turn the length error into a
-/// `500` (issue #10).
+/// Larger bodies get `413`: at once when `Content-Length` is over
+/// [`DRAIN_MAX_BYTES`], otherwise once the body passes `limit`, after the
+/// rest has been drained. This covers chunked bodies (no `Content-Length`)
+/// too, which rmcp would otherwise turn into a `500` (issue #10). A body cut
+/// off or malformed in transit is a `400`. rmcp reads the whole body anyway,
+/// so buffering it here costs nothing extra.
 async fn limit_body(State(limit): State<usize>, req: Request, next: Next) -> Response {
     let too_large = || {
         (
@@ -205,21 +214,47 @@ async fn limit_body(State(limit): State<usize>, req: Request, next: Next) -> Res
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    if declared.is_some_and(|n| n > limit as u64) {
+    if declared.is_some_and(|n| n > DRAIN_MAX_BYTES) {
         return too_large();
     }
-    let (parts, body) = req.into_parts();
-    match http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit)).await {
-        Ok(collected) => {
-            next.run(Request::from_parts(parts, Body::from(collected.to_bytes())))
-                .await
-        }
-        Err(e) if e.is::<http_body_util::LengthLimitError>() => too_large(),
-        Err(e) => {
-            tracing::debug!(error = %e, "reading the request body failed");
-            (StatusCode::BAD_REQUEST, "could not read the request body").into_response()
+    let (parts, mut body) = req.into_parts();
+    let mut buf = Vec::with_capacity(declared.map_or(0, |n| (n as usize).min(limit)));
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(frame) => {
+                let Some(data) = frame.data_ref() else {
+                    continue;
+                };
+                if buf.len() + data.len() > limit {
+                    drain(body, (buf.len() + data.len()) as u64).await;
+                    return too_large();
+                }
+                buf.extend_from_slice(data);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "reading the request body failed");
+                return (StatusCode::BAD_REQUEST, "could not read the request body")
+                    .into_response();
+            }
         }
     }
+    next.run(Request::from_parts(parts, Body::from(buf))).await
+}
+
+/// Read and discard the rest of `body`, up to [`DRAIN_MAX_BYTES`] in total
+/// (`seen` already read) and [`DRAIN_MAX_TIME`].
+async fn drain(mut body: Body, mut seen: u64) {
+    let _ = tokio::time::timeout(DRAIN_MAX_TIME, async {
+        while seen <= DRAIN_MAX_BYTES {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    seen += frame.data_ref().map_or(0, |d| d.len() as u64);
+                }
+                _ => break,
+            }
+        }
+    })
+    .await;
 }
 
 async fn healthz() -> impl IntoResponse {
