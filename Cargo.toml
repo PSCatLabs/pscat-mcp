@@ -18,10 +18,14 @@ name = "pscat-mcp-server"
 path = "src/main.rs"
 
 [dependencies]
-# The renderer. Pinned to an exact commit (tag v0.7.0-rc.4): crates.io only has
-# 0.6.3, which predates `Interp::set_limits` and `Interp::set_read_roots`.
+# The renderer, pinned to a PSCat release tag. This line is the one place the
+# PSCat version is chosen: change it with `scripts/bump-pscat.sh <tag>` or the
+# "Bump PSCat" workflow (see docs/RELEASING.md). Cargo.lock records the exact
+# commit, and build.rs reports the version from Cargo.lock.
+# A git dependency because crates.io only has 0.6.3, which predates
+# `Interp::set_limits` and `Interp::set_read_roots`.
 # `default-features = false` drops the desktop window (winit/softbuffer).
-pscat = { git = "https://github.com/PSCatLabs/pscat", rev = "df39114f1223cf475c0c2350c47d7475274c72ee", default-features = false }
+pscat = { git = "https://github.com/PSCatLabs/pscat", tag = "v0.7.0-rc.4", default-features = false }
 
 rmcp = { version = "3.9.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "signal", "sync", "time", "net"] }

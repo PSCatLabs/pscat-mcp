@@ -1,0 +1,108 @@
+name: Bump PSCat
+
+# Moves the PSCat dependency to a newer release tag, runs the tests, pushes a
+# bump/pscat-<tag> branch and opens a pull request for it. Runs daily (newest
+# PSCat tag, pre-releases included) and on demand. See docs/RELEASING.md.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "PSCat tag, e.g. v0.7.0 (empty: the newest tag)"
+        required: false
+        default: ""
+      release_version:
+        description: "Also set this server's version, e.g. 0.2.0 (empty: leave it)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write        # push the bump branch
+  pull-requests: write   # open the pull request
+  actions: write         # start CI on the branch (see below)
+
+concurrency:
+  group: bump-pscat
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bump
+        id: bump
+        env:
+          TAG: ${{ inputs.tag }}
+          RELEASE: ${{ inputs.release_version }}
+        run: |
+          args=("${TAG:---latest}")
+          if [[ -n "$RELEASE" ]]; then args+=(--release-version "$RELEASE"); fi
+          scripts/bump-pscat.sh "${args[@]}"
+
+      - name: Branch
+        id: branch
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+          RELEASE: ${{ inputs.release_version }}
+        run: |
+          name="bump/pscat-${NEW_TAG}${RELEASE:+-release-$RELEASE}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --heads origin "$name" >/dev/null; then
+            echo "::notice::$name already exists; nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        if: steps.bump.outputs.changed == 'true' && steps.branch.outputs.exists == 'false'
+        run: cargo test --all --locked
+
+      - name: Push and open a pull request
+        if: steps.bump.outputs.changed == 'true' && steps.branch.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          OLD_TAG: ${{ steps.bump.outputs.old_tag }}
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+          OLD_VERSION: ${{ steps.bump.outputs.old_version }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          RELEASE: ${{ inputs.release_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          title="Bump PSCat to $NEW_TAG${RELEASE:+ and release $RELEASE}"
+          git commit -am "$title"
+          git push origin "$BRANCH"
+
+          body=$(cat <<EOF
+          PSCat \`$OLD_TAG\` ($OLD_VERSION) → [\`$NEW_TAG\`](https://github.com/PSCatLabs/pscat/releases/tag/$NEW_TAG) ($NEW_VERSION)${RELEASE:+, pscat-mcp-server version → \`$RELEASE\`}.
+
+          Made by the **Bump PSCat** workflow with \`scripts/bump-pscat.sh\`. \`cargo test --all --locked\` passed in that run.
+
+          After merging, follow docs/RELEASING.md to tag the release.
+          EOF
+          )
+          if gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"; then
+            echo "### Opened a pull request for \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Happens when the repository setting "Allow GitHub Actions to
+            # create and approve pull requests" is off.
+            url="https://github.com/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+            echo "::warning::Could not open the pull request automatically. Open it here: $url"
+            echo "### Branch \`$BRANCH\` pushed. [Open the pull request]($url)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Pushes made with GITHUB_TOKEN do not trigger workflows, but
+          # workflow_dispatch does, so start the checks on the branch.
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run container.yml --ref "$BRANCH"
