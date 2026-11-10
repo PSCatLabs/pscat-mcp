@@ -298,6 +298,55 @@ async fn rmcp_client_with_token_renders_png() {
 
 // ------------------------------------------------ legacy clients (raw HTTP)
 
+/// The current protocol (2026-07-28, SEP-2567): no `initialize`, no session;
+/// each request carries the protocol version and client info in `_meta`.
+#[tokio::test(flavor = "multi_thread")]
+async fn current_protocol_sessionless_call_renders() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let mut call = render_call(7, &solid(0, 0, 1), 32, 20);
+    call["params"]["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    // SEP-2243 standard headers mirror the method and tool name.
+    let send = |token: Option<&'static str>| {
+        let mut req = reqwest::Client::new()
+            .post(srv.mcp())
+            .header("Content-Type", "application/json")
+            .header("Accept", ACCEPT)
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", "tools/call")
+            .header("Mcp-Name", "render_postscript")
+            .body(call.to_string());
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        req.send()
+    };
+    let r = send(Some(TOKEN)).await.expect("request");
+    let status = r.status().as_u16();
+    let ctype = r
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let resp: Value = serde_json::from_str(&r.text().await.expect("body")).expect("json");
+    assert_eq!(status, 200, "{resp}");
+    assert!(ctype.contains("application/json"), "{ctype}");
+    let result = &resp["result"];
+    assert_ne!(result["isError"], true, "{resp}");
+    assert_eq!(result["structuredContent"]["ok"], true, "{resp}");
+    let (w, h, px) = decode_png(image_of(result).expect("image content"));
+    assert_eq!((w, h), (32, 20));
+    assert!(px.iter().all(|p| *p == [0, 0, 255]));
+
+    // Unauthenticated, the same request never reaches the tool.
+    let status = send(None).await.expect("request").status().as_u16();
+    assert_eq!(status, 401);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn legacy_protocol_clients_work_statelessly() {
     let srv = start(real_service(LimitsConfig::default())).await;

@@ -69,7 +69,7 @@ Failures are tool results with `isError: true` and
 
 ## Build
 
-Requires Rust 1.88+ (developed with 1.96) and network access to GitHub for
+Requires Rust 1.89+ (developed with 1.96) and network access to GitHub for
 the PSCat dependency. No C toolchain or system libraries.
 
 ```bash
@@ -250,9 +250,13 @@ control is enforced by PSCat and which by the server.
 * **Argument type errors.** A wrong argument type, such as a negative
   `width`, is reported by rmcp as a text-only tool error without the
   structured envelope.
-* **Client testing.** Tested with the rmcp client (stdio and HTTP) and raw
-  JSON-RPC at protocol versions 2025-03-26 and 2025-06-18. Not yet tested
-  with ChatGPT, Claude, Gemini or Muse clients.
+* **Client testing.** Tested with the rmcp 3.9 client over stdio and HTTP
+  (it negotiates 2025-11-25), and with raw JSON-RPC over stateless HTTP at
+  2025-03-26, 2025-06-18 and 2026-07-28 (sessionless, with `_meta` and the
+  `Mcp-Method`/`Mcp-Name` headers that version requires). Not yet tested
+  with ChatGPT, Claude, Gemini, Muse or MCP Inspector.
+* **`Accept` header.** HTTP clients must accept both `application/json` and
+  `text/event-stream`, as the spec requires. rmcp answers 406 otherwise.
 
 ## Tests
 
