@@ -116,7 +116,12 @@ async fn renders_png_with_the_right_pixels() {
 
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("png header");
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("PNG buffer size fits in memory")
+    ];
     let info = reader.next_frame(&mut buf).expect("png frame");
     assert_eq!((info.width, info.height), (200, 100));
     let channels = info.color_type.samples();

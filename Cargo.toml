@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 tokio-util = "0.7"
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["request-id", "trace", "limit", "util"] }
+tower-http = { version = "0.7", features = ["request-id", "trace", "util"] }
 http = "1"
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -41,8 +41,8 @@ schemars = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 clap = { version = "4", features = ["derive", "env"] }
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 subtle = "2"
 thiserror = "2"
 anyhow = "1"
@@ -53,8 +53,8 @@ libc = "0.2"
 
 [dev-dependencies]
 rmcp = { version = "3.9.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-png = "0.17"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+png = "0.18"
 
 # The interpreter is ~14x slower unoptimized and the tests run real renders.
 [profile.dev.package.pscat]
