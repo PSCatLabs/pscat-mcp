@@ -138,12 +138,14 @@ impl LimitsConfig {
 
     /// Renders running at once.
     pub fn concurrency(&self) -> usize {
-        self.max_concurrent_renders.filter(|n| *n > 0).unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-                .min(4)
-        })
+        self.max_concurrent_renders
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+                    .min(4)
+            })
     }
 
     /// Queue wait before `server_busy`.
@@ -203,7 +205,12 @@ pub struct HttpConfig {
 
     /// Bearer tokens accepted on `/mcp`, comma-separated. Prefer
     /// `--auth-token-file` so tokens stay out of process listings.
-    #[arg(long, env = "PSCAT_MCP_AUTH_TOKENS", hide_env_values = true, value_delimiter = ',')]
+    #[arg(
+        long,
+        env = "PSCAT_MCP_AUTH_TOKENS",
+        hide_env_values = true,
+        value_delimiter = ','
+    )]
     pub auth_tokens: Vec<String>,
 
     /// File holding bearer tokens, one per line (a mounted secret).

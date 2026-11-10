@@ -1,0 +1,67 @@
+%!PS-Adobe-3.0
+%%Title: shapes.ps -- a small PSCat MCP demo
+%%BoundingBox: 0 0 400 300
+%%EndComments
+% Render with: render_postscript { "source": <this file>, "width": 400, "height": 300 }
+% (or `pscat --page 400x300 --png shapes.png examples/shapes.ps`).
+
+% --- background: a soft vertical gradient made of thin bands -------------
+0 1 99 {
+  /i exch def
+  0.93 i 0.0006 mul sub  0.95 i 0.0003 mul sub  1.0 setrgbcolor
+  0 i 3 mul 400 3 rectfill
+} for
+
+% --- helpers --------------------------------------------------------------
+/circle {            % x y r circle -> (path)
+  3 dict begin /r exch def /y exch def /x exch def
+  newpath x r add y moveto x y r 0 360 arc closepath
+  end
+} def
+
+/star {              % x y rOuter rInner points star -> (path)
+  5 dict begin /n exch def /ri exch def /ro exch def /y exch def /x exch def
+  newpath
+  0 1 n 2 mul 1 sub {
+    /k exch def
+    /a k 180 mul n div 90 add def
+    /rr k 2 mod 0 eq { ro } { ri } ifelse def
+    x a cos rr mul add  y a sin rr mul add
+    k 0 eq { moveto } { lineto } ifelse
+  } for
+  closepath
+  end
+} def
+
+/outline { gsave 0.15 0.15 0.25 setrgbcolor 2.5 setlinewidth stroke grestore } def
+
+% --- shapes ---------------------------------------------------------------
+% red circle
+0.90 0.25 0.25 setrgbcolor  90 170 55 circle  gsave fill grestore outline
+
+% green rounded square (corner arcs; x0 y0 x1 y1 r)
+/rrect { 5 dict begin /r exch def /y1 exch def /x1 exch def /y0 exch def /x0 exch def
+  newpath x0 r add y0 moveto
+  x1 r sub y0 r add r 270 360 arc
+  x1 r sub y1 r sub r 0 90 arc
+  x0 r add y1 r sub r 90 180 arc
+  x0 r add y0 r add r 180 270 arc
+  closepath end } def
+160 115 290 245 14 rrect
+0.25 0.70 0.40 setrgbcolor gsave fill grestore outline
+
+% gold star
+0.98 0.78 0.15 setrgbcolor  347 180 46 19 5 star  gsave fill grestore outline
+
+% blue ring inside the square
+0.20 0.45 0.85 setrgbcolor 10 setlinewidth
+newpath 225 180 40 0 360 arc stroke
+
+% --- caption --------------------------------------------------------------
+/Helvetica-Bold findfont 22 scalefont setfont
+0.15 0.15 0.25 setrgbcolor
+(PSCat shapes) dup stringwidth pop 400 exch sub 2 div 50 moveto show
+/Helvetica findfont 11 scalefont setfont
+(circle  /  rounded square  /  star  /  ring) dup stringwidth pop 400 exch sub 2 div 30 moveto show
+
+showpage

@@ -322,8 +322,12 @@ pub fn syntax_scan(source: &[u8]) -> SyntaxScan {
 fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
     let scale = (job.dpi / 72.0) as f32;
     let mut interp = match job.page_points {
-        Some((w, h)) => pscat::Interp::with_page_scaled(w, h, scale)
-            .ok_or_else(|| format!("page {w}x{h} points at {} dpi is not a usable size", job.dpi))?,
+        Some((w, h)) => pscat::Interp::with_page_scaled(w, h, scale).ok_or_else(|| {
+            format!(
+                "page {w}x{h} points at {} dpi is not a usable size",
+                job.dpi
+            )
+        })?,
         None if (job.dpi - 72.0).abs() < f64::EPSILON => pscat::Interp::new(),
         None => {
             let mut interp = pscat::Interp::with_page_scaled(612, 792, scale).ok_or_else(|| {
@@ -435,7 +439,10 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
     result
 }
 
-fn encode(interp: &pscat::Interp, job: &WorkerJob) -> Result<(Vec<Artifact>, usize), WorkerFailure> {
+fn encode(
+    interp: &pscat::Interp,
+    job: &WorkerJob,
+) -> Result<(Vec<Artifact>, usize), WorkerFailure> {
     let pages = interp.pages();
     let max_pages = job.limits.max_pages;
     if pages.len() > max_pages {

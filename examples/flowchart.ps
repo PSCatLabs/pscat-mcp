@@ -1,0 +1,73 @@
+%!PS-Adobe-3.0
+%%Title: flowchart.ps -- a labelled flowchart drawn with PSCat
+%%BoundingBox: 0 0 360 420
+%%EndComments
+% Render with: render_postscript { "source": <this file>, "width": 360, "height": 420 }
+% (or `pscat --page 360x420 --png flowchart.png examples/flowchart.ps`).
+
+/ink   { 0.13 0.16 0.24 setrgbcolor } def
+/boxfill  { 0.86 0.92 1.00 setrgbcolor } def
+/decfill  { 1.00 0.93 0.78 setrgbcolor } def
+/endfill  { 0.84 0.95 0.86 setrgbcolor } def
+
+/Helvetica findfont 12 scalefont setfont
+
+% (text) cx cy ctext : centre a label on (cx, cy)
+/ctext { 3 dict begin /cy exch def /cx exch def /t exch def
+  cx t stringwidth pop 2 div sub  cy 4 sub moveto t show end } def
+
+% (label) cx cy w h fillproc box : rectangle centred on (cx, cy)
+/box { 6 dict begin /fp exch def /h exch def /w exch def /cy exch def /cx exch def /t exch def
+  newpath cx w 2 div sub cy h 2 div sub w h rectpath
+  gsave fp fill grestore ink 1.5 setlinewidth stroke
+  ink t cx cy ctext end } def
+/rectpath { 4 dict begin /h exch def /w exch def /y exch def /x exch def
+  x y moveto w 0 rlineto 0 h rlineto w neg 0 rlineto closepath end } def
+
+% (label) cx cy w h decision : diamond centred on (cx, cy)
+/decision { 5 dict begin /h exch def /w exch def /cy exch def /cx exch def /t exch def
+  newpath cx cy h 2 div add moveto
+  cx w 2 div add cy lineto  cx cy h 2 div sub lineto  cx w 2 div sub cy lineto closepath
+  gsave decfill fill grestore ink 1.5 setlinewidth stroke
+  ink t cx cy ctext end } def
+
+% (label) cx cy w h terminal : rounded "stadium" centred on (cx, cy)
+/terminal { 5 dict begin /h exch def /w exch def /cy exch def /cx exch def /t exch def
+  /r h 2 div def
+  newpath cx w 2 div sub r add cy r 90 270 arc
+  cx w 2 div add r sub cy r -90 90 arc closepath
+  gsave endfill fill grestore ink 1.5 setlinewidth stroke
+  ink t cx cy ctext end } def
+
+% x0 y0 x1 y1 arrow : line with a filled head at (x1, y1)
+/arrow { 6 dict begin /y1 exch def /x1 exch def /y0 exch def /x0 exch def
+  /ang y1 y0 sub x1 x0 sub atan def
+  ink 1.5 setlinewidth newpath x0 y0 moveto x1 y1 lineto stroke
+  gsave x1 y1 translate ang rotate
+    newpath 0 0 moveto -9 4 lineto -9 -4 lineto closepath fill
+  grestore end } def
+
+% --- title ---------------------------------------------------------------
+gsave /Helvetica-Bold findfont 16 scalefont setfont ink
+  (Render request flow) 180 395 ctext grestore
+
+% --- nodes ---------------------------------------------------------------
+(Agent sends PostScript) 150 355 170 30 terminal
+(Validate request)       150 290 150 34 { boxfill } box
+(Within limits?)         150 215 140 60 decision
+(Render in worker)       150 140 150 34 { boxfill } box
+(Return PNG / PDF / SVG) 150 65 170 30 terminal
+(Structured error)       292 215 112 30 { 1.00 0.86 0.86 setrgbcolor } box
+
+% --- edges ---------------------------------------------------------------
+150 340 150 308 arrow
+150 273 150 246 arrow
+150 184 150 158 arrow
+150 123 150  81 arrow
+220 215 235 215 arrow
+
+/Helvetica-Oblique findfont 10 scalefont setfont ink
+(yes) 162 168 moveto show
+(no)  218 222 moveto show
+
+showpage

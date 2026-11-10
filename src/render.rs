@@ -86,7 +86,7 @@ pub struct RenderError {
     pub message: String,
     /// The PostScript error, for `postscript_error` and `limit_exceeded`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub postscript: Option<PsDiagnostic>,
+    pub postscript: Option<Box<PsDiagnostic>>,
     /// Program stdout before the failure, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program_output: Option<String>,
@@ -216,7 +216,10 @@ pub fn validate_request(
     limits: &LimitsConfig,
 ) -> Result<ValidatedRequest, RenderError> {
     if req.source.trim().is_empty() {
-        return Err(RenderError::new(ErrorCode::InvalidRequest, "source is empty"));
+        return Err(RenderError::new(
+            ErrorCode::InvalidRequest,
+            "source is empty",
+        ));
     }
     if req.source.len() > limits.max_source_bytes {
         return Err(RenderError::new(
@@ -364,14 +367,11 @@ impl RenderService {
             None | Some(WorkerFailure::PostScript) => {}
             Some(other) => return Err(failure_to_error(other.clone(), result)),
         }
-        let syntax: SyntaxReport = result
-            .syntax
-            .map(Into::into)
-            .unwrap_or(SyntaxReport {
-                ok: false,
-                tokens: 0,
-                error: Some("the worker returned no syntax scan".into()),
-            });
+        let syntax: SyntaxReport = result.syntax.map(Into::into).unwrap_or(SyntaxReport {
+            ok: false,
+            tokens: 0,
+            error: Some("the worker returned no syntax scan".into()),
+        });
         Ok(ValidationReport {
             valid: syntax.ok && result.ps_error.is_none(),
             syntax,
@@ -463,7 +463,7 @@ fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError
             RenderError {
                 code,
                 message,
-                postscript: Some(diag),
+                postscript: Some(Box::new(diag)),
                 program_output,
             }
         }
@@ -478,9 +478,10 @@ fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError
                  or use svg for vector artwork. No artifact storage is configured, so output is only returned inline"
             ),
         ),
-        WorkerFailure::Encode { message } => {
-            RenderError::new(ErrorCode::WorkerFailed, format!("encoding failed: {message}"))
-        }
+        WorkerFailure::Encode { message } => RenderError::new(
+            ErrorCode::WorkerFailed,
+            format!("encoding failed: {message}"),
+        ),
         WorkerFailure::BadJob { message } => RenderError::new(ErrorCode::WorkerFailed, message),
     }
 }
@@ -502,7 +503,11 @@ mod tests {
             max_source_bytes: 10,
             ..LimitsConfig::default()
         };
-        let code = |r: RenderRequest| validate_request(&r, JobMode::Render, &limits).unwrap_err().code;
+        let code = |r: RenderRequest| {
+            validate_request(&r, JobMode::Render, &limits)
+                .unwrap_err()
+                .code
+        };
         assert_eq!(code(req("")), ErrorCode::InvalidRequest);
         assert_eq!(code(req("01234567890")), ErrorCode::SourceTooLarge);
         assert_eq!(

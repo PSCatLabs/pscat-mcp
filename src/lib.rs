@@ -13,6 +13,7 @@
 
 #![warn(missing_docs)]
 
+pub mod auth;
 pub mod backend;
 pub mod build_info;
 pub mod config;

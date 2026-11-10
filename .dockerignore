@@ -1,0 +1,24 @@
+# Build output and VCS metadata
+target/
+**/target/
+.git/
+.gitignore
+.github/
+
+# Local secrets and editor/OS junk
+.env
+.env.*
+*.local
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Not needed to build the binary
+Dockerfile
+.dockerignore
+scripts/
+examples/
+docs/
+*.md

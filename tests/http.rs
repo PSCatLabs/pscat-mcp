@@ -1,0 +1,621 @@
+//! HTTP transport tests: an in-process server on 127.0.0.1:0 built from
+//! `pscat_mcp::http::router`, rendering with the real worker binary.
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use base64::Engine as _;
+use pscat_mcp::auth::{Authenticator, BearerTokenAuth};
+use pscat_mcp::backend::{BackendFuture, RenderBackend, SubprocessBackend};
+use pscat_mcp::config::{HttpConfig, LimitsConfig, WorkerConfig};
+use pscat_mcp::http::{authenticator, mcp_server_config, router};
+use pscat_mcp::render::RenderService;
+use pscat_mcp::worker::WorkerJob;
+use rmcp::ServiceExt;
+use rmcp::model::CallToolRequestParams;
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
+
+const TOKEN: &str = "test-token-0123456789";
+const ACCEPT: &str = "application/json, text/event-stream";
+
+fn worker_exe() -> std::path::PathBuf {
+    env!("CARGO_BIN_EXE_pscat-mcp-server").into()
+}
+
+fn http_config(bind: IpAddr) -> HttpConfig {
+    HttpConfig {
+        bind,
+        port: 0,
+        auth_tokens: vec![],
+        auth_token_file: None,
+        allow_unauthenticated: false,
+        allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
+        allowed_origins: vec![],
+        shutdown_grace_secs: 2,
+    }
+}
+
+fn real_service(limits: LimitsConfig) -> Arc<RenderService> {
+    pscat_mcp::build_service(
+        limits,
+        &WorkerConfig {
+            worker_exe: Some(worker_exe()),
+        },
+    )
+    .expect("service")
+}
+
+struct TestServer {
+    base: String,
+    service: Arc<RenderService>,
+    ct: CancellationToken,
+}
+
+impl TestServer {
+    fn mcp(&self) -> String {
+        format!("{}/mcp", self.base)
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.ct.cancel();
+    }
+}
+
+async fn start(service: Arc<RenderService>) -> TestServer {
+    let auth: Arc<dyn Authenticator> = Arc::new(BearerTokenAuth::new([TOKEN]));
+    let ct = CancellationToken::new();
+    let cfg = mcp_server_config(
+        &http_config(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        ct.child_token(),
+    );
+    let app = router(service.clone(), auth, cfg);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = ct.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await;
+    });
+    TestServer {
+        base: format!("http://{addr}"),
+        service,
+        ct,
+    }
+}
+
+fn initialize_body(version: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-test", "version": "1.0" }
+        }
+    })
+}
+
+fn render_call(id: u64, source: &str, w: u32, h: u32) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "render_postscript",
+            "arguments": { "source": source, "width": w, "height": h }
+        }
+    })
+}
+
+/// POST a JSON-RPC message; returns status, content type and the JSON-RPC
+/// message (parsed from JSON or from the last SSE `data:` event).
+async fn post(
+    url: &str,
+    token: Option<&str>,
+    protocol_version: Option<&str>,
+    body: &Value,
+) -> (u16, String, Value) {
+    let mut req = reqwest::Client::new()
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", ACCEPT)
+        .body(body.to_string());
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    if let Some(v) = protocol_version {
+        req = req.header("MCP-Protocol-Version", v);
+    }
+    let resp = req.send().await.expect("request");
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let text = resp.text().await.unwrap_or_default();
+    (status, ctype.clone(), parse_body(&ctype, &text))
+}
+
+fn parse_body(ctype: &str, text: &str) -> Value {
+    if ctype.contains("text/event-stream") {
+        // The response is the last event carrying a JSON-RPC result/error.
+        text.lines()
+            .rev()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+            .find(|v| v.get("result").is_some() || v.get("error").is_some())
+            .unwrap_or(Value::Null)
+    } else {
+        serde_json::from_str(text).unwrap_or(Value::String(text.to_string()))
+    }
+}
+
+/// Decode a base64 PNG to (width, height, RGB triplets).
+fn decode_png(b64: &str) -> (u32, u32, Vec<[u8; 3]>) {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .expect("base64");
+    let mut decoder = png::Decoder::new(&bytes[..]);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().expect("png header");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("png frame");
+    let data = &buf[..info.buffer_size()];
+    let px: Vec<[u8; 3]> = match info.color_type {
+        png::ColorType::Rgb => data.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+        png::ColorType::Rgba => data.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect(),
+        png::ColorType::Grayscale => data.iter().map(|&g| [g, g, g]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            data.chunks_exact(2).map(|c| [c[0], c[0], c[0]]).collect()
+        }
+        other => panic!("unexpected PNG color type {other:?}"),
+    };
+    assert_eq!(px.len(), (info.width * info.height) as usize);
+    (info.width, info.height, px)
+}
+
+/// The first image block of a tool result (JSON form).
+fn image_of(result: &Value) -> Option<&str> {
+    result["content"]
+        .as_array()?
+        .iter()
+        .find(|c| c["type"] == "image" && c["mimeType"] == "image/png")
+        .and_then(|c| c["data"].as_str())
+}
+
+fn error_code(result: &Value) -> Option<&str> {
+    result["structuredContent"]["error"]["code"].as_str()
+}
+
+fn solid(r: u8, g: u8, b: u8) -> String {
+    format!("{r} {g} {b} setrgbcolor -10 -10 80 80 rectfill showpage")
+}
+
+// ---------------------------------------------------------------- E: auth
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unauthenticated_requests_never_execute() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let init = initialize_body("2025-06-18");
+    let call = render_call(2, &solid(1, 0, 0), 20, 20);
+
+    for token in [None, Some("wrong-token"), Some("")] {
+        for body in [&init, &call] {
+            let resp = {
+                let mut req = reqwest::Client::new()
+                    .post(srv.mcp())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", ACCEPT)
+                    .body(body.to_string());
+                if let Some(t) = token {
+                    req = req.header("Authorization", format!("Bearer {t}"));
+                }
+                req.send().await.unwrap()
+            };
+            assert_eq!(resp.status(), 401, "token {token:?}");
+            assert_eq!(
+                resp.headers()["www-authenticate"],
+                r#"Bearer realm="pscat-mcp""#
+            );
+            let body: Value = resp.json().await.unwrap();
+            assert!(body["error"].is_string(), "{body}");
+            assert!(!body.to_string().contains("wrong-token"));
+        }
+    }
+    // Basic auth with the right secret is still the wrong scheme.
+    let resp = reqwest::Client::new()
+        .post(srv.mcp())
+        .header("Authorization", format!("Basic {TOKEN}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", ACCEPT)
+        .body(call.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+    assert_eq!(srv.service.counters.rejected.load(Ordering::SeqCst), 0);
+
+    // /healthz needs no auth and carries a request id.
+    let resp = reqwest::get(format!("{}/healthz", srv.base)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.headers().contains_key("x-request-id"));
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body, json!({ "status": "ok" }));
+    // A client-supplied request id is echoed.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/healthz", srv.base))
+        .header("x-request-id", "abc-123")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.headers()["x-request-id"], "abc-123");
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rmcp_client_with_token_renders_png() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(srv.mcp()).auth_header(TOKEN),
+    );
+    let client = ().serve(transport).await.expect("initialize");
+    let info = client.peer_info().expect("server info");
+    let info = serde_json::to_value(&*info).unwrap();
+    eprintln!("negotiated protocolVersion: {}", info["protocolVersion"]);
+
+    let tools = client.list_all_tools().await.expect("list tools");
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(names.contains(&"render_postscript"), "{names:?}");
+
+    let args = json!({ "source": solid(0, 0, 1), "width": 40, "height": 30 });
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("render_postscript")
+                .with_arguments(args.as_object().unwrap().clone()),
+        )
+        .await
+        .expect("call_tool");
+    let result = serde_json::to_value(&result).unwrap();
+    assert_ne!(result["isError"], true, "{result}");
+    let (w, h, px) = decode_png(image_of(&result).expect("image content"));
+    assert_eq!((w, h), (40, 30));
+    assert!(px.iter().all(|p| *p == [0, 0, 255]));
+    client.cancel().await.ok();
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+}
+
+// ------------------------------------------------ legacy clients (raw HTTP)
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_protocol_clients_work_statelessly() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    for version in ["2025-06-18", "2025-03-26"] {
+        let (status, ctype, init) =
+            post(&srv.mcp(), Some(TOKEN), None, &initialize_body(version)).await;
+        assert_eq!(status, 200, "{version}: {init}");
+        assert!(ctype.contains("application/json"), "{version}: {ctype}");
+        assert_eq!(init["result"]["protocolVersion"], version, "{init}");
+        eprintln!(
+            "{version}: initialize -> {ctype}, server {}",
+            init["result"]["serverInfo"]
+        );
+
+        // No session id, no initialized notification: each POST stands alone.
+        for header in [Some(version), None] {
+            let (status, ctype, resp) = post(
+                &srv.mcp(),
+                Some(TOKEN),
+                header,
+                &render_call(2, &solid(0, 1, 0), 24, 16),
+            )
+            .await;
+            assert_eq!(status, 200, "{version} header={header:?}: {resp}");
+            eprintln!("{version} header={header:?}: tools/call -> {ctype}");
+            let result = &resp["result"];
+            assert_ne!(result["isError"], true, "{resp}");
+            let (w, h, px) = decode_png(image_of(result).expect("image"));
+            assert_eq!((w, h), (24, 16));
+            assert!(px.iter().all(|p| *p == [0, 255, 0]));
+        }
+    }
+}
+
+// ----------------------------------------------------------- F: concurrency
+
+/// Wraps the real backend, recording how many jobs run at once.
+struct CountingBackend {
+    inner: SubprocessBackend,
+    current: Arc<AtomicUsize>,
+    max: Arc<AtomicUsize>,
+    delay: Duration,
+}
+
+struct InFlight(Arc<AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl RenderBackend for CountingBackend {
+    fn execute(&self, job: WorkerJob, deadline: Duration) -> BackendFuture<'_> {
+        Box::pin(async move {
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = InFlight(self.current.clone());
+            self.max.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.inner.execute(job, deadline).await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_renders_are_isolated_and_bounded() {
+    let limits = LimitsConfig {
+        max_concurrent_renders: Some(2),
+        ..LimitsConfig::default()
+    };
+    let max = Arc::new(AtomicUsize::new(0));
+    let backend = CountingBackend {
+        inner: SubprocessBackend::new(worker_exe(), limits.clone()),
+        current: Arc::new(AtomicUsize::new(0)),
+        max: max.clone(),
+        delay: Duration::from_millis(300),
+    };
+    let service = Arc::new(RenderService::new(Arc::new(backend), limits));
+    let srv = start(service).await;
+
+    let colors: [[u8; 3]; 6] = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 1, 0],
+        [0, 1, 1],
+    ];
+    let mut tasks = Vec::new();
+    for (i, c) in colors.iter().enumerate() {
+        let url = srv.mcp();
+        let src = solid(c[0], c[1], c[2]);
+        let expect = c.map(|v| v * 255);
+        tasks.push(tokio::spawn(async move {
+            let (status, _, resp) = post(
+                &url,
+                Some(TOKEN),
+                None,
+                &render_call(i as u64 + 10, &src, 50, 50),
+            )
+            .await;
+            (Some(expect), status, resp)
+        }));
+    }
+    let url = srv.mcp();
+    tasks.push(tokio::spawn(async move {
+        let src = "1 0 0 setrgbcolor 0 0 50 50 rectfill nosuchoperator showpage";
+        let (status, _, resp) = post(&url, Some(TOKEN), None, &render_call(99, src, 50, 50)).await;
+        (None, status, resp)
+    }));
+
+    for t in tasks {
+        let (expect, status, resp) = t.await.unwrap();
+        assert_eq!(status, 200, "{resp}");
+        let result = &resp["result"];
+        match expect {
+            Some(rgb) => {
+                assert_ne!(result["isError"], true, "{resp}");
+                let (w, h, px) = decode_png(image_of(result).expect("image"));
+                assert_eq!((w, h), (50, 50));
+                assert!(
+                    px.iter().all(|p| *p == rgb),
+                    "expected every pixel {rgb:?}, first is {:?}",
+                    px[0]
+                );
+            }
+            None => {
+                assert_eq!(result["isError"], true, "{resp}");
+                assert_eq!(error_code(result), Some("postscript_error"), "{resp}");
+                assert!(image_of(result).is_none());
+            }
+        }
+    }
+    assert_eq!(
+        max.load(Ordering::SeqCst),
+        2,
+        "in-flight renders must reach but never exceed 2"
+    );
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 7);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_queue_returns_server_busy() {
+    let srv = start(real_service(LimitsConfig {
+        max_concurrent_renders: Some(1),
+        queue_timeout_ms: 100,
+        render_timeout_ms: 1500,
+        ..LimitsConfig::default()
+    }))
+    .await;
+
+    let url = srv.mcp();
+    let slow = tokio::spawn(async move {
+        post(&url, Some(TOKEN), None, &render_call(1, "{ } loop", 20, 20)).await
+    });
+    // Wait until the slow job holds the only slot.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while srv.service.counters.executed.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "slow job never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let (status, _, resp) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &render_call(2, &solid(1, 0, 0), 20, 20),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(resp["result"]["isError"], true, "{resp}");
+    assert_eq!(error_code(&resp["result"]), Some("server_busy"), "{resp}");
+
+    let (status, _, slow) = slow.await.unwrap();
+    assert_eq!(status, 200);
+    let code = error_code(&slow["result"]);
+    assert!(
+        matches!(code, Some("limit_exceeded") | Some("timeout")),
+        "slow job ended with {code:?}: {slow}"
+    );
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+}
+
+// ------------------------------------------------------ configuration rules
+
+#[test]
+fn unauthenticated_mode_requires_loopback() {
+    let mut open = http_config(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    open.allow_unauthenticated = true;
+    let err = authenticator(&open).err().expect("0.0.0.0 must be refused");
+    assert!(err.to_string().contains("loopback"), "{err}");
+
+    // Refused even when tokens are also configured.
+    open.auth_tokens = vec!["x".into()];
+    assert!(authenticator(&open).is_err());
+
+    let mut local = http_config(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    local.allow_unauthenticated = true;
+    let auth = authenticator(&local).expect("loopback is allowed");
+    assert!(auth.describe().contains("unauthenticated"));
+
+    let v6 = HttpConfig {
+        bind: "::1".parse().unwrap(),
+        ..local.clone()
+    };
+    assert!(authenticator(&v6).is_ok());
+
+    // No tokens and no opt-in: refuse to start.
+    let none = http_config(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let err = authenticator(&none)
+        .err()
+        .expect("no tokens must be refused");
+    assert!(
+        err.to_string().contains("no auth tokens configured"),
+        "{err}"
+    );
+
+    // Tokens from a file.
+    let dir = std::env::temp_dir().join(format!("pscat-mcp-http-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("tokens");
+    std::fs::write(&file, "# comment\n\nfile-token\n").unwrap();
+    let from_file = HttpConfig {
+        auth_token_file: Some(file),
+        ..http_config(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    };
+    let auth = authenticator(&from_file).expect("file tokens");
+    assert!(auth.describe().contains("1 token"), "{}", auth.describe());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_and_origin_checks_reject_after_auth() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let body = initialize_body("2025-06-18").to_string();
+    let send = |host: Option<&'static str>, origin: Option<&'static str>| {
+        let mut req = reqwest::Client::new()
+            .post(srv.mcp())
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", ACCEPT)
+            .body(body.clone());
+        if let Some(h) = host {
+            req = req.header("Host", h);
+        }
+        if let Some(o) = origin {
+            req = req.header("Origin", o);
+        }
+        req.send()
+    };
+    assert_eq!(send(None, None).await.unwrap().status(), 200);
+    assert_eq!(
+        send(Some("evil.example"), None).await.unwrap().status(),
+        403
+    );
+    assert_eq!(
+        send(Some("localhost:1234"), None).await.unwrap().status(),
+        200
+    );
+    assert_eq!(
+        send(None, Some("https://evil.example"))
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+
+    // `*` disables the Host check.
+    let mut any = http_config(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    any.allowed_hosts = vec!["*".into()];
+    let cfg = mcp_server_config(&any, CancellationToken::new());
+    assert!(cfg.allowed_hosts.is_empty());
+    let mut listed = any.clone();
+    listed.allowed_hosts = vec!["pscat.example".into()];
+    listed.allowed_origins = vec!["https://app.example:443".into()];
+    let cfg = mcp_server_config(&listed, CancellationToken::new());
+    assert_eq!(cfg.allowed_hosts, vec!["pscat.example".to_string()]);
+    assert_eq!(
+        cfg.allowed_origins,
+        vec!["https://app.example:443".to_string()]
+    );
+    assert!(!cfg.legacy_session_mode && cfg.json_response);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn body_limit_lets_slightly_large_sources_reach_the_tool() {
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    // Over the source limit but well under the body limit: structured error.
+    let src = format!("% {}\nshowpage", "x".repeat(2000));
+    let (status, _, resp) =
+        post(&srv.mcp(), Some(TOKEN), None, &render_call(1, &src, 10, 10)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        error_code(&resp["result"]),
+        Some("source_too_large"),
+        "{resp}"
+    );
+
+    // Far over the body limit (1024 * 6 + 64 KiB): 413 before rmcp.
+    let huge = format!("% {}\nshowpage", "x".repeat(200 * 1024));
+    let (status, _, _) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &render_call(2, &huge, 10, 10),
+    )
+    .await;
+    assert_eq!(status, 413);
+
+    // An unauthenticated huge body is a 401, not a 413: auth runs first.
+    let (status, _, _) = post(&srv.mcp(), None, None, &render_call(3, &huge, 10, 10)).await;
+    assert_eq!(status, 401);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}

@@ -14,7 +14,11 @@ static ALLOC: pscat::TrackingAllocator = pscat::TrackingAllocator;
 const MAX_WORKER_JOB_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Parser)]
-#[command(name = "pscat-mcp-server", version, about = "MCP server for the PSCat PostScript renderer")]
+#[command(
+    name = "pscat-mcp-server",
+    version,
+    about = "MCP server for the PSCat PostScript renderer"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -86,7 +90,10 @@ fn run(
     fut: impl std::future::Future<Output = anyhow::Result<()>>,
 ) -> std::process::ExitCode {
     telemetry::init(log_format);
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("pscat-mcp-server: cannot start the runtime: {e}");
