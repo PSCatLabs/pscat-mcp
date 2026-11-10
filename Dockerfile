@@ -13,8 +13,9 @@
 # PostScript file access disabled. `--read-only` works without any tmpfs.
 #
 # Platform: this builds for the host architecture (arm64 on Apple Silicon).
-# Cloud Run needs linux/amd64: `docker buildx build --platform linux/amd64 .`
-# or build with Cloud Build.
+# Cloud Run needs linux/amd64. The `Container image` GitHub Actions workflow
+# builds that and publishes ghcr.io/pscatlabs/pscat-mcp. Locally, use
+# `docker buildx build --platform linux/amd64 .`.
 #
 # Health: GET /healthz (unauthenticated) returns 200 when the server is up.
 # There is no Docker HEALTHCHECK because the image has no shell or curl;

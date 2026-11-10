@@ -173,12 +173,25 @@ fn decode_png(b64: &str) -> (u32, u32, Vec<[u8; 3]>) {
     let info = reader.next_frame(&mut buf).expect("png frame");
     let data = &buf[..info.buffer_size()];
     let px: Vec<[u8; 3]> = match info.color_type {
-        png::ColorType::Rgb => data.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-        png::ColorType::Rgba => data.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect(),
+        png::ColorType::Rgb => data
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| [c[0], c[1], c[2]])
+            .collect(),
+        png::ColorType::Rgba => data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| [c[0], c[1], c[2]])
+            .collect(),
         png::ColorType::Grayscale => data.iter().map(|&g| [g, g, g]).collect(),
-        png::ColorType::GrayscaleAlpha => {
-            data.chunks_exact(2).map(|c| [c[0], c[0], c[0]]).collect()
-        }
+        png::ColorType::GrayscaleAlpha => data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| [c[0], c[0], c[0]])
+            .collect(),
         other => panic!("unexpected PNG color type {other:?}"),
     };
     assert_eq!(px.len(), (info.width * info.height) as usize);

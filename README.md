@@ -1,5 +1,8 @@
 # PSCat MCP
 
+[![CI](https://github.com/PSCatLabs/pscat-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/PSCatLabs/pscat-mcp/actions/workflows/ci.yml)
+[![Container image](https://github.com/PSCatLabs/pscat-mcp/actions/workflows/container.yml/badge.svg)](https://github.com/PSCatLabs/pscat-mcp/actions/workflows/container.yml)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets
 AI agents run PostScript programs with the
 [PSCat](https://github.com/PSCatLabs/pscat) interpreter and get the real
@@ -167,8 +170,19 @@ scripts/container-smoke.sh   # build, run hardened, health check, auth, real ren
 ```
 
 The image is distroless, runs as non-root (65532), binds `0.0.0.0:$PORT`
-and needs no writable filesystem. It is about 76 MB. It builds for the host
-architecture; Cloud Run needs `docker buildx build --platform linux/amd64 .`.
+and needs no writable filesystem. It is about 76 MB. A local build targets the
+host architecture.
+
+CI publishes the `linux/amd64` image for Cloud Run to
+`ghcr.io/pscatlabs/pscat-mcp` on every push to `main` and every `v*` tag,
+after the container smoke test passes against that image. Tags:
+
+* `sha-<commit>`
+* `main` and `latest`
+* `<version>`
+* `pscat-<pscat version>`
+
+[`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md) explains how Cloud Run can pull it.
 
 ## Configuration
 
@@ -266,6 +280,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all              # unit + integration; all use the real PSCat worker
 scripts/container-smoke.sh    # needs Docker
 ```
+
+GitHub Actions runs these on every pull request and push to `main`:
+
+* `.github/workflows/ci.yml`:
+  * fmt and clippy;
+  * the test suite on Linux and macOS;
+  * a `cargo check` with the minimum Rust version in `Cargo.toml`.
+* `.github/workflows/container.yml`: the amd64 image plus the smoke test.
 
 | Suite | Covers |
 |---|---|
