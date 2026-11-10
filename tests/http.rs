@@ -166,10 +166,15 @@ fn decode_png(b64: &str) -> (u32, u32, Vec<[u8; 3]>) {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .expect("base64");
-    let mut decoder = png::Decoder::new(&bytes[..]);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes[..]));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().expect("png header");
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("PNG buffer size fits in memory")
+    ];
     let info = reader.next_frame(&mut buf).expect("png frame");
     let data = &buf[..info.buffer_size()];
     let px: Vec<[u8; 3]> = match info.color_type {

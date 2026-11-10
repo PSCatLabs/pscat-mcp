@@ -107,7 +107,12 @@ fn png_pixel(png_bytes: &[u8], x: u32, y: u32) -> (u32, u32, [u8; 4]) {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().expect("png header");
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("PNG buffer size fits in memory")
+    ];
     let info = reader.next_frame(&mut buf).expect("png frame");
     let channels = info.color_type.samples();
     let i = (y as usize * info.width as usize + x as usize) * channels;
