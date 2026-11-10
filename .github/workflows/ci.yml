@@ -23,8 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Lint with the compiler the Dockerfile ships (RUST_IMAGE), so new
+      # lints in a later stable release cannot turn main red unannounced.
+      # The test matrix below stays on stable as the early warning.
+      - id: rust
+        run: echo "version=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9.]*\)-.*/\1/p' Dockerfile)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check

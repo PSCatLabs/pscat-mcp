@@ -53,6 +53,7 @@ jobs:
             type=raw,value=pscat-${{ steps.pscat.outputs.version }},enable=${{ github.event_name != 'pull_request' }}
           labels: |
             org.opencontainers.image.title=pscat-mcp-server
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
             io.pscat.renderer.version=${{ steps.pscat.outputs.version }}
 
       - name: Build (linux/amd64)
