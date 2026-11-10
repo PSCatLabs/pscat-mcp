@@ -94,11 +94,15 @@ cargo build --release
 target/release/pscat-mcp-server serve-stdio
 ```
 
-Logs go to stderr. Stdout carries only MCP messages. Claude Code:
+Logs go to stderr. Stdout carries only MCP messages. Claude Code (the name
+`pscat-render` avoids a clash with PSCat's own `pscat` plugin):
 
 ```bash
-claude mcp add pscat -- /absolute/path/to/target/release/pscat-mcp-server serve-stdio
+claude mcp add pscat-render -- /absolute/path/to/target/release/pscat-mcp-server serve-stdio
 ```
+
+[`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md) walks through testing with
+Claude Code and Codex, over stdio and HTTP.
 
 or in a client's JSON configuration (Claude Desktop, Cursor, and others):
 
@@ -140,7 +144,7 @@ Client configuration for a remote server:
 ```
 
 ```bash
-claude mcp add --transport http pscat https://your-host.example/mcp \
+claude mcp add --transport http pscat-render https://your-host.example/mcp \
   --header "Authorization: Bearer $PSCAT_MCP_TOKEN"
 ```
 
@@ -268,9 +272,6 @@ control is enforced by PSCat and which by the server.
 * **`validate_postscript` executes the program.** PSCat has no separate
   static checker beyond its tokenizer, so validation runs the program under
   the same limits.
-* **Argument type errors.** A wrong argument type, such as a negative
-  `width`, is reported by rmcp as a text-only tool error without the
-  structured envelope.
 * **Client testing.** Tested with the rmcp 3.9 client over stdio and HTTP
   (it negotiates 2025-11-25), and with raw JSON-RPC over stateless HTTP at
   2025-03-26, 2025-06-18 and 2026-07-28 (sessionless, with `_meta` and the
