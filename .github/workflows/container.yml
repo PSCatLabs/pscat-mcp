@@ -55,6 +55,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.pscat.outputs.image }}
+          # `latest` only from main (rule below), not also from v* tags.
+          flavor: |
+            latest=false
           tags: |
             type=sha,format=long
             type=ref,event=branch

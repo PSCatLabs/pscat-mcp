@@ -28,6 +28,8 @@ There is deliberately no build argument or environment variable that overrides t
    - Run it now from the Actions tab or with `gh workflow run bump-pscat.yml -f tag=v0.7.0 -f release_version=0.2.0`. Both inputs are optional: with no `tag` it uses the newest tag, and with no `release_version` the server's version stays as it is.
    - Locally: `scripts/bump-pscat.sh v0.7.0 --release-version 0.2.0 --test`. Then commit on a branch and open a pull request.
 
+   The daily run follows PSCat **pre-release** tags too (`v0.7.0-rc.N`), and it doesn't change the server's version. Before merging a scheduled bump that you want to release, set the version: re-run the workflow with `release_version`, or push a commit to the bump branch with `scripts/bump-pscat.sh --latest --release-version X.Y.Z`. The tag check in step 3 rejects a release whose tag doesn't match `Cargo.toml`.
+
    The workflow runs `cargo test --all --locked`, pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request. It also starts CI and the container build on that branch: pushes made with the workflow token don't trigger workflows on their own, so it starts them with `workflow_dispatch`.
 
    If the repository setting *Settings → Actions → General → Allow GitHub Actions to create and approve pull requests* is off, the workflow can't open the pull request. It pushes the branch and puts an "Open the pull request" link in the run summary instead.

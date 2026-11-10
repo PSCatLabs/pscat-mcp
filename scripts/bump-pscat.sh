@@ -87,16 +87,18 @@ if [[ "$new_tag" != "$old_tag" && $allow_downgrade -eq 0 ]]; then
   fi
 fi
 
-changed=false
+before="$(cat Cargo.toml Cargo.lock | git hash-object --stdin)"
 if [[ "$new_tag" == "$old_tag" ]]; then
   echo "PSCat is already pinned to $old_tag ($old_version)."
 else
   sed -i.bak "s|^\(pscat = { git = \"[^\"]*\", tag = \"\)[^\"]*\"|\1$new_tag\"|" Cargo.toml
   rm -f Cargo.toml.bak
-  # Re-resolves only pscat; other locked dependencies stay as they are
-  # unless the new PSCat requires newer ones.
-  cargo update -p pscat
-  changed=true
+  # Re-resolve only pscat. If the new PSCat needs newer versions of shared
+  # dependencies, fall back to also updating pscat's own dependency tree.
+  if ! cargo update -p pscat; then
+    echo "cargo update -p pscat failed; retrying with --recursive" >&2
+    cargo update -p pscat --recursive
+  fi
 fi
 new_version="$(lock_version)"
 
@@ -112,8 +114,12 @@ open(p, "w").write(re.sub(r"(?m)^version = \".*\"", "version = \"%s\"" % v, s, c
 ' "$release_version"
   grep -q "^version = \"$release_version\"" Cargo.toml || { echo "could not set the package version" >&2; exit 1; }
   cargo metadata --format-version 1 >/dev/null   # refresh the root entry in Cargo.lock
-  changed=true
 fi
+
+# "changed" means the files changed, whatever options were given.
+after="$(cat Cargo.toml Cargo.lock | git hash-object --stdin)"
+changed=false
+[[ "$before" == "$after" ]] || changed=true
 
 echo "PSCat: $old_tag ($old_version) -> $new_tag ($new_version)"
 [[ -z "$release_version" ]] || echo "pscat-mcp-server version: $release_version"
