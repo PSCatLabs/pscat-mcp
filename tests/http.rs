@@ -805,3 +805,59 @@ async fn chunked_body_over_the_limit_is_413_and_never_renders() {
     assert_eq!(post_chunked(&srv.base, body.as_bytes()).await, 413);
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
 }
+
+/// A client that is still uploading an oversized body gets the 413, not a
+/// connection reset: the server drains moderately oversized bodies before
+/// answering (issue #20). Repeated because the failure was a race.
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_bodies_get_a_clean_413_every_time() {
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    // About 3x the body limit, well under the drain cap.
+    let huge = format!("% {}\nshowpage", "x".repeat(200 * 1024));
+    let body = render_call(1, &huge, 10, 10);
+    for i in 0..25 {
+        let (status, _, _) = post(&srv.mcp(), Some(TOKEN), None, &body).await;
+        assert_eq!(status, 413, "Content-Length request {i}");
+        assert_eq!(
+            post_chunked(&srv.base, body.to_string().as_bytes()).await,
+            413
+        );
+    }
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+/// A declared length beyond the drain cap is refused without reading.
+#[tokio::test(flavor = "multi_thread")]
+async fn huge_declared_length_is_refused_unread() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let addr = srv.base.trim_start_matches("http://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Type: application/json\r\nAccept: {ACCEPT}\r\n\
+         Content-Length: 1000000000\r\n\r\n"
+    );
+    s.write_all(head.as_bytes()).await.expect("headers");
+    // No body is sent: the answer must not wait for one. Read until the
+    // status line is complete (or EOF).
+    let mut response = Vec::new();
+    let read_status_line = async {
+        let mut chunk = [0u8; 256];
+        while !response.windows(2).any(|w| w == b"\r\n") {
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read_status_line)
+        .await
+        .expect("answered without the body");
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 413"), "{text}");
+}
