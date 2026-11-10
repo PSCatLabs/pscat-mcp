@@ -23,6 +23,11 @@ This document lists what that deployment must get right for this image.
   alternative is to copy the image into a standard Artifact Registry
   repository (`docker pull`, `docker tag`, `docker push`). That setup
   belongs in `pscat-cloud`.
+* A new GHCR package is private. Do one of these:
+  * make it public: *Package settings → Change visibility*, matching the
+    public repository;
+  * keep it private, and give the remote repository a GitHub token with
+    `read:packages`, stored in Secret Manager.
 * To build locally for Cloud Run, run
   `docker buildx build --platform linux/amd64 .`. The local smoke test
   builds for the host architecture.

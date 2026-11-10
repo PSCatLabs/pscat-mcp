@@ -546,6 +546,23 @@ async fn reports_renderer_info() {
         ]
     );
     assert_eq!(s["renderer"]["engine"], "pscat");
+    // Both come from Cargo.lock's pscat entry (build.rs), whatever the pin.
+    let lock = include_str!("../Cargo.lock");
+    let entry = lock
+        .split("[[package]]")
+        .find(|p| p.contains("\nname = \"pscat\"\n"))
+        .expect("pscat in Cargo.lock");
+    let field = |k: &str| {
+        entry
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{k} = \"")))
+            .map(|v| v.trim_end_matches('"').to_string())
+            .unwrap()
+    };
+    assert_eq!(s["renderer"]["version"], field("version"));
+    let rev = s["renderer"]["revision"].as_str().expect("git revision");
+    assert_eq!(rev.len(), 40, "{rev}");
+    assert!(field("source").ends_with(&format!("#{rev}")));
     assert_eq!(s["server_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(s["limits"]["max_source_bytes"], 256 * 1024);
     assert_eq!(s["limits"]["max_side_px"], 8000);

@@ -22,19 +22,26 @@ image-generation model.
 
 ## Relationship to PSCat
 
-PSCat (`PSCatLabs/pscat`) is the renderer. This repository does not change
-it; it depends on PSCat's Rust library at an exact commit:
+PSCat (`PSCatLabs/pscat`) is the renderer. This repository doesn't change
+it; it depends on PSCat's Rust library at a release tag:
 
 | | |
 |---|---|
 | Crate | `pscat` 0.7.0-rc.4 (`default-features = false`) |
-| Source | `https://github.com/PSCatLabs/pscat` |
-| Commit | `df39114f1223cf475c0c2350c47d7475274c72ee` (tag `v0.7.0-rc.4`) |
+| Source | `https://github.com/PSCatLabs/pscat`, tag `v0.7.0-rc.4` |
+| Commit | `df39114f1223cf475c0c2350c47d7475274c72ee` (recorded in `Cargo.lock`) |
 
-A git dependency is used because crates.io only has 0.6.3, which lacks the
-`Interp::set_limits` and `Interp::set_read_roots` APIs this server relies
-on. The running version is reported by `get_renderer_info` and in every
-render result.
+It is a git dependency because crates.io only has 0.6.3, which lacks the
+`Interp::set_limits` and `Interp::set_read_roots` APIs this server relies on.
+`get_renderer_info` and every render result report the running version.
+
+pscat-mcp makes a release after each PSCat release.
+
+* `scripts/bump-pscat.sh <tag>` or the **Bump PSCat** workflow moves the pin.
+  The workflow runs daily and on demand, and opens a pull request.
+* Tagging `v<version>` publishes the image.
+
+The steps are in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 PSCat also ships its own `pscat-mcp` binary (a hand-written stdio server
 around the `pscat` CLI with more art-oriented tools). This project is the
