@@ -439,6 +439,10 @@ async fn argument_type_errors_get_the_structured_envelope() {
         ),
         ("render_postscript", json!({"format": "png"})),
         ("validate_postscript", json!({"source": 42})),
+        (
+            "render_postscript",
+            json!({"source": "showpage", "width": "x".repeat(100_000)}),
+        ),
     ];
     for (tool, args) in cases {
         let r = call(&client, tool, args.clone()).await;
@@ -450,6 +454,7 @@ async fn argument_type_errors_get_the_structured_envelope() {
         assert_eq!(s["renderer"]["engine"], "pscat");
         let message = s["error"]["message"].as_str().unwrap();
         assert!(message.starts_with("invalid arguments:"), "{message}");
+        assert!(message.chars().count() < 400, "detail not truncated");
         assert!(text_of(&r).contains("invalid_request"), "{}", text_of(&r));
         assert_conforms(&output_schemas[tool], s);
     }

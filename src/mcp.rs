@@ -593,9 +593,16 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
     else {
         return result;
     };
+    // serde echoes the offending value back; keep a huge one out of the reply.
+    const MAX_DETAIL_CHARS: usize = 300;
+    let detail = detail.trim();
+    let detail = match detail.char_indices().nth(MAX_DETAIL_CHARS) {
+        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        None => detail.to_string(),
+    };
     let err = RenderError {
         code: ErrorCode::InvalidRequest,
-        message: format!("invalid arguments: {}", detail.trim()),
+        message: format!("invalid arguments: {detail}"),
         postscript: None,
         program_output: None,
     };
