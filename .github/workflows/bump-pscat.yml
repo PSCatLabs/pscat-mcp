@@ -5,7 +5,7 @@ name: Bump PSCat
 # PSCat tag, pre-releases included) and on demand. See docs/RELEASING.md.
 #
 # GitHub holds the checks on a pull request opened by this workflow until a
-# maintainer clicks "Approve workflows to run" on it. That is the review gate;
+# maintainer approves the workflows awaiting approval on the PR page. That is the review gate;
 # main's branch protection requires those checks before merging.
 
 on:
@@ -92,7 +92,7 @@ jobs:
 
           Made by the **Bump PSCat** workflow with \`scripts/bump-pscat.sh\`. \`cargo test --all --locked\` passed in that run.
 
-          **To run the required checks, click "Approve workflows to run" below.** GitHub holds checks on pull requests opened by a workflow. After merging, follow docs/RELEASING.md to tag the release.
+          **To run the required checks, approve the workflows awaiting approval (banner near the merge box).** GitHub holds checks on pull requests opened by a workflow. After merging, follow docs/RELEASING.md to tag the release.
           EOF
           )
           if pr_url=$(gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"); then

@@ -32,7 +32,9 @@ There is deliberately no build argument or environment variable that overrides t
 
    The workflow runs `cargo test --all --locked`, pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request as `github-actions[bot]`.
 
-   **Approve the checks.** GitHub holds the workflows of a pull request opened by a workflow. Open the pull request and click **Approve workflows to run**. The five required checks then run: fmt + clippy, tests on Linux and macOS, MSRV, and the amd64 image with the smoke test.
+   **Approve the checks.** GitHub holds the workflows of a pull request opened by a workflow. Open the pull request and approve the workflows awaiting approval, using the banner and button near the merge box. The five required checks then run: fmt + clippy, tests on Linux and macOS, MSRV, and the amd64 image with the smoke test.
+
+   The same setting also lets workflows *approve* pull requests. That is harmless while `main` requires no approving reviews. If you ever require one, a workflow could satisfy it, so revisit the setting then.
 
    The workflow can open pull requests only while *Allow GitHub Actions to create and approve pull requests* is on, both in the organization's and the repository's *Settings → Actions → General*. If either is off, it pushes the branch and puts an "Open the pull request" link in the run summary. A pull request you open from that link runs its checks without approval.
 
