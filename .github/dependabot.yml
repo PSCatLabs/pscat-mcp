@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # PSCat moves only through the Bump PSCat workflow (docs/RELEASING.md).
+    ignore:
+      - dependency-name: pscat
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
