@@ -1,6 +1,6 @@
 [package]
 name = "pscat-mcp-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 description = "A Model Context Protocol server that renders PostScript with the PSCat interpreter"
