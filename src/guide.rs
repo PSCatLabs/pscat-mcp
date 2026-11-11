@@ -44,7 +44,8 @@ const SOURCE_JSON: &str = include_str!("../guide/SOURCE.json");
 pub const URI_PREFIX: &str = "pscat://guide/";
 /// MIME type of every guide resource.
 pub const MIME_TYPE: &str = "text/markdown";
-/// Longest value accepted for one prompt argument.
+/// Default longest value of one prompt argument
+/// (`PSCAT_MCP_MAX_PROMPT_ARGUMENT_BYTES`).
 pub const MAX_PROMPT_ARGUMENT_BYTES: usize = 8192;
 
 /// The tools of the PSCat plugin's own MCP server (`pscat-mcp`, the one the
@@ -126,6 +127,8 @@ pub struct ServerFacts {
     pub render_arguments: Vec<String>,
     /// The render deadline, in milliseconds.
     pub render_timeout_ms: u64,
+    /// Longest value of one prompt argument, in bytes.
+    pub max_prompt_argument_bytes: usize,
 }
 
 impl ServerFacts {
@@ -147,6 +150,7 @@ struct Doc {
 #[derive(Debug, Clone)]
 pub struct Guide {
     docs: Vec<Doc>,
+    max_argument_bytes: usize,
 }
 
 /// One prompt: its definition and the document it carries.
@@ -232,7 +236,10 @@ impl Guide {
                 served: format!("{}{text}", note(path, facts)),
             })
             .collect();
-        Guide { docs }
+        Guide {
+            docs,
+            max_argument_bytes: facts.max_prompt_argument_bytes,
+        }
     }
 
     fn doc(&self, path: &str) -> Option<&Doc> {
@@ -311,7 +318,7 @@ impl Guide {
                 Some(json!({ "name": name })),
             )
         })?;
-        let args = PromptArgs::parse(def, arguments)?;
+        let args = PromptArgs::parse(def, arguments, self.max_argument_bytes)?;
         let task = match def.name {
             "diagram" => diagram_task(&args)?,
             "generative_art" => art_task(&args)?,
@@ -468,12 +475,16 @@ fn note(path: &str, facts: &ServerFacts) -> String {
 }
 
 /// A prompt's arguments, checked: only declared names, string values (an
-/// integer is accepted for `seed`), each at most
-/// [`MAX_PROMPT_ARGUMENT_BYTES`]. Empty values count as absent.
+/// integer is accepted for `seed`), each at most `max` bytes. Empty values
+/// count as absent.
 struct PromptArgs(Vec<(&'static str, String)>);
 
 impl PromptArgs {
-    fn parse(def: &PromptDef, arguments: Option<&JsonObject>) -> Result<Self, ErrorData> {
+    fn parse(
+        def: &PromptDef,
+        arguments: Option<&JsonObject>,
+        max: usize,
+    ) -> Result<Self, ErrorData> {
         let mut out = Vec::new();
         for (key, value) in arguments.into_iter().flatten() {
             let Some((name, _)) = def.arguments.iter().find(|(n, _)| n == key) else {
@@ -490,11 +501,11 @@ impl PromptArgs {
                 Value::Null => continue,
                 _ => return Err(bad_argument(def.name, key, "must be a string".into())),
             };
-            if text.len() > MAX_PROMPT_ARGUMENT_BYTES {
+            if text.len() > max {
                 return Err(bad_argument(
                     def.name,
                     key,
-                    format!("longer than {MAX_PROMPT_ARGUMENT_BYTES} bytes"),
+                    format!("longer than {max} bytes"),
                 ));
             }
             if !text.is_empty() {
@@ -657,6 +668,7 @@ mod tests {
             tools: vec!["render_postscript".into(), "validate_postscript".into()],
             render_arguments: vec!["source".into(), "bands".into()],
             render_timeout_ms: 20_000,
+            max_prompt_argument_bytes: MAX_PROMPT_ARGUMENT_BYTES,
         }
     }
 

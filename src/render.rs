@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -58,7 +58,7 @@ pub struct ValidatedRequest {
 }
 
 /// Stable error codes. Clients may match on these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// Missing or malformed argument.
@@ -160,6 +160,8 @@ pub struct RenderOutput {
     pub elapsed_ms: u64,
     /// Time including process start and encoding.
     pub wall_ms: u64,
+    /// What a review sheet holds, for `review_sheet`.
+    pub sheet: Option<crate::sheet::SheetReport>,
 }
 
 /// Diagnostics from `validate`.
@@ -327,7 +329,10 @@ pub struct Counters {
     pub rejected: AtomicU64,
     /// Jobs handed to the backend.
     pub executed: AtomicU64,
-    /// Jobs that hit the external deadline.
+    /// Jobs that ran out of time: killed at the external deadline, or a
+    /// review sheet that stopped itself at its own deadline in the worker
+    /// (`timeout`, `error.input.code` `deadline`). Both are a `timeout` to
+    /// the client.
     pub timed_out: AtomicU64,
 }
 
@@ -389,6 +394,7 @@ pub fn validate_request(
             limits: interp_limits(limits),
             generate: None,
             decided_height: None,
+            sheet: None,
         },
     })
 }
@@ -404,16 +410,27 @@ pub fn validate_generate(
     let format = parse_format(req.format.as_deref())?;
     // A fixed page is checked whole. When the generator decides the height,
     // the width is checked as a page one pixel tall (the least a page can
-    // be) and the worker checks the whole page before it allocates it.
-    let (page_px, page_points, decided_height) = match plan.page {
+    // be) and the worker checks the whole page before it allocates it. A
+    // sheet's plan has checked the sheet's own budgets.
+    let (page_px, page_points, decided_height, sheet) = match plan.page {
         PlannedPage::Fixed { page_points } => (
             check_page(page_points, plan.dpi, limits)?,
             Some(page_points),
             None,
+            None,
         ),
         PlannedPage::FixedWidth(budget) => {
             let px = check_page((budget.width_points, 1), plan.dpi, limits)?;
-            (px, None, Some(budget))
+            (px, None, Some(budget), None)
+        }
+        PlannedPage::Sheet { bound_px, budget } => {
+            if format != OutputFormat::Png {
+                return Err(RenderError::new(
+                    ErrorCode::UnsupportedFormat,
+                    "a review sheet is a PNG",
+                ));
+            }
+            (bound_px, None, None, Some(budget))
         }
     };
     Ok(ValidatedRequest {
@@ -428,6 +445,7 @@ pub fn validate_generate(
             halftone: false,
             limits: interp_limits(limits),
             generate: Some(req.job.clone()),
+            sheet,
         },
     })
 }
@@ -544,8 +562,20 @@ impl RenderService {
     async fn render_job(&self, job: WorkerJob) -> Result<RenderOutput, RenderError> {
         let format = job.format;
         let started = Instant::now();
-        let result = self.run(job).await?;
+        // A review sheet's deadline covers all of its cells.
+        let deadline = if job.sheet.is_some() {
+            self.limits.sheet_timeout()
+        } else {
+            self.limits.render_timeout()
+        };
+        let result = self.run(job, deadline).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
+        if let Some(WorkerFailure::Generate(f)) = &result.failure
+            && f.code == crate::generate::GenerateErrorCode::Timeout
+        {
+            self.counters.timed_out.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(wall_ms, "a review sheet ran out of its time in the worker");
+        }
         if let Some(failure) = result.failure.clone() {
             return Err(failure_to_error(failure, result, format));
         }
@@ -564,6 +594,7 @@ impl RenderService {
             steps_used: result.steps_used,
             elapsed_ms: result.elapsed_ms,
             wall_ms,
+            sheet: result.sheet,
         })
     }
 
@@ -574,7 +605,9 @@ impl RenderService {
             ..RenderRequest::default()
         };
         let validated = self.check(&req, JobMode::Validate)?;
-        let result = self.run(validated.job).await?;
+        let result = self
+            .run(validated.job, self.limits.render_timeout())
+            .await?;
         match &result.failure {
             None | Some(WorkerFailure::PostScript) => {}
             Some(other) => {
@@ -623,8 +656,9 @@ impl RenderService {
             limits: interp_limits(&self.limits),
             generate: None,
             decided_height: None,
+            sheet: None,
         };
-        let result = self.run(job).await?;
+        let result = self.run(job, self.limits.render_timeout()).await?;
         if let Some(failure) = result.failure.clone() {
             return Err(failure_to_error(failure, result, OutputFormat::Png));
         }
@@ -657,7 +691,9 @@ impl RenderService {
         })
     }
 
-    async fn run(&self, job: WorkerJob) -> Result<WorkerResult, RenderError> {
+    /// Run `job` on the backend in a render slot, killing it after
+    /// `deadline`.
+    async fn run(&self, job: WorkerJob, deadline: Duration) -> Result<WorkerResult, RenderError> {
         let permit = tokio::time::timeout(
             self.limits.queue_timeout(),
             self.slots.clone().acquire_owned(),
@@ -678,10 +714,12 @@ impl RenderService {
         // One line per job handed to a worker; the server-layer evals count
         // these to assert how many renders a scenario executed.
         tracing::info!(source_bytes = source_len, generator, "render started");
-        let outcome = self
-            .backend
-            .execute(job, self.limits.render_timeout())
-            .await;
+        let what = if job.sheet.is_some() {
+            "the sheet"
+        } else {
+            "the render"
+        };
+        let outcome = self.backend.execute(job, deadline).await;
         drop(permit);
         match outcome {
             Ok(r) => {
@@ -701,8 +739,8 @@ impl RenderService {
                 Err(RenderError::new(
                     ErrorCode::Timeout,
                     format!(
-                        "the render ran past {} ms and was stopped",
-                        self.limits.render_timeout_ms
+                        "{what} ran past {} ms and was stopped",
+                        deadline.as_millis()
                     ),
                 ))
             }

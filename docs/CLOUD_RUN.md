@@ -53,12 +53,24 @@ This document lists what that deployment must get right for this image.
   `PSCAT_MCP_QUEUE_TIMEOUT_MS`, then get `server_busy`.
 * **Memory.** About `max_concurrent_renders × (max_memory + 300 MiB)` plus
   50 MiB for the server. With the defaults and 2 renders: 2 GiB. Lower
-  `PSCAT_MCP_MAX_MEMORY_BYTES` for smaller instances.
+  `PSCAT_MCP_MAX_MEMORY_BYTES` for smaller instances. A `review_sheet` is one
+  render slot and fits the same figure at the default sheet size: while a
+  cell runs, its worker holds the cell's interpreter (as a render does: its
+  page and up to `max_memory` of growth), plus the sheet's canvas (4 bytes a
+  pixel, 64 MB at the default 16,000,000 sheet pixels) and the label strips
+  (about 10 MB at most); once the cells are done, it holds the canvas and
+  up to two more copies of it while the PNG is encoded. A cell's memory
+  limit counts only its own program's heap growth, so the canvas never
+  makes a cell fail. Raising `PSCAT_MCP_MAX_SHEET_PIXELS` (at most
+  64,000,000) adds 4 bytes a sheet pixel above 16,000,000 to the figure (at
+  64,000,000: about 200 MB more per sheet). The worker's address-space
+  limit on Linux, `max_memory + 1 GiB` by default, covers it either way.
 * **CPU.** One vCPU per concurrent render. Rendering is CPU-bound and
   single-threaded.
-* **Request timeout.** The Cloud Run request timeout must exceed
-  `PSCAT_MCP_RENDER_TIMEOUT_MS` + `PSCAT_MCP_QUEUE_TIMEOUT_MS` (30 s by
-  default). 60 s is a good default.
+* **Request timeout.** The Cloud Run request timeout must be more than
+  max(`PSCAT_MCP_RENDER_TIMEOUT_MS`, `PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) +
+  `PSCAT_MCP_QUEUE_TIMEOUT_MS` (30 s by default: the sheet deadline
+  defaults to the render timeout). 60 s is a good default.
 * **CPU allocation.** Keep "CPU only during requests" (the default). The
   server does no background work.
 

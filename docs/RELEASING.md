@@ -63,9 +63,6 @@ There is deliberately no build argument or environment variable that overrides t
 
 ## When PSCat changes its library API
 
-The bump compiles against the new PSCat, so an API change shows up as a failed **Bump PSCat** run. pscat-mcp still uses two PSCat modules that are not part of its documented API. Check these first:
+The bump compiles against the new PSCat, so an API change shows up as a failed **Bump PSCat** run. pscat-mcp uses several PSCat modules that are not part of its documented API (`lexer`, `gfx`, `halftone`, `png`, `chalk`, `pdf`, `capabilities`, `contact_sheet`). Every call to them is in `src/pscat_extras.rs`, whose module documentation lists them; check that file first. They are tracked in PSCatLabs/pscat#1098 (and PSCatLabs/pscat#1096 for the lexer, PSCatLabs/pscat#1097 for `PageSizeSource`). When those issues land, switch to the public APIs.
 
-- `pscat::lexer`, in `src/worker.rs` (`syntax_scan`). Tracked in PSCatLabs/pscat#1096.
-- `pscat::gfx::PageSizeSource`, in `src/worker.rs` (`configure`). Tracked in PSCatLabs/pscat#1097.
-
-When those issues land, switch to the public APIs.
+**tiny-skia.** `src/pscat_extras.rs` names PSCat's raster type, `tiny_skia::Pixmap`, for the review sheet. PSCat does not re-export tiny-skia, so pscat-mcp depends on it directly, at the version PSCat uses (`tiny-skia = "0.12"` in `Cargo.toml`). A Bump PSCat pull request must keep the two on the same version: if PSCat moves to another tiny-skia, the build fails with mismatched `Pixmap` types, and `cargo tree -d` lists two copies of `tiny-skia`. Change the version in `Cargo.toml` to PSCat's and check that `cargo tree -d` lists one.

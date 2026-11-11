@@ -1,0 +1,407 @@
+{
+  "id": "review-sheet",
+  "title": "Scenario 9: two logo candidates at 128 px, 32 px and 32 px shown at 4x on one review sheet; a failing cell drawn with its error, a runaway cell stopped at its own limit, and budgets refused before execution",
+  "origin": "examples/agent-scenarios.md section 9; tests/review_sheet.rs",
+  "server_env": {
+    "PSCAT_MCP_MAX_STEPS": "1000000"
+  },
+  "steps": [
+    {
+      "label": "two logos, three sizes each: a 363x396 sheet",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "0.85 0.2 0.2 setrgbcolor 32 32 26 0 360 arc fill 1 setgray 32 32 12 0 360 arc fill showpage",
+            "label": "ring"
+          },
+          {
+            "source": "0.2 0.3 0.8 setrgbcolor 8 8 48 48 rectfill 1 setgray 20 20 24 24 rectfill showpage",
+            "label": "square"
+          }
+        ],
+        "width": 64,
+        "height": 64,
+        "dpi": [
+          144,
+          36,
+          {
+            "dpi": 36,
+            "zoom": 4
+          }
+        ]
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "width_px": 363,
+          "height_px": 396,
+          "failed_cells": 0,
+          "cells.0.width_px": 128,
+          "cells.0.height_px": 128,
+          "cells.0.x": 13,
+          "cells.0.y": 39,
+          "cells.1.width_px": 32,
+          "cells.1.zoom": 1,
+          "cells.2.width_px": 32,
+          "cells.2.zoom": 4,
+          "cells.2.x": 222,
+          "cells.5.row": 1,
+          "cells.5.column": 2,
+          "cells.5.ok": true,
+          "renderer.engine": "pscat"
+        },
+        "text_contains": [
+          "6 cells (0 failed)",
+          "row 0 column 2: 36 dpi, 32x32 px, shown at 4x"
+        ],
+        "png": {
+          "width": 363,
+          "height": 396,
+          "pixels": [
+            {
+              "x": 3,
+              "y": 3,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 2
+            },
+            {
+              "x": 115,
+              "y": 103,
+              "rgb": [
+                217,
+                51,
+                51
+              ],
+              "tolerance": 3
+            },
+            {
+              "x": 77,
+              "y": 103,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 3
+            },
+            {
+              "x": 12,
+              "y": 39,
+              "rgb": [
+                190,
+                190,
+                190
+              ],
+              "tolerance": 2
+            },
+            {
+              "x": 33,
+              "y": 254,
+              "rgb": [
+                51,
+                77,
+                204
+              ],
+              "tolerance": 3
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "a cell whose program fails is drawn as far as it got, with its error",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "0.2 0.3 0.8 setrgbcolor 8 8 48 48 rectfill 1 setgray 20 20 24 24 rectfill showpage"
+          },
+          {
+            "source": "1 0 0 setrgbcolor 0 0 32 32 rectfill nosuchop"
+          }
+        ],
+        "width": 64,
+        "height": 64
+      },
+      "result": {
+        "is_error": false,
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "failed_cells": 1,
+          "cells.0.ok": true,
+          "cells.1.ok": false,
+          "cells.1.error.code": "postscript_error",
+          "cells.1.error.message": {
+            "contains": "nosuchop"
+          }
+        },
+        "text_contains": [
+          "2 cells (1 failed)",
+          "nosuchop"
+        ],
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "a runaway cell stops at its own step limit; the next one renders",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "{ 1 pop } loop"
+          },
+          {
+            "source": "0.85 0.2 0.2 setrgbcolor 32 32 26 0 360 arc fill 1 setgray 32 32 12 0 360 arc fill showpage"
+          }
+        ],
+        "width": 64,
+        "height": 64
+      },
+      "result": {
+        "is_error": false,
+        "structured": {
+          "ok": true,
+          "failed_cells": 1,
+          "cells.0.error.code": "limit_exceeded",
+          "cells.0.error.limit": "steps",
+          "cells.1.ok": true
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "33 cells: over the cell cap, refused before execution",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "showpage",
+            "width": 10,
+            "height": 10,
+            "dpi": [
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72,
+              72
+            ]
+          }
+        ]
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.input.code": "cells",
+          "error.message": {
+            "contains": "33 cells is over this server's limit of 32"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a 3000x3000 page shown at 2x: the sheet is over the pixel cap",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "showpage",
+            "width": 3000,
+            "height": 3000,
+            "dpi": [
+              {
+                "dpi": 72,
+                "zoom": 2
+              }
+            ]
+          }
+        ]
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pixels",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.input.code": "sheet_pixels"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a cell over 8000 pixels a side",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "showpage",
+            "width": 8000,
+            "height": 10,
+            "dpi": [
+              144
+            ]
+          }
+        ]
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "structured": {
+          "ok": false,
+          "error.input.code": "cell_side"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "sources over the limit in all",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "{{huge_source}}"
+          }
+        ]
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "source_too_large",
+        "structured": {
+          "ok": false
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a zoom outside 2 to 16",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "showpage",
+            "dpi": [
+              {
+                "dpi": 9,
+                "zoom": 1
+              }
+            ]
+          }
+        ]
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "zoom must be a whole number from 2 to 16"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an argument of the wrong type",
+      "tool": "review_sheet",
+      "args": {
+        "entries": "ring.ps"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "invalid arguments:"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "the server still serves the next sheet",
+      "tool": "review_sheet",
+      "args": {
+        "entries": [
+          {
+            "source": "0.85 0.2 0.2 setrgbcolor 32 32 26 0 360 arc fill 1 setgray 32 32 12 0 360 arc fill showpage",
+            "label": "ring"
+          }
+        ],
+        "width": 64,
+        "height": 64,
+        "labels": false,
+        "sizes": false
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "width_px": 90,
+          "height_px": 90
+        },
+        "png": {
+          "width": 90,
+          "height": 90
+        },
+        "renders_executed": 1
+      }
+    }
+  ]
+}

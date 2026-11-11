@@ -36,8 +36,9 @@ apart:
 * `get_renderer_info` exists only on this server. It reports
   `server_version`, the limits in force, and a `renderer` block with the
   PSCat version and git revision.
-* Both servers have `chalkboard_math` and `handwrite`. Here SVG and PDF
-  come back inline and there is no `out_path`; `handwrite` is PNG only on both.
+* Both servers have `chalkboard_math`, `handwrite` and `review_sheet`. Here
+  SVG and PDF come back inline and there is no `out_path`; `handwrite` and
+  `review_sheet` are PNG only on both.
 
 ## 3. stdio
 
@@ -203,12 +204,12 @@ way.
 
 ## 6. What else to try
 
-[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has nine
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has ten
 prompts with the expected tool call and result: render a program, draw a
 diagram, diagnose an invalid program, ask for an unsupported format,
 try to exhaust resources, look up palette, template and procedure names,
-write a chalkboard formula and a handwritten note, and start from a guide
-prompt. Beyond those and the prompt above:
+write a chalkboard formula and a handwritten note, compare candidates on a
+review sheet, and start from a guide prompt. Beyond those and the prompt above:
 
 * **Images.** After a PNG render, does the client show the image to you, and
   can the agent describe it correctly? That tells you whether the image
@@ -642,7 +643,7 @@ first prompt in section 5.
   from one of the server's MCP prompts, as a user who picks
   `/mcp__pscat-render__chart` would. The runner gets the prompt's text with
   `prompts/get` over stdio (no model involved) and sends it, then the case's
-  `prompt`, as the user's message. `90-guide-prompt-chart.json` uses it.
+  `prompt`, as the user's message. `91-guide-prompt-chart.json` uses it.
   The agent still has only the `pscat-render` tools, so Claude Code's
   `ReadMcpResourceTool` isn't available, and no case reads a resource.
 * **Checks on every run.** The agent finished (it didn't hit
@@ -742,7 +743,7 @@ cases. A scenario runs on every target (stdio, http, container) unless
   has `response` (dotted paths into the JSON-RPC result, with the same
   matchers) or `protocol_error` (dotted paths into the JSON-RPC error:
   `code`, `message`, `data.*`), plus `elapsed_ms` and `renders_executed`.
-  `64-guide-prompts-resources.json` uses it.
+  `65-guide-prompts-resources.json` uses it.
 * **`parallel`** (with `outcomes`) fires calls at once and compares the
   sorted list of results (`ok`, or the error code) with `outcomes`, which
   is how `server_busy` is tested without depending on which call wins the
@@ -756,7 +757,7 @@ cases. A scenario runs on every target (stdio, http, container) unless
 What is covered: the first prompt in section 5 (the runaway loop is
 `runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 6 of
 `agent-scenarios.md` (including 6, the catalog tool, 7, the chalkboard, and 8,
-the handwritten note), 9 (the guide prompts and resources), and every error code in its list except `cancelled`
+the handwritten note), 9 (the review sheet), 10 (the guide prompts and resources), and every error code in its list except `cancelled`
 (`tests/mcp_cancel.rs` covers it: an rmcp client's cancellation kills the
 worker). Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
 lines: `%` starts a comment that runs to the end of the line.

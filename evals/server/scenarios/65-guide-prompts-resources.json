@@ -1,7 +1,7 @@
 {
   "id": "guide-prompts-resources",
   "title": "Guide resources and prompts: list, read PSCat's psviz skill verbatim after the server's note, get a chart prompt, and unknown names as MCP errors; no render runs",
-  "origin": "issue #39; examples/agent-scenarios.md section 9",
+  "origin": "issue #39; examples/agent-scenarios.md section 10",
   "steps": [
     {
       "label": "resources/list has the psviz skill as markdown",

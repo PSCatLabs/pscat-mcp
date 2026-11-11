@@ -1,7 +1,7 @@
 {
   "id": "guide-prompt-chart",
-  "title": "Scenario 9: start from the server's `chart` MCP prompt (kind bar), give the data, and render a bar chart with lib/dataviz.ps",
-  "origin": "examples/agent-scenarios.md section 9; issue #39",
+  "title": "Scenario 10: start from the server's `chart` MCP prompt (kind bar), give the data, and render a bar chart with lib/dataviz.ps",
+  "origin": "examples/agent-scenarios.md section 10; issue #39",
   "max_turns": 10,
   "timeout_s": 420,
   "mcp_prompt": {

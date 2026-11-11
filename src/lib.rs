@@ -31,6 +31,7 @@ pub mod http;
 pub mod mcp;
 pub mod pscat_extras;
 pub mod render;
+pub mod sheet;
 pub mod telemetry;
 pub mod worker;
 
