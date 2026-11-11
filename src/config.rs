@@ -32,9 +32,11 @@ pub struct LimitsConfig {
     pub max_latex_bytes: usize,
 
     /// Largest note text `handwrite` accepts, in bytes. Checked before
-    /// execution. The PSCat plugin's limit for any text input (1 MiB); the
+    /// execution. The PSCat plugin's is 1 MiB; 64 KiB is far more drawable text than a
+    /// note within the pixel limits holds, and keeps the HTTP body limit at
+    /// the source limit's. The
     /// note's size is bounded by the pixel limits whatever the text.
-    #[arg(long, env = "PSCAT_MCP_MAX_HANDWRITE_BYTES", default_value_t = 1024 * 1024)]
+    #[arg(long, env = "PSCAT_MCP_MAX_HANDWRITE_BYTES", default_value_t = 64 * 1024)]
     pub max_handwrite_bytes: usize,
 
     /// Wall-clock deadline for one render, in milliseconds. The worker
@@ -94,7 +96,7 @@ impl Default for LimitsConfig {
         LimitsConfig {
             max_source_bytes: 256 * 1024,
             max_latex_bytes: 4096,
-            max_handwrite_bytes: 1024 * 1024,
+            max_handwrite_bytes: 64 * 1024,
             render_timeout_ms: 20_000,
             interp_time_limit_ms: None,
             max_steps: 5_000_000_000,

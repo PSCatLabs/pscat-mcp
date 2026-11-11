@@ -164,7 +164,7 @@ way only the worker is involved (`tests/chalkboard.rs`).
 For `handwrite` (`src/handwrite.rs`) the plugin's tool runs `pscat handwrite`,
 a subcommand of the `pscat` binary and not of the library; this server does
 what it does from public pieces. `plan` checks the text's byte size
-(`PSCAT_MCP_MAX_HANDWRITE_BYTES`, 1 MiB, the plugin's) and every argument
+(`PSCAT_MCP_MAX_HANDWRITE_BYTES`, 64 KiB; the plugin's is 1 MiB) and every argument
 (`HandwriteParams::check`: ranges, `paper`, and `ink`, which is three plain
 decimals in 0 to 1 and can carry no code), and returns a `FixedWidth` plan.
 `generate` runs `hs-linecount` from `lib/handscript.ps` on a default page
@@ -209,7 +209,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 |---|---|---|
 | Source size | server, before execution | 256 KiB |
 | `chalkboard_math` LaTeX size | server, before execution | 4 KiB |
-| `handwrite` text size | server, before execution | 1 MiB |
+| `handwrite` text size | server, before execution | 64 KiB |
 | `handwrite` note height | worker, after layout, before the page is allocated: side limit, then pixel cap | — |
 | Format, `halftone` only with PNG, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
 | Device pixels of the starting page | server, before execution | 16 M |

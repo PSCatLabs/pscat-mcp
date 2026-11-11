@@ -146,7 +146,7 @@
       }
     },
     {
-      "label": "text over the 1 MiB limit",
+      "label": "text over the 64 KiB limit",
       "tool": "handwrite",
       "args": {
         "text": "{{huge_note}}"
@@ -162,7 +162,7 @@
           "ok": false,
           "error.code": "source_too_large",
           "error.message": {
-            "contains": "the limit is 1048576 bytes"
+            "contains": "the limit is 65536 bytes"
           }
         },
         "renders_executed": 0

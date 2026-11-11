@@ -212,7 +212,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_ALLOWED_ORIGINS` | empty (reject any `Origin`) | browser origins allowed |
 | `PSCAT_MCP_MAX_SOURCE_BYTES` | 262144 | largest program |
 | `PSCAT_MCP_MAX_LATEX_BYTES` | 4096 | largest `chalkboard_math` formula (`source_too_large`) |
-| `PSCAT_MCP_MAX_HANDWRITE_BYTES` | 1048576 | largest `handwrite` text (`source_too_large`); also raises the HTTP request-body limit if larger than the source limit |
+| `PSCAT_MCP_MAX_HANDWRITE_BYTES` | 65536 | largest `handwrite` text (`source_too_large`); also raises the HTTP request-body limit if larger than the source limit |
 | `PSCAT_MCP_RENDER_TIMEOUT_MS` | 20000 | wall-clock deadline; worker is SIGKILLed after it |
 | `PSCAT_MCP_MAX_STEPS` | 5000000000 | PSCat step limit |
 | `PSCAT_MCP_MAX_MEMORY_BYTES` | 536870912 | PSCat heap-growth limit per render |
@@ -291,8 +291,9 @@ control is enforced by PSCat and which by the server.
   how the text wraps, so the server cannot know it (or check it against the
   pixel limits) until the worker has laid the text out. The layout pass runs
   under the render's step, time and memory limits and takes its share of
-  them; the draw gets the rest. A text of a million lines is laid out and
-  refused (`invalid_dimensions`), not drawn. The plugin refuses an empty
+  them; the draw gets the rest. A text of hundreds of thousands of lines (needs a raised
+  `PSCAT_MCP_MAX_HANDWRITE_BYTES`) is laid out and refused
+  (`invalid_dimensions`), not drawn. The plugin refuses an empty
   text only; here a text of only whitespace, or with no character the face
   can draw, is `invalid_request` rather than a blank note, and `ink`
   components outside 0–1 are refused rather than clamped.

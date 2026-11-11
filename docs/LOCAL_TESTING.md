@@ -707,7 +707,7 @@ cases. A scenario runs on every target (stdio, http, container) unless
 * **Placeholders:** `{{file:PATH}}`, `{{server_version}}`,
   `{{pscat_version}}`, `{{pscat_revision}}` (from `Cargo.lock`),
   `{{huge_source}}`, `{{pages:N}}`, `{{huge_note}}` (a `handwrite` text over
-  its 1 MiB limit) and `{{lines:N}}` (`N` short lines of text).
+  its 64 KiB limit) and `{{lines:N}}` (`N` short lines of text).
 * Unknown keys are an error, so a typo cannot turn an assertion off.
 
 What is covered: the first prompt in section 5 (the runaway loop is

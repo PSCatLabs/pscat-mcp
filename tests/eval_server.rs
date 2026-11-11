@@ -212,8 +212,8 @@ fn placeholder(key: &str) -> Result<String, String> {
         "pscat_revision" => Ok(lock_field("source")),
         // About 285 KB, over the 256 KiB default source limit.
         "huge_source" => Ok("0 0 moveto 1 1 lineto stroke\n".repeat(9500)),
-        // A `handwrite` text of about 1.1 MB, over the 1 MiB default limit.
-        "huge_note" => Ok("word ".repeat(220_000)),
+        // A `handwrite` text of about 100 KB, over the 64 KiB default limit.
+        "huge_note" => Ok("word ".repeat(20_000)),
         // A `handwrite` text of `n` short lines.
         k if k.starts_with("lines:") => {
             let n: usize = k[6..].parse().map_err(|_| format!("bad {{{{{k}}}}}"))?;

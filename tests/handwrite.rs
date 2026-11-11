@@ -157,7 +157,7 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
     assert_eq!(props["paper"]["enum"], json!(["plain", "ruled"]));
     let d = t.description.as_deref().unwrap();
     assert!(d.contains("not for imitating a specific person's"), "{d}");
-    assert!(d.contains("text up to 1048576 bytes"), "{d}");
+    assert!(d.contains("text up to 65536 bytes"), "{d}");
     assert!(!d.contains("out_path"), "{d}");
     let info = client
         .call_tool(CallToolRequestParams::new("get_renderer_info"))
@@ -165,7 +165,7 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
         .unwrap();
     assert_eq!(
         info.structured_content.unwrap()["limits"]["max_handwrite_bytes"],
-        1_048_576
+        65_536
     );
     client.cancel().await.ok();
 }
@@ -340,12 +340,12 @@ async fn a_note_too_tall_for_the_pixel_cap_is_a_structured_error() {
     client.cancel().await.ok();
 }
 
-/// The longest text the default limit allows is a million lines. It is
+/// With the text limit raised to 1 MiB, a text can be a million lines. It is
 /// refused with the same structured error: not an out-of-memory failure,
 /// not a deadline kill.
 #[tokio::test]
 async fn a_text_of_half_a_million_lines_is_refused_not_killed() {
-    let client = start(&[]).await;
+    let client = start(&[("PSCAT_MCP_MAX_HANDWRITE_BYTES", "1048576")]).await;
     let text = "a\n".repeat(500_000);
     let r = call(&client, json!({"text": text, "width": 8000})).await;
     let s = assert_fails(&r, "invalid_dimensions");
@@ -546,7 +546,11 @@ async fn extreme_arguments_never_crash() {
 /// A limit hit inside the layout of a huge text is reported without the text.
 #[tokio::test]
 async fn a_limit_hit_in_the_layout_of_a_huge_word_keeps_the_reply_small() {
-    let client = start(&[("PSCAT_MCP_MAX_STEPS", "1000000")]).await;
+    let client = start(&[
+        ("PSCAT_MCP_MAX_STEPS", "1000000"),
+        ("PSCAT_MCP_MAX_HANDWRITE_BYTES", "1048576"),
+    ])
+    .await;
     let r = call(&client, json!({"text": "x".repeat(1_000_000)})).await;
     let s = assert_fails(&r, "limit_exceeded");
     let structured_len = serde_json::to_string(&s).unwrap().len();
