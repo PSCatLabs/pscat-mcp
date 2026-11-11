@@ -1,0 +1,205 @@
+{
+  "id": "render-halftone",
+  "title": "Scenario 1 variant: halftone screens the PNG; svg and pdf refuse it",
+  "origin": "examples/agent-scenarios.md section 1 (halftone variant); tests/mcp_stdio.rs",
+  "steps": [
+    {
+      "label": "without halftone the grey stays grey",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "width": 200,
+        "height": 100
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "page_count": 1
+        },
+        "png": {
+          "width": 200,
+          "height": 100,
+          "pixels": [
+            {
+              "x": 50,
+              "y": 50,
+              "rgb": [
+                128,
+                128,
+                128
+              ],
+              "tolerance": 3
+            },
+            {
+              "x": 150,
+              "y": 75,
+              "rgb": [
+                0,
+                0,
+                0
+              ],
+              "tolerance": 0
+            },
+            {
+              "x": 150,
+              "y": 20,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 0
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "halftone: same size, solid black and white kept",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "width": 200,
+        "height": 100,
+        "halftone": true
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "page_count": 1,
+          "artifacts.0.width_px": 200,
+          "artifacts.0.height_px": 100,
+          "artifacts.0.mime_type": "image/png"
+        },
+        "png": {
+          "width": 200,
+          "height": 100,
+          "pixels": [
+            {
+              "x": 150,
+              "y": 75,
+              "rgb": [
+                0,
+                0,
+                0
+              ],
+              "tolerance": 0
+            },
+            {
+              "x": 150,
+              "y": 20,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 0
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "halftone with svg",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "format": "svg",
+        "halftone": true
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "halftone applies to png output only"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "halftone with pdf",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "format": "pdf",
+        "halftone": true
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "halftone applies to png output only"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "halftone of the wrong type",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "halftone": "yes"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "expected a boolean"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "halftone false with svg is an ordinary svg render",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.5 setgray 0 0 100 100 rectfill\n0 setgray 100 0 100 50 rectfill\nshowpage\n",
+        "format": "svg",
+        "halftone": false
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "format": "svg"
+        },
+        "renders_executed": 1
+      }
+    }
+  ]
+}

@@ -34,6 +34,8 @@ pub struct RenderRequest {
     pub height: Option<u32>,
     /// Resolution; `None` means 72 dpi (one pixel per point).
     pub dpi: Option<f64>,
+    /// Screen the raster like a mono laser printer (PNG only).
+    pub halftone: bool,
 }
 
 /// A request that passed validation. Only these reach the backend.
@@ -337,6 +339,15 @@ pub fn validate_request(
             )
         })?,
     };
+    if req.halftone && format != OutputFormat::Png {
+        return Err(RenderError::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "halftone applies to png output only; format {} keeps its vector art",
+                format.name()
+            ),
+        ));
+    }
     let dpi = req.dpi.unwrap_or(72.0);
     if !dpi.is_finite() || !(MIN_DPI..=MAX_DPI).contains(&dpi) {
         return Err(RenderError::new(
@@ -385,6 +396,7 @@ pub fn validate_request(
             format,
             page_points,
             dpi,
+            halftone: req.halftone,
             limits: interp_limits(limits),
         },
     })
@@ -510,6 +522,7 @@ impl RenderService {
             format: OutputFormat::Png,
             page_points: None,
             dpi: 72.0,
+            halftone: false,
             limits: interp_limits(&self.limits),
         };
         let result = self.run(job).await?;
@@ -705,6 +718,39 @@ mod tests {
             }),
             ErrorCode::TooManyPixels
         );
+    }
+
+    #[test]
+    fn halftone_is_png_only() {
+        let limits = LimitsConfig::default();
+        for format in ["svg", "pdf"] {
+            let err = validate_request(
+                &RenderRequest {
+                    format: Some(format.into()),
+                    halftone: true,
+                    ..req("showpage")
+                },
+                JobMode::Render,
+                &limits,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidRequest, "{format}");
+        }
+        for format in [None, Some("png".to_string())] {
+            let v = validate_request(
+                &RenderRequest {
+                    format,
+                    halftone: true,
+                    ..req("showpage")
+                },
+                JobMode::Render,
+                &limits,
+            )
+            .unwrap();
+            assert!(v.job.halftone);
+        }
+        let plain = validate_request(&req("showpage"), JobMode::Render, &limits).unwrap();
+        assert!(!plain.job.halftone);
     }
 
     #[test]

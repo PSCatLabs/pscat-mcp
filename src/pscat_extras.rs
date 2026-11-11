@@ -16,6 +16,11 @@
 //! * `pscat::capabilities` ([`capabilities_json`]), the catalog behind
 //!   `pscat --capabilities` and the plugin's `describe_art_capabilities`.
 //!
+//! * `pscat::halftone`, `pscat::png` and the page rasters of `pscat::gfx`
+//!   (`Interp::gfx`, `Gfx::pages`, `Gfx::pixmap`, `Gfx::has_trailing_art`)
+//!   ([`halftone_pngs`]), the screening behind `pscat --halftone` and the
+//!   plugin's `halftone` option.
+//!
 //! Nothing outside this module may name a `#[doc(hidden)]` PSCat item.
 //! Everything here runs inside the worker process.
 
@@ -77,6 +82,43 @@ pub fn allow_program_page_size(interp: &mut pscat::Interp) {
     interp
         .gfx_mut()
         .set_page_size_source(pscat::gfx::PageSizeSource::Default);
+}
+
+/// One halftoned page, encoded as PNG.
+pub struct HalftonePng {
+    /// Width in device pixels.
+    pub width: u32,
+    /// Height in device pixels.
+    pub height: u32,
+    /// The PNG file bytes (with the page's `pHYs` resolution chunk).
+    pub png: Vec<u8>,
+}
+
+/// Every page `interp` produced, screened like a mono laser printer and
+/// encoded as PNG, lazily, one page at a time. The pages are the ones
+/// `Interp::pages()` returns, in the same order: each `showpage`, plus the
+/// canvas when art was painted after the last one (or when there was none),
+/// as `pscat --halftone --png` writes them. The screen is PSCat's default
+/// (45 degree clustered dot, pure black and white pixels). `scale` is the
+/// interpreter's device pixels per point (`dpi / 72`), recorded in each PNG's
+/// resolution chunk.
+pub fn halftone_pngs(
+    interp: &pscat::Interp,
+    scale: f32,
+) -> impl Iterator<Item = std::io::Result<HalftonePng>> + '_ {
+    let gfx = interp.gfx();
+    let mut pages: Vec<_> = gfx.pages().iter().collect();
+    if pages.is_empty() || gfx.has_trailing_art() {
+        pages.push(&gfx.pixmap);
+    }
+    pages.into_iter().map(move |page| {
+        let screened = pscat::halftone::screen(page);
+        pscat::png::encode(&screened, scale).map(|png| HalftonePng {
+            width: screened.width(),
+            height: screened.height(),
+            png,
+        })
+    })
 }
 
 /// The art catalog of the linked PSCat build, as `pscat --capabilities`

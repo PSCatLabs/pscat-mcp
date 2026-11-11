@@ -18,7 +18,7 @@ The server exposes four tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
+| `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
@@ -74,6 +74,16 @@ may be omitted (PNG is the default).
 Variant: "…as a PDF" → `"format": "pdf"`; one `resource` block with
 `mimeType: "application/pdf"` whose `blob` decodes to bytes starting `%PDF-`;
 `artifacts[0]` has no `page` field (one document holds every page).
+
+Variant: "…screened like a mono laser printer" → `"halftone": true`; one
+`image` block, same size as the normal render, whose pixels are only pure
+black and white (a 45° clustered-dot screen; solid black stays black, grey
+becomes dots of about the same ink coverage). It is done in the worker, so
+`structuredContent` is the usual success envelope with `format: "png"`.
+With `"format": "svg"` or `"pdf"` the call is refused before anything runs:
+`isError: true`, `error.code == "invalid_request"`, message
+`halftone applies to png output only; format svg keeps its vector art`. The
+agent retries without `halftone`, or with PNG, and says so.
 
 ---
 
@@ -373,6 +383,7 @@ agent against the container image.
 | # | Case | Tool | Pass condition |
 | --- | --- | --- | --- |
 | 1 | Supplied program | `render_postscript` | PNG 400×300, `ok: true` |
+| 1b | Halftone variant | `render_postscript` with `halftone: true` | PNG of the same size, only black and white pixels; with `svg`/`pdf`, `invalid_request` |
 | 2 | Diagram from prose | `render_postscript` (± `validate_postscript`) | Legible labelled flowchart; self-corrects on `postscript_error` |
 | 3 | Invalid program | `validate_postscript` | `valid: false`, `execution_error.name == "undefined"`, line 4, agent suggests `show` |
 | 4 | JPEG | `render_postscript` | `unsupported_format` (or agent declines before calling) |

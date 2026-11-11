@@ -61,6 +61,11 @@ pub struct RenderArgs {
     /// Resolution in dots per inch, 9 to 1200. Default 72, i.e. one pixel
     /// per point. Device pixels = points * dpi / 72.
     pub dpi: Option<f64>,
+    /// Screen the raster like a mono laser printer: a 45 degree clustered-dot
+    /// screen of pure black and white pixels. PNG only; with "svg" or "pdf"
+    /// the call fails with invalid_request. Default false.
+    #[schemars(extend("default" = false))]
+    pub halftone: Option<bool>,
 }
 
 /// Arguments of `validate_postscript`.
@@ -413,6 +418,7 @@ impl PscatMcp {
             width: args.width,
             height: args.height,
             dpi: args.dpi,
+            halftone: args.halftone.unwrap_or(false),
         };
         let outcome = tokio::select! {
             r = self.service.render(req) => r,
