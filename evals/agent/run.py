@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -43,11 +44,23 @@ SERVER_NAME = "pscat-render"
 DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_S = 300
+# Most sessions one invocation may start (issue #44); --max-sessions raises it.
+DEFAULT_MAX_SESSIONS = 120
+VERDICT_RANK = {"error": 0, "fail": 0, "flaky": 1, "pass": 2}
 REDACTED = "<redacted-token>"
 
 
 # --------------------------------------------------------------------------
 # Cases
+
+
+def cases_sha256() -> str:
+    """A hash of every case file (name and content), so a run or baseline
+    says which case definitions its verdicts were computed under."""
+    h = hashlib.sha256()
+    for path in sorted(CASES_DIR.glob("*.json")):
+        h.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()[:16]
 
 
 def load_cases() -> list[dict]:
@@ -402,6 +415,162 @@ def run_child(argv, prompt, env, cwd, timeout_s, on_line, out_path: Path, err_pa
 # Main
 
 
+def usage_of(rate_limits: list[dict]) -> dict:
+    """First and last utilization of each subscription window seen in one
+    session's rate_limit_events (fractions, 0.07 = 7 %), and the last status."""
+    out: dict = {}
+    for info in rate_limits:
+        if not isinstance(info, dict):
+            continue
+        out["status"] = info.get("status")
+        for name, window in (info.get("unifiedWindows") or {}).items():
+            if isinstance(window, dict) and window.get("utilization") is not None:
+                span = out.setdefault(name, [window["utilization"], window["utilization"]])
+                span[1] = window["utilization"]
+    return out
+
+
+def usage_span(results: list[dict]) -> dict:
+    """Utilization of each window from the first session to the last."""
+    span: dict = {}
+    for r in results:
+        for name, (first, last) in ((k, v) for k, v in (r.get("usage") or {}).items() if k != "status"):
+            s = span.setdefault(name, [first, last])
+            s[1] = last
+    return span
+
+
+def format_usage(span: dict) -> str:
+    if not span:
+        return "usage: no rate_limit_event utilization seen"
+    parts = [f"{name} {a * 100:.0f}% -> {b * 100:.0f}%" for name, (a, b) in sorted(span.items())]
+    return "usage: " + ", ".join(parts)
+
+
+def run_totals(results: list[dict]) -> dict:
+    return {
+        "sessions": len(results),
+        "turns": sum(r.get("num_turns") or 0 for r in results),
+        "tool_calls": sum(len(r.get("calls") or []) for r in results),
+        "duration_s": round(sum(r.get("duration_s") or 0 for r in results), 1),
+    }
+
+
+def compare(rows: list[dict], baseline: dict) -> tuple[list[str], int]:
+    """Rows against a committed baseline: verdict changes and pass rates.
+    Returns the report lines and the number of regressions."""
+    base = {(r["case"], r["agent"], r["transport"]): r for r in baseline.get("rows", [])}
+    regressions, improvements, same = [], [], []
+    for r in rows:
+        key = (r["case"], r["agent"], r["transport"])
+        now = f"{r['verdict']} {r['pass']}/{r['runs']}"
+        b = base.get(key)
+        label = "/".join(key)
+        if b is None:
+            same.append(f"  {label}: {now} (not in the baseline)")
+            continue
+        was = f"{b['verdict']} {b['pass']}/{b['runs']}"
+        rank_now, rank_was = VERDICT_RANK[r["verdict"]], VERDICT_RANK[b["verdict"]]
+        rate_now = r["pass"] / r["runs"] if r["runs"] else 0.0
+        rate_was = b["pass"] / b["runs"] if b["runs"] else 0.0
+        line = f"  {label}: {was} -> {now}"
+        if rank_now < rank_was or (rank_now == rank_was == 1 and rate_now < rate_was):
+            regressions.append(line)
+        elif rank_now > rank_was or (rank_now == rank_was == 1 and rate_now > rate_was):
+            improvements.append(line)
+        else:
+            same.append(line)
+    lines = [f"compared with baseline {baseline.get('date', '?')} ({baseline.get('model', '?')}):"]
+    for title, group in (("regressions", regressions), ("improvements", improvements), ("unchanged", same)):
+        lines.append(f"{title}: {len(group)}")
+        lines.extend(group)
+    return lines, len(regressions)
+
+
+def make_baseline(run_dirs: list[Path], out: Path, rechecked: bool = False, server_commit: str | None = None) -> dict:
+    """Merge the summary.json of one or more runs into a small baseline
+    record: verdicts and pass counts per case x agent x transport, the
+    versions, and the sessions, turns and usage the runs took. With
+    `rechecked`, the verdicts come from each run's recheck.json (written by
+    --recheck) instead, i.e. under the case files as they are now."""
+    results: list[dict] = []
+    headers = []
+    for d in run_dirs:
+        name = "recheck.json" if rechecked else "summary.json"
+        if not (d / name).exists():
+            sys.exit(f"{d}: no {name}" + (" (run --recheck on it first)" if rechecked else ""))
+        data = json.loads((d / name).read_text())
+        if data["header"].get("stopped"):
+            sys.exit(f"{d}: that run stopped early ({data['header']['stopped']}); not a baseline")
+        headers.append(data["header"])
+        results.extend(data["runs"])
+    keys = ("server_version", "pscat_version", "pscat_revision", "server_sha256", "model", "effort", "clients", "cases_sha256")
+    h0 = headers[0]
+    for h in headers[1:]:
+        for k in keys:
+            if h.get(k) != h0.get(k):
+                sys.exit(f"runs differ in {k}: {h0.get(k)!r} vs {h.get(k)!r}")
+    rows = summarize(results)
+    record = {
+        "date": _dt.date.today().isoformat(),
+        "server": {
+            "version": h0["server_version"],
+            "commit": server_commit or h0.get("repo_commit"),
+            "binary_sha256": h0.get("server_sha256"),
+        },
+        "pscat": {"version": h0["pscat_version"], "revision": h0["pscat_revision"]},
+        "clients": h0["clients"],
+        "model": h0["model"],
+        "effort": h0.get("effort"),
+        "cases_sha256": h0.get("cases_sha256"),
+        "verdicts": "rechecked under the cases above" if rechecked else "as run",
+        "runs_from": [d.name for d in run_dirs],
+        **run_totals(results),
+        "usage": usage_span(results),
+        "rows": [
+            {k: r[k] for k in ("case", "agent", "transport", "verdict", "pass", "runs", "turns")}
+            for r in sorted(rows, key=lambda r: (r["case"], r["agent"], r["transport"]))
+        ],
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(record, indent=1) + "\n")
+    return record
+
+
+def repo_commit() -> str | None:
+    """The checkout's last server-source commit, "-dirty" when src/ or the
+    Cargo files have uncommitted changes. It names the binary only if the
+    binary was built from this checkout."""
+    try:
+        # The last commit that changed the server's source, so a branch
+        # commit that only touches evals/ or docs/ names the server it ran.
+        rev = subprocess.run(
+            ["git", "-C", str(REPO), "log", "-1", "--format=%h", "--abbrev=12", "--", "src", "Cargo.toml", "Cargo.lock"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        dirty = subprocess.run(
+            ["git", "-C", str(REPO), "status", "--porcelain", "--", "src", "Cargo.toml", "Cargo.lock"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if rev.returncode != 0:
+        return None
+    return rev.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
 def summarize(results: list[dict]) -> list[dict]:
     rows: dict[tuple, dict] = {}
     for r in results:
@@ -431,7 +600,7 @@ def print_table(rows: list[dict], header: dict) -> str:
     lines = [
         f"server: pscat-mcp {header['server_version']}, PSCat {header['pscat_version']} ({header['pscat_revision'][:12]})",
         "clients: " + ", ".join(f"{k} {v}" for k, v in header["clients"].items()),
-        f"model: {header['model']}",
+        f"model: {header['model']}" + (f", effort {header['effort']}" if header.get("effort") else ""),
         "",
     ]
     cols = ("case", "agent", "transport", "verdict", "passed", "turns")
@@ -472,6 +641,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="run the guard pre-flight and print the plan; no agent runs")
     p.add_argument("--out", type=Path, help="run directory (default evals/agent-runs/<timestamp>)")
     p.add_argument(
+        "--max-sessions",
+        type=int,
+        default=DEFAULT_MAX_SESSIONS,
+        help=f"refuse a plan with more agent sessions than this (default {DEFAULT_MAX_SESSIONS})",
+    )
+    p.add_argument("--compare", type=Path, metavar="BASELINE", help="print regressions and improvements against a baseline JSON")
+    p.add_argument(
+        "--write-baseline",
+        type=Path,
+        metavar="OUT",
+        help="merge the runs given with --from-run into a baseline JSON at OUT; no agent runs",
+    )
+    p.add_argument("--from-run", type=Path, action="append", metavar="RUN_DIR", help="a run directory for --write-baseline")
+    p.add_argument(
+        "--server-commit",
+        metavar="SHA",
+        help="with --write-baseline: the commit the server binary was built from, when the runs' record names a branch commit",
+    )
+    p.add_argument(
+        "--rechecked",
+        action="store_true",
+        help="with --write-baseline: take each run's verdicts from the recheck.json --recheck wrote",
+    )
+    p.add_argument(
         "--recheck",
         type=Path,
         metavar="RUN_DIR",
@@ -480,8 +673,15 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cases = load_cases()
+    if args.write_baseline:
+        if not args.from_run:
+            sys.exit("--write-baseline needs at least one --from-run RUN_DIR")
+        record = make_baseline(args.from_run, args.write_baseline, args.rechecked, args.server_commit)
+        print(f"wrote {args.write_baseline}: {len(record['rows'])} rows from {record['sessions']} sessions")
+        return 0
+    baseline = json.loads(args.compare.read_text()) if args.compare else None
     if args.recheck:
-        return recheck(args.recheck, cases, args.server)
+        return recheck(args.recheck, cases, args.server, baseline)
     if args.list:
         for c in cases:
             print(f"{c['id']:<24} {'/'.join(c['transports']):<11} {','.join(c['tags']) or '-':<10} {c.get('title', '')}")
@@ -497,6 +697,20 @@ def main(argv: list[str] | None = None) -> int:
         cases = cases[: args.max_cases]
     agents = args.agent or ["claude"]
     transports = ["stdio", "http"] if args.transport == "both" else [args.transport]
+    plan = [
+        (c, a, t, k)
+        for c in cases
+        for a in agents
+        for t in transports
+        if t in c["transports"]
+        for k in range(args.repeat)
+    ]
+    if len(plan) > args.max_sessions:
+        print(
+            f"refusing: {len(plan)} sessions is more than --max-sessions {args.max_sessions}",
+            file=sys.stderr,
+        )
+        return 2
 
     if not args.server.is_file():
         sys.exit(f"server binary not found: {args.server} (cargo build --release)")
@@ -521,18 +735,14 @@ def main(argv: list[str] | None = None) -> int:
         "server_version": ctx0["server_version"],
         "pscat_version": ctx0["pscat_version"],
         "pscat_revision": ctx0["pscat_revision"],
+        "server_sha256": file_sha256(binary),
+        "cases_sha256": cases_sha256(),
+        "repo_commit": repo_commit(),
         "clients": clients,
         "model": args.model,
+        "effort": args.effort,
         "auth": auth,
     }
-    plan = [
-        (c, a, t, k)
-        for c in cases
-        for a in agents
-        for t in transports
-        if t in c["transports"]
-        for k in range(args.repeat)
-    ]
     print(f"{len(plan)} run(s): {len(cases)} case(s) x {agents} x {transports} x {args.repeat}")
     if auth:
         print(f"billing guard pre-flight ok: {auth}")
@@ -563,7 +773,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"- {name} ...", end="", flush=True)
             res = run_one(c, a, t, binary, http, args, claude, codex, ctx0, secret_dir, run_dir, name)
             results.append(res)
-            print(f" {res['status']}" + (f" ({res['error']})" if res.get("error") else ""))
+            five = (res.get("usage") or {}).get("five_hour")
+            print(
+                f" {res['status']}"
+                + (f" ({res['error']})" if res.get("error") else "")
+                + (f" [five-hour {five[1] * 100:.0f}%]" if five else "")
+            )
             for chk in res.get("checks", []):
                 if not chk["ok"]:
                     print(f"    FAIL {chk['name']}: {chk['detail']}")
@@ -582,8 +797,20 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = summarize(results)
     header["stopped"] = stopped
+    header["totals"] = run_totals(results)
+    header["usage"] = usage_span(results)
     print()
     text = print_table(rows, header)
+    t = header["totals"]
+    tail = [
+        f"{t['sessions']} session(s), {t['turns']} turn(s), {t['tool_calls']} tool call(s), {t['duration_s']} s",
+        format_usage(header["usage"]),
+    ]
+    if baseline:
+        cmp_lines, _ = compare(rows, baseline)
+        tail += [""] + cmp_lines
+    print("\n" + "\n".join(tail))
+    text += "\n\n" + "\n".join(tail)
     if stopped:
         print(f"\nSTOPPED: {stopped}")
     (run_dir / "summary.json").write_text(json.dumps({"header": header, "rows": rows, "runs": results}, indent=2))
@@ -593,12 +820,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if all(r["verdict"] == "pass" for r in rows) else 1
 
 
-def recheck(run_dir: Path, cases: list[dict], binary: Path) -> int:
-    """Evaluate saved transcripts again, e.g. after editing a case. The HTTP
-    POST count is not available offline and is skipped."""
+POST_CHECK = "server logged a POST /mcp per tool call"
+
+
+def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | None = None) -> int:
+    """Evaluate saved transcripts again, e.g. after editing a case, and
+    write RUN_DIR/recheck.json (the summary.json shape, verdicts under the
+    current cases). The HTTP POST count is not available offline: a run
+    keeps the result that check had live. A run that ended in an error
+    (guard stop, timeout) stays an error."""
     by_id = {c["id"]: c for c in cases}
     header_path = run_dir / "summary.json"
-    header = json.loads(header_path.read_text())["header"] if header_path.exists() else None
+    saved = json.loads(header_path.read_text()) if header_path.exists() else None
+    header = saved["header"] if saved else None
+    originals = {r.get("transcript"): r for r in (saved or {}).get("runs", [])}
     if header:
         ctx0 = {
             "repo": str(REPO),
@@ -615,7 +850,13 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path) -> int:
         header = {k: ctx0[k] for k in ("server_version", "pscat_version", "pscat_revision")}
         header.update(clients={}, model="?")
     results = []
-    for path in sorted((run_dir / "transcripts").glob("*.jsonl")):
+    # The live run's order, so usage spans run from the first session to the last.
+    order = {name: i for i, name in enumerate(originals)}
+    paths = sorted(
+        (run_dir / "transcripts").glob("*.jsonl"),
+        key=lambda p: (order.get(str(p.relative_to(run_dir)), len(order)), p.name),
+    )
+    for path in paths:
         case_id, agent, transport, _n = path.stem.split("__")
         case = by_id.get(case_id)
         if case is None:
@@ -624,15 +865,37 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path) -> int:
         lines = path.read_text().splitlines()
         t = tx.parse_claude_stream(lines) if agent == "claude" else tx.parse_codex_jsonl(lines, SERVER_NAME)
         checks = tx.evaluate_case(case, t, SERVER_NAME, dict(ctx0), transport)
-        status = "pass" if all(c.ok for c in checks) else "fail"
+        rel = str(path.relative_to(run_dir))
+        orig = originals.get(rel) or {}
+        for c in orig.get("checks", []):
+            if c.get("name") == POST_CHECK:
+                checks.append(tx.Check(POST_CHECK, c.get("ok", False), c.get("detail", "") + " (from the live run)"))
+        if orig.get("status") == "error":
+            status = "error"
+        else:
+            status = "pass" if all(c.ok for c in checks) else "fail"
         print(f"- {path.stem} ... {status}")
         for c in checks:
             if not c.ok:
                 print(f"    FAIL {c.name}: {c.detail}")
-        results.append({"case": case_id, "agent": agent, "transport": transport, "status": status, "num_turns": t.num_turns})
+        record = {k: v for k, v in orig.items() if k not in ("checks", "status")}
+        record.update(
+            case=case_id,
+            agent=agent,
+            transport=transport,
+            transcript=rel,
+            num_turns=t.num_turns,
+            status=status,
+            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+        )
+        results.append(record)
     rows = summarize(results)
     print()
     print_table(rows, header)
+    out_header = dict(header, cases_sha256=cases_sha256(), rechecked=_dt.datetime.now().isoformat(timespec="seconds"))
+    (run_dir / "recheck.json").write_text(json.dumps({"header": out_header, "rows": rows, "runs": results}, indent=2))
+    if baseline:
+        print("\n" + "\n".join(compare(rows, baseline)[0]))
     return 0 if all(r["verdict"] == "pass" for r in rows) else 1
 
 
@@ -647,6 +910,7 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
     record = {"case": case["id"], "agent": agent, "transport": transport, "transcript": str(out_path.relative_to(run_dir))}
     started = time.monotonic()
     posts_before = http.post_count() if (http and transport == "http") else 0
+    sg: guard.StreamGuard | None = None
     try:
         if agent == "claude":
             config = secret_dir / f"mcp-{transport}.json"
@@ -677,6 +941,8 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
                 return record
     except guard.GuardError as e:
         record.update(status="error", error=f"{type(e).__name__}: {e}", stop_suite=True)
+        if sg is not None:
+            record["usage"] = usage_of(sg.rate_limits)
         return record
     finally:
         forget_claude_project(workdir)
@@ -691,8 +957,7 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
         duration_s=round(time.monotonic() - started, 1),
     )
     if t.rate_limits:
-        five = [r.get("utilization") for r in (x.get("unifiedWindows", {}).get("five_hour", {}) for x in t.rate_limits)]
-        record["five_hour_utilization"] = [five[0], five[-1]] if five else None
+        record["usage"] = usage_of(t.rate_limits)
     if timed_out:
         record.update(status="error", error=f"timed out after {timeout_s}s")
         return record

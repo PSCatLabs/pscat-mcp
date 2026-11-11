@@ -240,6 +240,65 @@ async fn lists_annotated_tools() {
     client.cancel().await.ok();
 }
 
+/// Every `format` keyword in `value`, with its JSON pointer.
+fn formats_in(value: &Value, path: String, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(f)) = map.get("format") {
+                out.push((path.clone(), f.clone()));
+            }
+            for (k, v) in map {
+                formats_in(v, format!("{path}/{k}"), out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                formats_in(v, format!("{path}/{i}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn tool_schemas_have_no_uint_formats() {
+    // schemars marks unsigned integers `format: uint32` (or `uint`,
+    // `uint64`), which Claude Code reports as `unknown format ... ignored`
+    // for every such field (#44). The minimum of 0 must survive.
+    let client = start().await;
+    let tools = tools(&client).await;
+    let mut found = Vec::new();
+    for t in &tools {
+        let input = Value::Object((*t.input_schema).clone());
+        formats_in(&input, format!("{}/input", t.name), &mut found);
+        if let Some(out) = &t.output_schema {
+            let output = Value::Object((**out).clone());
+            formats_in(&output, format!("{}/output", t.name), &mut found);
+        }
+    }
+    let uint: Vec<_> = found
+        .iter()
+        .filter(|(_, f)| f.starts_with("uint"))
+        .collect();
+    assert!(uint.is_empty(), "uint formats left: {uint:?}");
+    let render = tools
+        .iter()
+        .find(|t| t.name == "render_postscript")
+        .unwrap();
+    for prop in ["width", "height"] {
+        let p = &render.input_schema["properties"][prop];
+        assert_eq!(p["minimum"], json!(0), "{prop}: {p}");
+        assert_eq!(p["type"], json!(["integer", "null"]), "{prop}: {p}");
+    }
+    let info = tools
+        .iter()
+        .find(|t| t.name == "get_renderer_info")
+        .unwrap();
+    let limits = &info.output_schema.as_ref().unwrap()["$defs"]["LimitsInfo"]["properties"];
+    assert_eq!(limits["max_pixels"]["minimum"], json!(0), "{limits}");
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn renders_png_with_expected_pixels() {
     let client = start().await;
