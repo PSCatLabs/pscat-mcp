@@ -52,6 +52,16 @@ fn limits() -> LimitsConfig {
     }
 }
 
+/// For tests whose synchronous calls must succeed: a deadline no load can
+/// reach.
+fn relaxed() -> LimitsConfig {
+    LimitsConfig {
+        render_timeout_ms: 20_000,
+        queue_timeout_ms: 10_000,
+        ..limits()
+    }
+}
+
 fn unlimited() -> LimitsConfig {
     LimitsConfig {
         max_steps: 0,
@@ -608,7 +618,7 @@ fn tasks_on() -> JobsConfig {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
     let tag = tag();
-    let svc = service(limits(), tasks_on(), &tag);
+    let svc = service(relaxed(), tasks_on(), &tag);
     let tasks = connect(svc.clone(), true).await;
     let caps = serde_json::to_value(&tasks.peer_info().unwrap().capabilities).unwrap();
     assert!(
@@ -796,7 +806,7 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn without_tasks_on_a_tasks_client_gets_a_result() {
-    let svc = service(limits(), jobs(), &tag());
+    let svc = service(relaxed(), jobs(), &tag());
     let client = connect(svc, true).await;
     let response = client
         .call_tool_once(params(
@@ -808,7 +818,7 @@ async fn without_tasks_on_a_tasks_client_gets_a_result() {
     let CallToolResponse::Complete(r) = response else {
         panic!("expected a complete result, got {response:?}")
     };
-    assert_ne!(r.is_error, Some(true));
+    assert_ne!(r.is_error, Some(true), "{r:?}");
     client.cancel().await.ok();
 }
 
