@@ -216,12 +216,14 @@ async fn board_false_is_chalk_on_a_transparent_page() {
 
 #[tokio::test]
 async fn svg_and_pdf_come_back_inline() {
-    // A board's SVG is large, so the SVG cap is raised to the output cap.
+    // A board's SVG is large, so the text limit is raised to the output
+    // cap to get it as text.
     let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
     let small = |format: &str| json!({"latex": r"\frac{1}{2}", "format": format, "width": 300, "height": 150, "dpi": 72});
     let svg = call(&client, small("svg")).await;
     assert_eq!(svg.is_error, Some(false), "{}", text_of(&svg));
     assert_eq!(structured(&svg)["mime_type"], "image/svg+xml");
+    assert_eq!(structured(&svg)["artifacts"][0]["returned_as"], "text");
     eprintln!(
         "small board svg: {}",
         structured(&svg)["artifacts"][0]["bytes"]
@@ -270,17 +272,49 @@ async fn svg_and_pdf_come_back_inline() {
     client.cancel().await.ok();
 }
 
-/// A board's SVG keeps every chalk grain as a vector mark (megabytes), far
-/// over the default SVG cap: `output_too_large` naming the SVG budget, with
-/// advice for a board (png), not "use svg".
+/// A board's SVG keeps every chalk grain as a vector mark, far over the
+/// default text limit, so it comes back as a blob resource holding the same
+/// SVG; over the output cap it is `output_too_large` with advice for a
+/// board (png), not "use svg".
 #[tokio::test]
-async fn svg_over_the_svg_cap_is_output_too_large() {
+async fn a_board_svg_over_the_text_limit_is_a_blob() {
     let client = start(&[]).await;
-    let r = call(&client, json!({"latex": r"\frac{1}{2}", "format": "svg"})).await;
+    let small =
+        json!({"latex": r"\frac{1}{2}", "format": "svg", "width": 300, "height": 150, "dpi": 72});
+    let r = call(&client, small.clone()).await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let s = structured(&r);
+    assert_eq!(s["mime_type"], "image/svg+xml", "{s}");
+    assert_eq!(s["artifacts"][0]["returned_as"], "blob", "{s}");
+    let bytes = s["artifacts"][0]["bytes"].as_u64().unwrap();
+    assert!(bytes > 40 * 1024, "{s}");
+    let blob = r
+        .content
+        .iter()
+        .find_map(|c| match c.as_resource().map(|e| &e.resource) {
+            Some(ResourceContents::BlobResourceContents {
+                blob, mime_type, ..
+            }) => {
+                assert_eq!(mime_type.as_deref(), Some("image/svg+xml"));
+                Some(blob.clone())
+            }
+            _ => None,
+        })
+        .expect("an SVG blob");
+    let svg = base64::engine::general_purpose::STANDARD
+        .decode(blob)
+        .unwrap();
+    assert_eq!(svg.len() as u64, bytes);
+    assert!(String::from_utf8(svg).unwrap().contains("<svg"));
+    client.cancel().await.ok();
+
+    // Over the output cap.
+    let client = start(&[("PSCAT_MCP_MAX_OUTPUT_BYTES", "30000")]).await;
+    let r = call(&client, small).await;
     let s = assert_fails(&r, "output_too_large");
-    assert_eq!(s["error"]["input"]["code"], "svg_bytes", "{s}");
-    assert_eq!(s["error"]["input"]["limit_bytes"], 128 * 1024, "{s}");
-    assert!(s["error"]["input"]["reached_bytes"].as_u64().unwrap() > 128 * 1024);
+    assert_eq!(s["error"]["input"]["code"], "output_bytes", "{s}");
+    assert_eq!(s["error"]["input"]["limit_bytes"], 30000, "{s}");
+    assert!(s["error"]["input"]["reached_bytes"].as_u64().unwrap() > 30000);
     let m = s["error"]["message"].as_str().unwrap();
     assert!(
         m.contains("runs to megabytes") && m.contains("png is the practical format"),
@@ -288,7 +322,11 @@ async fn svg_over_the_svg_cap_is_output_too_large() {
     );
     assert!(!m.contains("use svg"), "{m}");
     // The same board as PNG is fine.
-    let r = call(&client, json!({"latex": r"\frac{1}{2}"})).await;
+    let r = call(
+        &client,
+        json!({"latex": r"\frac{1}{2}", "width": 300, "height": 150, "dpi": 72}),
+    )
+    .await;
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     client.cancel().await.ok();
 }

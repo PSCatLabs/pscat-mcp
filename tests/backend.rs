@@ -32,7 +32,6 @@ fn limits() -> InterpLimits {
         max_page_pixels: 16_000_000,
         max_pages: 10,
         max_output_bytes: 8 * 1024 * 1024,
-        max_svg_bytes: 8 * 1024 * 1024,
         max_program_output_bytes: 16 * 1024,
     }
 }
@@ -333,8 +332,11 @@ async fn output_over_the_cap_is_refused() {
     assert!(result.artifacts.is_empty());
 }
 
+/// An SVG over the output cap is refused with its whole size (all pages
+/// together), before any page is base64 encoded. Whether an SVG goes back
+/// as text or as a blob is the server's choice, not the worker's.
 #[tokio::test]
-async fn svg_over_its_cap_is_refused_before_any_page_is_returned() {
+async fn svg_over_the_output_cap_is_refused_before_any_page_is_returned() {
     let result = backend()
         .execute(
             job(
@@ -342,7 +344,7 @@ async fn svg_over_its_cap_is_refused_before_any_page_is_returned() {
                 OutputFormat::Svg,
                 Some((200, 100)),
                 InterpLimits {
-                    max_svg_bytes: 100,
+                    max_output_bytes: 100,
                     ..limits()
                 },
             ),
@@ -350,32 +352,20 @@ async fn svg_over_its_cap_is_refused_before_any_page_is_returned() {
         )
         .await
         .expect("worker result");
-    assert!(
-        matches!(
-            result.failure,
-            Some(WorkerFailure::SvgTooLarge { max: 100, bytes }) if bytes > 100
-        ),
-        "{:?}",
-        result.failure
-    );
+    let Some(WorkerFailure::OutputTooLarge { max: 100, bytes }) = result.failure else {
+        panic!("{:?}", result.failure);
+    };
     assert!(result.artifacts.is_empty());
-    // The same scene as PNG is not held to the SVG cap.
-    let result = backend()
+    // The size is the whole SVG's, not where encoding stopped.
+    let whole = backend()
         .execute(
-            job(
-                SCENE,
-                OutputFormat::Png,
-                Some((200, 100)),
-                InterpLimits {
-                    max_svg_bytes: 100,
-                    ..limits()
-                },
-            ),
+            job(SCENE, OutputFormat::Svg, Some((200, 100)), limits()),
             Duration::from_secs(20),
         )
         .await
         .expect("worker result");
-    assert_eq!(result.failure, None);
+    assert_eq!(whole.failure, None);
+    assert_eq!(bytes, whole.artifacts[0].byte_len);
 }
 
 /// Many small marks: a large SVG (each rect becomes its own path).

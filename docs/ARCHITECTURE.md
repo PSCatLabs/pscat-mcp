@@ -14,7 +14,9 @@ boundaries are, and where to extend it.
  http.rs ── auth.rs (bearer) ──┐        mcp::serve_stdio
     request id, tracing,       │           │
     body limit, Host/Origin    ▼           ▼
-                         mcp.rs  (rmcp #[tool] handlers: translate args/results only)
+                         mcp.rs  (rmcp #[tool] handlers: translate args/results only;
+                                  PNG → image block, PDF → blob resource, SVG → text
+                                  resources up to PSCAT_MCP_MAX_SVG_BYTES, else blobs)
                                │
                                ▼
                          render.rs  RenderService
@@ -493,8 +495,8 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | File writes | PSCat (no write roots) + kernel `RLIMIT_FSIZE=0` | none allowed |
 | File reads | PSCat read roots: only compiled-in `lib/` | — |
 | Open files | kernel `RLIMIT_NOFILE` | 64 |
-| Output bytes | worker (artifact cap) + server (stdout cap, kill) | 8 MiB |
-| SVG bytes (all pages together; at most the output cap) | worker, from the SVG text's length before any page is encoded or returned: `output_too_large` with `error.input.code` `svg_bytes` | 128 KiB |
+| Output bytes | worker (artifact cap: `output_too_large`, `error.input.code` `output_bytes`) + server (stdout cap, kill) | 8 MiB |
+| SVG returned as text (all pages together; at most the output cap) | server, when it builds the result: up to the limit each page is an embedded text resource, above it an embedded blob resource (base64). Not a failure; the worker holds SVG to the output cap, from the SVG text's length before any page is encoded (`output_too_large`, `error.input.code` `output_bytes`) | 40 KiB |
 | Pages returned | worker | 10 |
 | Program stdout returned | worker (truncates) | 16 KiB |
 | Concurrent renders | server semaphore, queue timeout → `server_busy` | min(CPUs, 4) |

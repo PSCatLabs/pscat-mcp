@@ -511,7 +511,6 @@ mod tests {
         max_page_pixels: 16_000_000,
         max_pages: 10,
         max_output_bytes: 8 << 20,
-        max_svg_bytes: 256 << 10,
         max_program_output_bytes: 16 << 10,
     };
 

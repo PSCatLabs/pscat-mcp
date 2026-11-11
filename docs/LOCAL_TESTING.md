@@ -739,7 +739,8 @@ cases. A scenario runs on every target (stdio, http, container) unless
   * `png`: `width`, `height` and `pixels` (`x`, `y` from the top left,
     `rgb`, `tolerance` default 10);
   * `resource`: `mime`, `starts_with` (a string or a list of alternatives),
-    `contains`, `min_bytes`, for an SVG or PDF signature;
+    `contains`, `min_bytes`, for an SVG or PDF signature, and `form`
+    (`text` or `blob`) for how the resource carries it;
   * `elapsed_ms`: a matcher on the call's duration. Bounds are generous
     because CI machines are slow; a `min` is safe for a deadline;
   * `renders_executed`: how many jobs the server handed to a worker during

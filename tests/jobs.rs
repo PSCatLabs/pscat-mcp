@@ -1150,3 +1150,61 @@ async fn over_http_a_task_is_found_by_a_later_request_of_its_owner_only() {
     assert_eq!((w, h), (20, 10));
     assert!(px.iter().all(|p| *p == [255, 0, 0, 255]));
 }
+
+/// `render_result` returns what `render_postscript` would: SVG as text up
+/// to `PSCAT_MCP_MAX_SVG_BYTES`, as a blob over it, with `returned_as` to
+/// match.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_returns_svg_as_text_or_blob_by_the_svg_limit() {
+    const MARKS: &str = "0 1 300 { dup 7 mul 200 mod exch 13 mul 100 mod 3 3 rectfill } for";
+    for (limit, want) in [(1_000_000, "text"), (1_000, "blob")] {
+        let tag = tag();
+        let svc = service(
+            LimitsConfig {
+                max_svg_bytes: Some(limit),
+                ..relaxed()
+            },
+            jobs(),
+            &tag,
+        );
+        let client = connect(svc, false).await;
+        let r = call(
+            &client,
+            "start_render",
+            json!({ "source": MARKS, "width": 200, "height": 100, "format": "svg" }),
+        )
+        .await;
+        assert_eq!(structured(&r)["ok"], true, "{r}");
+        let id = structured(&r)["job_id"].as_str().unwrap().to_string();
+        let (seen, last) = poll_until_finished(&client, &id).await;
+        assert_eq!(seen.last().map(String::as_str), Some("done"), "{last}");
+        let result = call(&client, "render_result", json!({ "job_id": id })).await;
+        assert_ne!(result["isError"], true, "{result}");
+        let s = structured(&result);
+        assert_eq!(s["format"], "svg", "{s}");
+        assert_eq!(s["artifacts"][0]["returned_as"], want, "{s}");
+        let bytes = s["artifacts"][0]["bytes"].as_u64().unwrap();
+        assert!(bytes > 1_000 && bytes < 1_000_000, "{s}");
+        let res = result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"] == "resource")
+            .expect("a resource block");
+        let res = &res["resource"];
+        assert_eq!(res["mimeType"], "image/svg+xml", "{res}");
+        match want {
+            "text" => assert!(res["text"].as_str().unwrap().contains("<svg"), "{res}"),
+            _ => {
+                use base64::Engine as _;
+                let svg = base64::engine::general_purpose::STANDARD
+                    .decode(res["blob"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(svg.len() as u64, bytes);
+                assert!(String::from_utf8(svg).unwrap().contains("<svg"));
+            }
+        }
+        client.cancel().await.ok();
+        assert_eq!(processes_with(&tag), 0);
+    }
+}

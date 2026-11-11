@@ -1,0 +1,206 @@
+{
+  "id": "svg-text-or-blob",
+  "title": "SVG up to PSCAT_MCP_MAX_SVG_BYTES is an embedded text resource, over it an embedded blob resource (base64) up to the output cap",
+  "origin": "issues #52, #63; README Output formats",
+  "server_env": {
+    "PSCAT_MCP_MAX_SVG_BYTES": "20000",
+    "PSCAT_MCP_MAX_OUTPUT_BYTES": "4000000"
+  },
+  "steps": [
+    {
+      "label": "the limit is in get_renderer_info",
+      "tool": "get_renderer_info",
+      "args": {},
+      "result": {
+        "structured": {
+          "limits.max_svg_bytes": 20000,
+          "limits.max_output_bytes": 4000000
+        }
+      }
+    },
+    {
+      "label": "a small SVG under the limit is a text resource",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n1 0 0 setrgbcolor 0 0 100 100 rectfill\nshowpage\n",
+        "width": 100,
+        "height": 100,
+        "format": "svg"
+      },
+      "result": {
+        "content_types": [
+          "resource:image/svg+xml",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "svg",
+          "artifacts.0.returned_as": "text"
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "form": "text",
+          "starts_with": [
+            "<?xml",
+            "<svg"
+          ]
+        }
+      }
+    },
+    {
+      "label": "an SVG of thousands of marks is over the limit: a blob resource holding the SVG",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n1 srand 0 1 2000 { pop rand 500 mod rand 500 mod 3 3 rectfill } for\nshowpage\n",
+        "width": 500,
+        "height": 500,
+        "format": "svg"
+      },
+      "result": {
+        "is_error": false,
+        "content_types": [
+          "resource:image/svg+xml",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "svg",
+          "mime_type": "image/svg+xml",
+          "artifacts.0.returned_as": "blob",
+          "artifacts.0.mime_type": "image/svg+xml",
+          "artifacts.0.bytes": {
+            "min": 20001
+          }
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "form": "blob",
+          "starts_with": [
+            "<?xml",
+            "<svg"
+          ],
+          "contains": [
+            "</svg>"
+          ],
+          "min_bytes": 20001
+        },
+        "text_contains": [
+          "over 20000 bytes",
+          "PSCAT_MCP_MAX_SVG_BYTES",
+          "blob"
+        ]
+      }
+    },
+    {
+      "label": "a chalkboard's SVG (megabytes) is a blob too",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "\\frac{1}{2}",
+        "format": "svg",
+        "width": 300,
+        "height": 150,
+        "dpi": 72
+      },
+      "result": {
+        "is_error": false,
+        "content_types": [
+          "resource:image/svg+xml",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "artifacts.0.returned_as": "blob"
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "form": "blob",
+          "starts_with": [
+            "<?xml",
+            "<svg"
+          ],
+          "min_bytes": 20001
+        }
+      }
+    },
+    {
+      "label": "a default chalkboard's SVG is over the output cap: output_too_large naming the output budget, with advice for boards",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "\\frac{1}{2}",
+        "format": "svg"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "output_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.input.code": "output_bytes",
+          "error.input.limit_bytes": 4000000,
+          "error.input.reached_bytes": {
+            "min": 4000001
+          },
+          "error.message": {
+            "contains": [
+              "PSCAT_MCP_MAX_OUTPUT_BYTES",
+              "runs to megabytes",
+              "png is the practical format"
+            ]
+          }
+        },
+        "text_contains": [
+          "output_too_large",
+          "output_bytes"
+        ]
+      }
+    },
+    {
+      "label": "PDF is still a blob, PNG an image",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n1 0 0 setrgbcolor 0 0 100 100 rectfill\nshowpage\n",
+        "width": 100,
+        "height": 100,
+        "format": "pdf"
+      },
+      "result": {
+        "content_types": [
+          "resource:application/pdf",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "artifacts.0.returned_as": "blob"
+        },
+        "resource": {
+          "mime": "application/pdf",
+          "form": "blob",
+          "starts_with": "%PDF-"
+        }
+      }
+    },
+    {
+      "label": "PNG is an image block",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n1 0 0 setrgbcolor 0 0 100 100 rectfill\nshowpage\n",
+        "width": 100,
+        "height": 100,
+        "format": "png"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "artifacts.0.returned_as": "image"
+        }
+      }
+    }
+  ]
+}

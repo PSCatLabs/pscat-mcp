@@ -136,10 +136,11 @@ pub struct InputDiagnostic {
     /// The command, character or environment the error names, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// For a size limit (`svg_bytes`), the limit in bytes.
+    /// For a size limit (`output_bytes`), the limit in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_bytes: Option<u64>,
-    /// For a size limit (`svg_bytes`), the size the output reached, in bytes.
+    /// For a size limit (`output_bytes`), the size the output reached, in
+    /// bytes (for SVG, all pages together).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reached_bytes: Option<u64>,
 }
@@ -539,7 +540,6 @@ fn interp_limits(limits: &LimitsConfig) -> InterpLimits {
         max_page_pixels: limits.max_pixels,
         max_pages: limits.max_pages,
         max_output_bytes: limits.max_output_bytes,
-        max_svg_bytes: limits.svg_bytes(),
         max_program_output_bytes: limits.max_program_output_bytes,
     }
 }
@@ -1021,36 +1021,30 @@ fn failure_to_error(
             ErrorCode::TooManyPages,
             format!("the program produced {pages} pages; at most {max} are returned"),
         ),
-        WorkerFailure::OutputTooLarge { bytes, max } => RenderError::new(
-            ErrorCode::OutputTooLarge,
-            format!(
-                "the rendered output is over {max} bytes (reached {bytes}); {}. No artifact storage \
-                 is configured, so output is only returned inline",
-                match format {
-                    OutputFormat::Png =>
-                        "lower the page size or dpi, or use svg for vector artwork",
-                    OutputFormat::Svg | OutputFormat::Pdf =>
-                        "lower the page size or the amount of artwork, or use png",
+        WorkerFailure::OutputTooLarge { bytes, max } => {
+            let advice = match format {
+                OutputFormat::Png => "lower the page size or dpi, or use svg for vector artwork",
+                OutputFormat::Svg if tool == Some("chalkboard_math") => {
+                    "a chalkboard's SVG keeps every chalk grain as a vector mark and runs to \
+                     megabytes, so png is the practical format (about 0.3 MB; pdf about 2.6 MB), \
+                     or use a smaller board"
                 }
-            ),
-        ),
-        WorkerFailure::SvgTooLarge { bytes, max } => {
-            let advice = if tool == Some("chalkboard_math") {
-                "a chalkboard's SVG keeps every chalk grain as a vector mark and runs to \
-                 megabytes, so png is the practical format (about 0.3 MB; pdf about 2.6 MB)"
-            } else {
-                "SVG draws text as glyph outlines and a gradient as many shapes, so it grows \
-                 quickly: use png or pdf, lower the page size, or simplify the program"
+                OutputFormat::Svg => {
+                    "SVG draws text as glyph outlines and a gradient as many shapes, so it grows \
+                     quickly: use png or pdf, lower the page size, or simplify the program"
+                }
+                OutputFormat::Pdf => "lower the page size or the amount of artwork, or use png",
             };
             let mut e = RenderError::new(
                 ErrorCode::OutputTooLarge,
                 format!(
-                    "the SVG is {bytes} bytes (all pages together); this server returns at most \
-                     {max} bytes of SVG inline (PSCAT_MCP_MAX_SVG_BYTES); {advice}"
+                    "the rendered output is over {max} bytes (reached {bytes}; \
+                     PSCAT_MCP_MAX_OUTPUT_BYTES); {advice}. No artifact storage is configured, \
+                     so output is only returned inline"
                 ),
             );
             e.input = Some(Box::new(InputDiagnostic {
-                code: "svg_bytes".into(),
+                code: "output_bytes".into(),
                 token: None,
                 limit_bytes: Some(max as u64),
                 reached_bytes: Some(bytes as u64),

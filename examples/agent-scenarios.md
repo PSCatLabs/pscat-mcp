@@ -18,7 +18,7 @@ The server exposes seven tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
+| `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource up to 40 KiB in all and blob resource above, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}`, each artifact with `returned_as` (`image`, `text`, `blob`) |
 | `chalkboard_math` | `latex` (required), `size`, `irregular`, `slope`, `jitter`, `align`, `color`, `board`, `ghosting`, `seed`, `width`, `height` (points, default 800×400), `dpi` (default 144), `format`, `config` | The board as `render_postscript` returns a page, with the same envelope |
 | `handwrite` | `text` (required), `size` (points, default 36), `width` (points, default 612), `paper` (`plain` default, `ruled`), `ink` (`"R,G,B"` in 0–1, default `0.13,0.14,0.34`), `jitter` (default 16), `seed` (default 1985), `dpi` (default 72) | The note as a PNG, with the same envelope as `render_postscript`; the page height is fitted to the text |
 | `review_sheet` | `entries` (required: each `source`, optional `label`, `width`, `height`, `dpi` list), top-level `width`, `height` (default 612×792), `dpi` (default `[72]`; an item is a number or `{dpi, zoom}`), `labels`, `sizes` (default true) | One PNG `image` (the sheet) + a text line per cell; `structuredContent` `{ok, format, mime_type, width_px, height_px, bytes, failed_cells, cells[]{row, column, dpi, zoom, width_px, height_px, x, y, ok, error?{code, limit?, message}}, steps_used, elapsed_ms, wall_ms, renderer}` |
@@ -33,8 +33,8 @@ It also offers the PSCat plugin's skills as `text/markdown` resources
 Every failure is `isError: true` with a text explanation and
 `structuredContent.error = {code, message, postscript?, program_output?, input?}`
 (`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error,
-`handwrite`'s `{code: "height"}` for a note too tall, the SVG cap's
-`{code: "svg_bytes", limit_bytes, reached_bytes}` on `output_too_large`, and `review_sheet`'s
+`handwrite`'s `{code: "height"}` for a note too tall, the output cap's
+`{code: "output_bytes", limit_bytes, reached_bytes}` on `output_too_large`, and `review_sheet`'s
 `{code}` naming the budget or argument that refused a sheet: `cells`,
 `sources`, `source`, `deadline`, `cell_side`, `cell_pixels`, `sheet_side`,
 `sheet_pixels`, `sheet_bytes`, `dpi`, `page`, `arguments`).
@@ -44,7 +44,7 @@ Every failure is `isError: true` with a text explanation and
 `worker_failed`.
 
 Values below assume the default limits (256 KiB source, 20 s timeout,
-16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output, 128 KiB of SVG). Every result
+16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output, SVG as text up to 40 KiB and as a blob above). Every result
 quoted was observed against the `pscat-mcp:smoke` container image (PSCat
 0.7.0-rc.4); timings and byte counts will vary.
 
@@ -410,10 +410,12 @@ agent against the container image.
   and faint ghosts of earlier formulas. `ok: true`, `format: "png"`,
   about 0.3 MB.
 - `board: false` gives chalk alone on a transparent page; `format: "svg"`
-  or `"pdf"` comes back inline as an embedded resource, but the default
-  board's SVG (7 to 10 MB, depending on the formula) is far over the
-  default SVG limit of 128 KiB (`output_too_large`, `error.input.code`
-  `svg_bytes`, with advice to use PNG); PNG, or PDF (about 2.6 MB), fits.
+  or `"pdf"` comes back inline as an embedded resource. A board's SVG is
+  far over the default SVG text limit of 40 KiB, so it is a blob resource
+  (a 400x200 board is about 5 MB), and the default board's (7 to 10 MB,
+  depending on the formula) can be over the 8 MiB output cap
+  (`output_too_large`, `error.input.code` `output_bytes`, with advice to
+  use PNG); PNG, or PDF (about 2.6 MB), fits.
 - A command outside the subset, for example `\nosuchcommand{x}`, fails
   with `postscript_error`, a message naming the command, and
   `error.input: { "code": "unsupported_command", "token": "\\nosuchcommand" }`.
