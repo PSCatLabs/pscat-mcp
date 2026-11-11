@@ -201,13 +201,22 @@ pub fn slice(catalog: &ArtCatalog, query: &CatalogQuery) -> Result<CatalogSlice,
 }
 
 fn index_view(catalog: &ArtCatalog) -> CatalogSlice {
-    let index = KINDS
-        .iter()
+    // Known kinds first, in a fixed order, then any kind a newer PSCat adds
+    // that `KINDS` does not know yet: the index shows it (and the drift test
+    // in tests/mcp_stdio.rs fails) rather than hiding it.
+    let mut kinds: Vec<&str> = KINDS.to_vec();
+    for c in &catalog.capabilities {
+        if !kinds.contains(&c.kind.as_str()) {
+            kinds.push(&c.kind);
+        }
+    }
+    let index = kinds
+        .into_iter()
         .filter_map(|kind| {
             let names: Vec<String> = catalog
                 .capabilities
                 .iter()
-                .filter(|c| c.kind == *kind)
+                .filter(|c| c.kind == kind)
                 .map(|c| c.name.clone())
                 .collect();
             (!names.is_empty()).then(|| KindIndex {
@@ -418,6 +427,23 @@ mod tests {
             c
         })
         .unwrap()
+    }
+
+    #[test]
+    fn the_index_shows_a_kind_this_server_does_not_know() {
+        let c = catalog(vec![
+            cap("a", "procedure", "x"),
+            cap("b", "brush", "a kind added by a newer PSCat"),
+        ]);
+        let s = slice(&c, &CatalogQuery::default()).unwrap();
+        let kinds: Vec<&str> = s
+            .index
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|k| k.kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["procedure", "brush"]);
     }
 
     #[test]

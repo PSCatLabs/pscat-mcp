@@ -1,0 +1,34 @@
+{
+  "id": "diagram",
+  "title": "Scenario 2: write and render a flowchart (self-corrects on a PostScript error)",
+  "origin": "examples/agent-scenarios.md section 2",
+  "max_turns": 10,
+  "timeout_s": 420,
+  "prompt": "Using the pscat-render tools, draw a flowchart of how this server handles a render request: the agent sends PostScript, the request is validated, a \"Within limits?\" decision either returns a structured error or renders in a worker, and the result comes back as PNG/PDF/SVG. Use labelled boxes and arrows, Helvetica text. Show me the rendered image.",
+  "expect": {
+    "tools_required": [
+      "render_postscript"
+    ],
+    "calls": [
+      {
+        "label": "final render succeeds",
+        "tool": "render_postscript",
+        "which": "last",
+        "args": {
+          "source": {
+            "contains": [
+              "Helvetica",
+              "showpage"
+            ]
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ]
+        }
+      }
+    ]
+  }
+}

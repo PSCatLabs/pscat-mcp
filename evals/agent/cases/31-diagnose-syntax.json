@@ -1,0 +1,45 @@
+{
+  "id": "diagnose-syntax",
+  "title": "Scenario 3 variant: an unterminated procedure (syntax error)",
+  "origin": "examples/agent-scenarios.md section 3 (variant)",
+  "max_turns": 6,
+  "prompt": "Why doesn't this PostScript work? Check it with the pscat-render tools.\n\n```postscript\n%!PS\n72 72 moveto 100 100 lineto stroke\n{ 1 2 add\nshowpage\n```\n",
+  "expect": {
+    "tools_required": [
+      "validate_postscript"
+    ],
+    "calls": [
+      {
+        "tool": "validate_postscript",
+        "which": "first",
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n72 72 moveto 100 100 lineto stroke\n{ 1 2 add\nshowpage\n"
+          }
+        },
+        "result": {
+          "is_error": false,
+          "structured": {
+            "valid": false,
+            "syntax.ok": false,
+            "execution_error.name": "syntaxerror"
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "}"
+        ],
+        [
+          "unterminated",
+          "unclosed",
+          "unmatched",
+          "missing",
+          "never closed"
+        ]
+      ]
+    }
+  }
+}

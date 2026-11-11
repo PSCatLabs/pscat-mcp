@@ -149,8 +149,9 @@ The client entries above work unchanged. Build locally rather than pulling
 
 ## 5. A first prompt
 
-Paste this into a new session. It calls all four tools, and each step has
-a known result.
+Paste this into a new session. It calls `get_renderer_info`, `render_postscript` and `validate_postscript`,
+and each step has a known result. (`describe_art_capabilities` is covered by
+the `describe-capabilities` eval case and scenario 6.)
 
 ````text
 Use only the pscat-render MCP server for this (not the pscat plugin's tools).
@@ -172,8 +173,10 @@ showpage
 200 200 liento
 stroke showpage
 
-5. Render `%!PS { 1 pop } loop` and tell me the error code and roughly how long it took.
-6. Call describe_art_capabilities with no arguments and tell me how many page templates it lists and their names. Then call it with names ["pgcard"] and tell me the `load` line.
+5. Render this program and tell me the error code and roughly how long it took:
+
+%!PS
+{ 1 pop } loop
 
 Finish with a table: step, exact tool name you called, error code (if any), result.
 ````
@@ -190,7 +193,6 @@ A pass looks like this:
 | 3 | SVG returns an embedded `image/svg+xml` resource, and PDF an `application/pdf` resource, not images. |
 | 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. If it comes back valid, check whether the agent corrected the typo in the source it sent. |
 | 5 | `limit_exceeded` ("stopped at the time limit") after about 20 s, or `timeout`. |
-| 6 | Five templates: `pgcard`, `pgcertificate`, `pginvitation`, `pgletter`, `pgposter` (for the pinned PSCat; a bump may change the set); `pgcard`'s load line is `(lib/artkit.ps) run (lib/pagekit.ps) run`. |
 
 In step 2, the description is the test. A wrong or vague description means
 the image didn't reach the model. Whether the image appears on screen only
@@ -199,10 +201,10 @@ way.
 
 ## 6. What else to try
 
-[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has five
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has six
 prompts with the expected tool call and result: render a program, draw a
-diagram, diagnose an invalid program, ask for an unsupported format, and
-try to exhaust resources. Beyond those and the prompt above:
+diagram, diagnose an invalid program, ask for an unsupported format,
+try to exhaust resources, and look up palette, template and procedure names. Beyond those and the prompt above:
 
 * **Images.** After a PNG render, does the client show the image to you, and
   can the agent describe it correctly? That tells you whether the image
@@ -243,3 +245,268 @@ codex mcp remove pscat-render
 codex mcp remove pscat-render-http
 rm "$HOME/.pscat-mcp-test-token"
 ```
+
+## 9. Automated agent evals
+
+`scripts/agent-eval.sh` runs the prompts above with a real agent and checks
+the transcript, so a change to a tool description, a result or an error can
+be judged on what an agent actually does with it. It drives Claude Code in
+headless mode (`claude -p --output-format stream-json`) and, optionally,
+Codex (`codex exec --json`), over stdio and over HTTP.
+
+It is local and manual only. It never runs in CI, which would need a
+credential. CI runs only its offline unit tests (`scripts/agent-eval.sh
+--test`): the billing guard and the transcript checks against a recorded
+transcript, with no model.
+
+### Run it
+
+```bash
+cargo build --release
+claude auth status                 # "authMethod": "claude.ai"
+scripts/agent-eval.sh --list       # the cases
+scripts/agent-eval.sh --dry-run    # billing-guard pre-flight and the plan; no model calls
+scripts/agent-eval.sh --case first-prompt --transport stdio    # one case
+scripts/agent-eval.sh              # every case, stdio and HTTP, once
+```
+
+| Option | Meaning |
+|---|---|
+| `--case ID` | Run only this case (repeatable). |
+| `--transport stdio\|http\|both` | Default `both`. |
+| `--repeat N` | Runs per case, agent and transport (default 1). Mixed results are reported as `flaky`. |
+| `--max-cases N` | Stop after the first N cases. |
+| `--model ID` | Claude model, default `claude-sonnet-5-5` (a full ID, not an alias, so results stay comparable). The guard aborts if the session reports a different model. |
+| `--effort LEVEL` | Claude effort level. Default: the CLI's own default. |
+| `--agent codex` | Also run Codex (repeat `--agent claude --agent codex` for both). Codex uses OpenAI usage, so it is opt-in. |
+| `--include-expensive` | Also run cases tagged `expensive` (scenario 5c pastes about 285 KB of PostScript). |
+| `--server PATH` | Server binary. Default `target/release/pscat-mcp-server`. |
+| `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case. No agent runs. |
+
+`python3 -I evals/agent/run.py` takes the same options. The runner uses
+the Python 3 standard library only, so it needs no virtualenv and no
+packages, and the server crate gets no eval code or dependencies.
+
+Each run writes to `evals/agent-runs/<timestamp>/` (git-ignored): one
+`transcripts/<case>__<agent>__<transport>__<n>.jsonl` per run (the raw
+stream, with the HTTP token replaced by `<redacted-token>`) plus its
+stderr, the HTTP server's log, `summary.json` and `summary.txt`. The
+summary prints the client versions, and the server and PSCat versions,
+which it reads from `get_renderer_info` over JSON-RPC without a model:
+
+```text
+server: pscat-mcp 0.1.0, PSCat 0.7.0-rc.4 (df39114f1223)
+clients: claude 2.1.322 (Claude Code)
+model: claude-sonnet-5-5
+
+case                agent   transport  verdict  passed  turns
+------------------  ------  ---------  -------  ------  -----
+diagnose-undefined  claude  http       pass     1/1     3
+```
+
+The exit status is 0 when every row passes, 1 when a check failed, and 2
+when the billing guard stopped the run.
+
+**Budget.** Cases run one at a time. A full default run is 22 sessions
+(11 cases × 2 transports). The first 20 (10 cases) took 54 turns and 34 tool
+calls with `claude-sonnet-5-5`, about 4 minutes in all; the
+`describe-capabilities` case was added later and not yet timed. Most cases take 2 or 3 turns,
+and the first prompt takes 7. It moved the Max 5x plan's five-hour
+utilization from 8 % to 10 %, while another session was using the same
+subscription. `--repeat N` multiplies all of that. To try a change,
+run one case: `--case first-prompt --transport stdio` takes 7 turns.
+
+### The billing guard
+
+Claude usage must come only from the claude.ai (Max) subscription login,
+never from per-token API billing.
+
+**First, turn off extra usage in your claude.ai account settings.** Extra
+usage (overage) lets a plan keep going past its limits at per-token rates.
+With it off, a session that reaches the plan's limit is refused rather than
+billed. That setting is the only thing that makes per-token billing
+impossible. The guard below can *detect* overage, but it can't prevent the
+request that triggered it from being billed: it sees the overage flag only
+in the stream, after that request was sent. Each `rate_limit_event` in a
+transcript shows the account's state. On the account these evals were
+built with, it read `"overageStatus": "rejected"` and
+`"overageDisabledReason": "org_level_disabled"`.
+
+The guard in `evals/agent/guard.py` fails closed: a missing field, an
+unparseable line or an unexpected event stops the run. It has five layers.
+
+1. **Parent environment.** The runner refuses to start when any of
+   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
+   `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` or
+   `ANTHROPIC_BASE_URL` is set, even to an empty string. Unset it and try
+   again.
+2. **Child environment.** Each `claude` child gets an allowlisted
+   environment: `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
+   `LANG`, `LC_ALL`, `LC_CTYPE` and `CLAUDE_CONFIG_DIR`, plus `TERM=dumb`.
+   Nothing else reaches it, so the variables above can't leak through, and
+   neither can a parent Claude Code session's own (`CLAUDECODE`,
+   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT` and the rest) when you start
+   the evals from inside one. `USER` is needed: without it the macOS
+   keychain lookup fails and `claude auth status` reports
+   `"loggedIn": false`.
+3. **Login.** `claude auth status --json`, run with that same child
+   environment, must exit 0 and report `"loggedIn": true`,
+   `"authMethod": "claude.ai"` and `"apiProvider": "firstParty"`. With
+   `ANTHROPIC_API_KEY` set it reports `"authMethod": "api_key"`, and the
+   guard refuses.
+4. **Command line.** The runner never passes `--bare` (it accepts only
+   `ANTHROPIC_API_KEY` or an `apiKeyHelper`, never the OAuth login),
+   `--settings` (which could add an `apiKeyHelper` or `env`),
+   `--fallback-model` or `--betas`. A unit test checks the command it
+   builds.
+5. **The stream.** The runner reads the child's stream-json line by line
+   and kills the child's process group as soon as a check fails:
+   * the first non-`system` event must come after `system/init`;
+   * `system/init` must report `"apiKeySource": "none"`, which is what a
+     claude.ai login produces (observed with Claude Code 2.1.322; an API
+     key or `apiKeyHelper` produces another value);
+   * every `rate_limit_event` must carry `"isUsingOverage": false`, because
+     extra usage beyond the plan is billed per token. A status other than
+     `allowed` or `allowed_warning` means the subscription's limit is
+     reached, so the run stops instead of retrying;
+   * at least one such `rate_limit_event` must arrive before the `result`
+     event, or before the stream ends. Those events are the only place
+     overage shows up, so a session without one can't be shown to be on the
+     subscription. Every session in the runs so far had one;
+   * the final `result` must attribute usage only to the `firstParty`
+     provider.
+
+`total_cost_usd` in the result event isn't a billing signal. Claude Code
+reports a list-price estimate there for subscription sessions too
+(`"costBasis": "list"`).
+
+### What the child sees
+
+Every run starts in a fresh, empty temporary directory, so no repository
+`CLAUDE.md` or project settings apply. The command is:
+
+```text
+claude -p --output-format stream-json --verbose --model claude-sonnet-5-5 --max-turns N
+  --mcp-config <0600 temp file> --strict-mcp-config --tools=
+  --allowedTools 'mcp__pscat-render__*' --permission-mode dontAsk
+  --setting-sources project --no-session-persistence      (prompt on stdin)
+```
+
+* `--verbose` is required: `-p` with `stream-json` exits with an error
+  without it.
+* `--strict-mcp-config` drops every MCP server other than the one in
+  `--mcp-config`, including the PSCat plugin's `pscat` server.
+* `--setting-sources project` skips your user settings, so installed
+  plugins (the PSCat plugin's skills and hooks), hooks, the default
+  permission mode and the default model don't apply. Auth is unaffected:
+  the login lives in the keychain, not in settings.
+* `--tools=` removes the built-in tools (Bash, Read, ToolSearch and the
+  rest), so the server's three tools are loaded directly instead of being
+  deferred behind ToolSearch.
+* `--allowedTools 'mcp__pscat-render__*'` lets every tool of the server run
+  in `-p` mode. Without it, each call is refused ("you haven't granted it
+  yet") and shows up in `permission_denials`. `--permission-mode dontAsk`
+  isn't needed for that, but it keeps a `defaultMode` from managed settings
+  from deciding anything else.
+
+The guard checks the result in `system/init`: `mcp_servers` must be
+exactly `pscat-render` (connected), every tool must start with
+`mcp__pscat-render__`, and only built-in plugins may be loaded. Otherwise
+the runner kills the child as soon as it reads that event, and stops the
+whole eval run.
+
+Claude Code keeps per-directory state (for example a PDF result saved as a
+file) under `~/.claude/projects/<cwd>` even with
+`--no-session-persistence`. The runner deletes that one folder for each
+run's temporary directory, and touches nothing else in your configuration.
+
+### HTTP
+
+For `--transport http` the runner starts `pscat-mcp-server serve-http` on
+`127.0.0.1` with port 0, reads the port it bound from the log, and waits
+for `/healthz`. The bearer token is random for each eval run. It's written
+to a mode-600 file in a mode-700 temp directory, together with the
+client's MCP config (the `Authorization` header). Both are deleted when the
+run ends. The token is never printed, and it is redacted from saved
+transcripts and logs. Both transports use the server name `pscat-render`,
+so the cases are the same. An HTTP run also checks that the server logged
+at least one `POST /mcp` for each tool call. The server is stateless, so
+every call is its own POST.
+
+### Codex (optional)
+
+`--agent codex` runs `codex exec --json --ephemeral --ignore-user-config
+--ignore-rules --sandbox read-only` with the server given through `-c
+mcp_servers.pscat-render.*` (for HTTP, the token goes in an environment
+variable named by `bearer_token_env_var`). `--ignore-user-config` keeps
+your `~/.codex/config.toml` servers and plugins out. Codex still uses its
+own login from `CODEX_HOME`. Shell, file and web actions count as calls
+outside the server, and fail the "only pscat-render tools" check. The Codex
+transcript parser follows the documented `codex exec --json` events. Only
+its error path has been seen in a real run, so treat Codex verdicts as
+provisional until a passing Codex transcript has been checked.
+
+### Cases
+
+Each `evals/agent/cases/*.json` file is one case: the scenarios in
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) and the
+first prompt in section 5.
+
+```json
+{
+  "id": "render-shapes",
+  "title": "Scenario 1: render a supplied program verbatim at 400x300",
+  "transports": ["stdio", "http"],
+  "max_turns": 6,
+  "prompt": "Render this PostScript ... (400×300 points):\n\n{{file:examples/shapes.ps}}",
+  "expect": {
+    "tools_required": ["render_postscript"],
+    "calls": [{
+      "tool": "render_postscript",
+      "args": {"source": {"equals_text": "{{file:examples/shapes.ps}}"},
+               "width": 400, "height": 300, "format": {"in": ["png", null]}},
+      "result": {"is_error": false, "content_types": ["image"],
+                 "structured": {"ok": true, "artifacts.0.width_px": 400}}
+    }],
+    "answer": {"any": [["red"], ["green"], ["gold", "yellow"]]}
+  }
+}
+```
+
+* **`calls`** picks the calls of `tool` whose arguments match `where`. By
+  default at least one of them must pass the `args` and `result` checks;
+  `which` can be `first`, `last` or `all` instead. `max_count` limits how
+  many such calls there may be (for example, an infinite loop must not be
+  retried unchanged), and `forbid: true` means there must be none.
+* **Matchers.** A plain value means equality. Operators are `equals`,
+  `equals_text` (the same text up to line endings and trailing
+  whitespace, which is how "source unchanged" is checked), `contains`,
+  `not_contains`, `in` (`null` stands for an omitted argument),
+  `absent`, `min`, `max` and `regex`.
+* **`result`** checks `is_error`, `error_code` (from
+  `structuredContent.error.code`, or from the error text), `content_types`
+  (`image`, `resource:image/svg+xml`, `resource:application/pdf`),
+  `structured` (dotted paths into `structuredContent`) and
+  `text_contains`.
+* **`answer`** checks the final answer, ignoring case: `all` keywords,
+  `any` groups (one of each), `none` and `regex`. It's how "describe the
+  image" is checked: for the first prompt, the answer must mention blue, a
+  circle, red or orange, and the text "pscat-render".
+* **`expect_any_of`** lists alternatives, and the case passes if one of
+  them does. Scenario 4, for example, passes when the agent calls with
+  `jpeg` and gets `unsupported_format`, and also when it declines and
+  offers PNG.
+* **Placeholders.** `{{file:PATH}}` inserts a repository file. Answer
+  checks can use `{{server_version}}`, `{{pscat_version}}`,
+  `{{pscat_revision}}` and `{{pscat_revision7}}`, which come from
+  `get_renderer_info`.
+* **Checks on every run.** The agent finished (it didn't hit
+  `--max-turns`), there were no permission denials, every call went to
+  `pscat-render`, and the turn count is at most `max_turns`.
+
+What Claude Code passes to the model differs from what the server sends.
+An embedded resource becomes a text block,
+`[Resource from pscat-render at <uri>] <svg ...>`. A blob becomes
+`Binary content (application/pdf, 3.4KB) saved to <path>`. And the
+`structuredContent` JSON replaces the server's text summary. The checks
+read those forms.

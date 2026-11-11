@@ -5,6 +5,11 @@ agent SDK, or MCP Inspector) connected to `pscat-mcp-server`, over stdio or
 Streamable HTTP. Each case gives a prompt to type, the tool call the agent is
 expected to make, and the result that counts as a pass.
 
+`scripts/agent-eval.sh` runs these cases with Claude Code (and optionally
+Codex) and checks the transcripts; see "Automated agent evals" in
+[`docs/LOCAL_TESTING.md`](../docs/LOCAL_TESTING.md#9-automated-agent-evals).
+The case files are in [`evals/agent/cases/`](../evals/agent/cases/).
+
 The server exposes four tools:
 
 | Tool | Arguments | Returns |
@@ -273,6 +278,10 @@ HTTP).
   `too_many_pixels` instead: `width: 5000, height: 5000` →
   `page is 5000x5000 = 25000000 pixels; the limit is 16000000 pixels (lower the size or dpi)`.
   So does the default Letter page at `dpi: 600` (5100×6600 = 33,660,000 px).
+- An agent that reads the `dpi` range in the schema may instead lower
+  `dpi` until the page fits and render it. Claude Sonnet 5.5 used 9 dpi for
+  10000×10000 (a 1250×1250 PNG) and 36 dpi for 5000×5000, and explained why.
+  That is also a pass.
 - A program that asks for a huge page itself
   (`<< /PageSize [10000 10000] >> setpagedevice`) is refused inside PSCat
   without allocating it: `postscript_error` with

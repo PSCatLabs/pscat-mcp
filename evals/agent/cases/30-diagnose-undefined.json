@@ -1,0 +1,47 @@
+{
+  "id": "diagnose-undefined",
+  "title": "Scenario 3: diagnose an undefined operator with validate_postscript",
+  "origin": "examples/agent-scenarios.md section 3",
+  "max_turns": 6,
+  "prompt": "Why doesn't this PostScript work? Check it with the pscat-render tools.\n\n```postscript\n%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) shw\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n```\n",
+  "expect": {
+    "tools_required": [
+      "validate_postscript"
+    ],
+    "calls": [
+      {
+        "tool": "validate_postscript",
+        "which": "first",
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) shw\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n"
+          }
+        },
+        "result": {
+          "is_error": false,
+          "text_contains": [
+            "shw"
+          ],
+          "structured": {
+            "valid": false,
+            "execution_error.name": "undefined"
+          }
+        }
+      }
+    ],
+    "answer": {
+      "all": [
+        "shw",
+        "show"
+      ],
+      "any": [
+        [
+          "undefined"
+        ],
+        [
+          "line 4"
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "id": "render-shapes",
+  "title": "Scenario 1: render a supplied program verbatim at 400x300",
+  "origin": "examples/agent-scenarios.md section 1",
+  "max_turns": 6,
+  "prompt": "Render this PostScript with the pscat-render tools and describe the image you get back (400×300 points):\n\n{{file:examples/shapes.ps}}",
+  "expect": {
+    "tools_required": [
+      "render_postscript"
+    ],
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "args": {
+          "source": {
+            "equals_text": "{{file:examples/shapes.ps}}"
+          },
+          "width": 400,
+          "height": 300,
+          "format": {
+            "in": [
+              "png",
+              null
+            ]
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ],
+          "structured": {
+            "ok": true,
+            "artifacts.0.width_px": 400,
+            "artifacts.0.height_px": 300
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "red"
+        ],
+        [
+          "green"
+        ],
+        [
+          "gold",
+          "yellow"
+        ],
+        [
+          "blue"
+        ],
+        [
+          "PSCat shapes"
+        ]
+      ]
+    }
+  }
+}

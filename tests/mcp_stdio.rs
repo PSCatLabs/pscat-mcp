@@ -645,23 +645,25 @@ async fn describes_art_capabilities_as_an_index() {
     assert_eq!(s["catalog_signature"].as_str().unwrap().len(), 16);
     assert!(s.get("entries").is_none() && s.get("summaries").is_none());
 
-    // Every kind the catalog has is one the `kind` argument accepts.
-    let accepted = kind_enum(&tool);
+    // The `kind` argument accepts exactly the kinds the catalog has. A PSCat
+    // bump that adds (or drops) a kind fails here, so no kind is left
+    // unqueryable.
+    let accepted: std::collections::BTreeSet<String> = kind_enum(&tool).into_iter().collect();
     let index = s["index"].as_array().unwrap();
-    let kinds: Vec<&str> = index.iter().map(|k| k["kind"].as_str().unwrap()).collect();
-    for kind in [
-        "font",
-        "type3_face",
-        "palette",
-        "template",
-        "procedure",
-        "operator",
-    ] {
-        assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
-    }
-    for kind in &kinds {
-        assert!(accepted.iter().any(|a| a == kind), "{kind} not in the enum");
-    }
+    let in_catalog: std::collections::BTreeSet<String> = index
+        .iter()
+        .map(|k| k["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        in_catalog, accepted,
+        "kinds in the catalog vs the `kind` enum in the input schema; update \
+         KINDS in src/catalog.rs and the enum in src/mcp.rs"
+    );
+    let constant: std::collections::BTreeSet<String> = pscat_mcp::catalog::KINDS
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(constant, accepted, "catalog::KINDS vs the schema enum");
     let fonts = index.iter().find(|k| k["kind"] == "font").unwrap();
     assert!(
         fonts["names"]

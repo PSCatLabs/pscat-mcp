@@ -1,0 +1,66 @@
+{
+  "id": "describe-capabilities",
+  "title": "Scenario 6: look up palette names, then one procedure's full entry, with describe_art_capabilities",
+  "origin": "examples/agent-scenarios.md section 6",
+  "max_turns": 10,
+  "prompt": "Using the pscat-render tools, tell me which mood palettes this PSCat build has. Then pick one procedure from its catalog and give me its full entry: what it does, the `run` lines that load it, and its example call. Take the names from the server, not from memory.\n",
+  "expect": {
+    "tools_required": [
+      "describe_art_capabilities"
+    ],
+    "calls": [
+      {
+        "label": "list palettes (index, or kind palette)",
+        "tool": "describe_art_capabilities",
+        "where": {
+          "kind": {
+            "in": [
+              "palette",
+              null
+            ]
+          },
+          "names": {
+            "absent": true
+          }
+        },
+        "result": {
+          "is_error": false,
+          "text_contains": [
+            "palette"
+          ]
+        }
+      },
+      {
+        "label": "full entry for named procedure",
+        "tool": "describe_art_capabilities",
+        "where": {
+          "names": {
+            "absent": false
+          }
+        },
+        "result": {
+          "is_error": false,
+          "text_contains": [
+            "source:",
+            "availability:"
+          ]
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "acid",
+          "blacklight",
+          "boiler",
+          "brass",
+          "carnival",
+          "dusk"
+        ]
+      ],
+      "regex": [
+        "\\(lib/[\\w./-]+\\) run"
+      ]
+    }
+  }
+}

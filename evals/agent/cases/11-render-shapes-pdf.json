@@ -1,0 +1,37 @@
+{
+  "id": "render-shapes-pdf",
+  "title": "Scenario 1 variant: the same program as a PDF",
+  "origin": "examples/agent-scenarios.md section 1 (variant)",
+  "max_turns": 6,
+  "prompt": "Render this PostScript as a PDF with the pscat-render tools (400×300 points) and tell me what came back:\n\n{{file:examples/shapes.ps}}",
+  "expect": {
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "args": {
+          "source": {
+            "equals_text": "{{file:examples/shapes.ps}}"
+          },
+          "format": "pdf"
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:application/pdf"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "pdf"
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "pdf"
+        ]
+      ]
+    }
+  }
+}

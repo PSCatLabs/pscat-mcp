@@ -1,3 +1,5 @@
 target/
 .env
 *.local
+evals/agent-runs/
+__pycache__/
