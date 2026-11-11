@@ -656,14 +656,15 @@ first prompt in section 5.
 What Claude Code passes to the model differs from what the server sends.
 An embedded resource becomes a text block,
 `[Resource from pscat-render at <uri>] <svg ...>`. A blob becomes
-`Binary content (application/pdf, 3.4KB) saved to <path>`. And the
+`Binary content (application/pdf, 3.4KB) saved to <path>` (an SVG over the
+text limit: `Binary content (image/svg+xml, 983.7KB) saved to <path>.svg`;
+`54-svg-large-blob.json` checks both SVG forms). And the
 `structuredContent` JSON replaces the server's text summary. The checks
 read those forms.
 A large result takes other forms, shown in
 [section 11](#11-what-clients-do-with-large-tool-results). An error result
 reaches the model as its text only, with no `structuredContent`, so a check
-on an error reads `text_contains`, not `structured`
-(`54-svg-over-cap.json`).
+on an error reads `text_contains`, not `structured`.
 
 ## 10. Server-layer evals
 
@@ -675,7 +676,7 @@ automate what the manual prompts in sections 5 and 6 and
 eye.
 
 ```bash
-cargo test --test eval_server -- --nocapture   # stdio + HTTP (bearer token); about 15 s
+cargo test --test eval_server -- --nocapture   # stdio, HTTP (bearer token), HTTP with async jobs; about 15 s
 cargo test --test eval_replay -- --nocapture   # recorded client traffic
 scripts/container-eval.sh                      # the same scenarios in the image (needs Docker)
 IMAGE=pscat-mcp:ci SKIP_BUILD=1 scripts/container-eval.sh
@@ -779,8 +780,10 @@ covers an rmcp client's cancellation of a call, which kills the worker).
 Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
 lines: `%` starts a comment that runs to the end of the line.
 
-The run prints a table (scenario, step, result, milliseconds) and writes
-`target/eval/<target>.json` and `<target>.xml` (JUnit);
+The targets are `stdio`, `http`, `http-async` (the HTTP pass with
+`PSCAT_MCP_ASYNC_JOBS=true` unless a scenario sets it, so scenario 66 runs over
+HTTP as well) and `container`. The run prints a table (scenario, step, result,
+milliseconds) and writes `target/eval/<target>.json` and `<target>.xml` (JUnit);
 `PSCAT_EVAL_REPORT_DIR` changes the directory, and `$GITHUB_STEP_SUMMARY`
 gets a markdown table when it is set.
 

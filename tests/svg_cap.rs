@@ -98,6 +98,7 @@ fn pages(r: &CallToolResult) -> (Vec<Page>, Vec<String>) {
                     blob: true,
                 }
             }
+            other => panic!("unexpected resource {other:?}"),
         })
         .collect::<Vec<_>>();
     for p in &pages {
@@ -196,7 +197,7 @@ async fn an_svg_over_the_limit_is_a_blob_resource_with_the_same_markup() {
 /// together are over it.
 #[tokio::test]
 async fn the_limit_counts_every_page_together() {
-    let client = start(&[]).await;
+    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
     let r = render(&client, TWO_PAGES, "svg").await;
     let (text_pages, returned_as) = pages(&r);
     assert_eq!(returned_as, ["text", "text"]);

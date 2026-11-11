@@ -21,7 +21,7 @@ use pscat_mcp::mcp::{PscatMcp, Transport};
 use pscat_mcp::render::RenderService;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ClientCapabilities,
-    ClientConfig, GetTaskParams, Implementation, TaskPayload, TaskStatus,
+    ClientConfig, GetTaskParams, Implementation, ResourceContents, TaskPayload, TaskStatus,
 };
 use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -29,6 +29,8 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 const SYNC_TIMEOUT_MS: u64 = 1_000;
 const JOB_TIMEOUT_MS: u64 = 15_000;
@@ -1196,7 +1198,6 @@ async fn a_job_returns_svg_as_text_or_blob_by_the_svg_limit() {
         match want {
             "text" => assert!(res["text"].as_str().unwrap().contains("<svg"), "{res}"),
             _ => {
-                use base64::Engine as _;
                 let svg = base64::engine::general_purpose::STANDARD
                     .decode(res["blob"].as_str().unwrap())
                     .unwrap();
@@ -1207,4 +1208,97 @@ async fn a_job_returns_svg_as_text_or_blob_by_the_svg_limit() {
         client.cancel().await.ok();
         assert_eq!(processes_with(&tag), 0);
     }
+}
+
+/// Many small marks: an SVG well over the 20 000-byte text limit set below.
+const MANY_MARKS: &str =
+    "1 srand 0 1 2000 { pop rand 500 mod rand 500 mod 3 3 rectfill } for showpage";
+const SVG_CAP: u64 = 20_000;
+
+/// Over stdio (jobs are always on there) with the SVG text limit set
+/// through the environment: a `start_render` job whose SVG is over the
+/// limit ends `done`, and `render_result` returns it as a blob resource
+/// holding the whole SVG (before #63 it failed with `output_too_large`).
+/// Polls with a generous deadline.
+#[tokio::test]
+async fn a_job_whose_svg_is_over_the_cap_returns_a_blob() {
+    let cap = SVG_CAP.to_string();
+    let client = common::start_stdio(
+        env!("CARGO_BIN_EXE_pscat-mcp-server"),
+        &[("PSCAT_MCP_MAX_SVG_BYTES", &cap)],
+    )
+    .await;
+    let start = client
+        .call_tool(
+            CallToolRequestParams::new("start_render").with_arguments(
+                json!({"source": MANY_MARKS, "width": 500, "height": 500, "format": "svg"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("start_render");
+    assert_ne!(start.is_error, Some(true), "{start:?}");
+    let id = start.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let state = loop {
+        let r = client
+            .call_tool(
+                CallToolRequestParams::new("render_status")
+                    .with_arguments(json!({ "job_id": id }).as_object().unwrap().clone()),
+            )
+            .await
+            .expect("render_status");
+        let s = r.structured_content.as_ref().unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if matches!(s.as_str(), "done" | "failed" | "cancelled") {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "job never finished: {s}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(state, "done");
+
+    let r = client
+        .call_tool(
+            CallToolRequestParams::new("render_result")
+                .with_arguments(json!({ "job_id": id }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("render_result");
+    assert_eq!(r.is_error, Some(false), "{r:?}");
+    let s = r.structured_content.clone().expect("structured content");
+    assert_eq!(s["ok"], true, "{s}");
+    assert_eq!(s["format"], "svg", "{s}");
+    assert_eq!(s["artifacts"][0]["returned_as"], "blob", "{s}");
+    let bytes = s["artifacts"][0]["bytes"].as_u64().unwrap();
+    assert!(bytes > SVG_CAP, "{s}");
+    let blobs: Vec<_> = r
+        .content
+        .iter()
+        .filter_map(|c| match c.as_resource().map(|e| &e.resource) {
+            Some(ResourceContents::BlobResourceContents {
+                blob, mime_type, ..
+            }) => {
+                assert_eq!(mime_type.as_deref(), Some("image/svg+xml"));
+                Some(blob.clone())
+            }
+            Some(other) => panic!("expected a blob resource, got {other:?}"),
+            None => None,
+        })
+        .collect();
+    assert_eq!(blobs.len(), 1);
+    let svg = base64::engine::general_purpose::STANDARD
+        .decode(&blobs[0])
+        .unwrap();
+    assert_eq!(svg.len() as u64, bytes);
+    assert!(String::from_utf8(svg).unwrap().contains("<svg"));
+    client.cancel().await.ok();
 }
