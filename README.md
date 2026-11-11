@@ -16,7 +16,10 @@ image-generation model.
 * Two transports sharing one tool implementation: **Streamable HTTP**
   (`serve-http`, for remote use) and **stdio** (`serve-stdio`, for local
   agents such as Claude Code).
-* Stateless: no sessions, no storage, any instance serves any request.
+* Stateless: no sessions, no storage, any instance serves any request. The
+  one exception is the optional async render jobs (`start_render`), kept in
+  the server's memory: always on over stdio, opt-in over HTTP for a single
+  instance (see [Long renders](#long-renders-async-jobs)).
 * Untrusted programs run in a short-lived, resource-limited worker process
   per render (see [Security](#security-model)).
 
@@ -59,6 +62,10 @@ authentication and container packaging.
 | `validate_postscript` | Tokenizer pass, then executes the program in the same sandbox and discards the output. Returns the PostScript error (name, offending command, line), lint findings (blank page, stack leak, unbalanced `gsave`), page count and stdout. | same |
 | `describe_art_capabilities` | Lists the creative capabilities of the linked PSCat build: fonts, Type 3 faces, mood palettes, page templates, artkit and style-pack procedures, native operators, config dials. The whole catalog is about 280 KB, so a reply is one bounded view (under 24 KB, in both `content` and `structuredContent`, which carry the same information; some clients, Claude Code among them, give the model only the `structuredContent` JSON). No arguments: an index of every kind with its names, and installed font packs. `kind` (`font`, `type3_face`, `palette`, `template`, `procedure`, `operator`, `dial`): that kind's names with a one-line description each, 100 at a time (`offset`, `limit` 1–100). `names` (up to 20, optionally narrowed by `kind`): full entries with parameters, defining library file, `run` lines that load it, example and availability; unknown names are listed under `not_found`, and names that do not fit the reply under `omitted`. Runs no PostScript. The catalog is read once in a worker process, so it matches what renders can reach, and kept for the life of the server; later calls take no render slot. Server file paths are not reported. | same |
 | `get_renderer_info` | PSCat version, formats, limits in force, capability notes. Runs nothing. | same |
+| `start_render` | Starts `render_postscript` as a background job, for a render past the sync deadline: the same arguments (checked here, before a job is accepted), and it returns a `job_id` (a random UUID) at once with state `queued`. The job runs under the job deadline (`PSCAT_MCP_JOB_TIMEOUT_MS`, 10 minutes) and every other render limit. Only with async jobs on (always over stdio; `PSCAT_MCP_ASYNC_JOBS` over HTTP). A cap or the results budget refuses it with `server_busy` or `results_budget_exceeded`. | not read-only, not idempotent, non-destructive, closed-world |
+| `render_status` | A job's `state` (`queued`, `running`, `done`, `failed`, `cancelled`), `elapsed_seconds`, `timeout_seconds`, and `job_error` (code and message) for a failed job or `expires_in_seconds` for a finished one. Under 2 KB. An unknown, expired or other client's `job_id` is `unknown_job`. | read-only, idempotent |
+| `render_result` | A finished job's result: what `render_postscript` returns (the same content blocks and envelope, within the same output caps), or the failed render's error with `isError`. A queued or running job is `job_not_finished`, a cancelled one `cancelled`. It can be fetched again until the job expires. | read-only, idempotent |
+| `cancel_render` | Cancels a job: a queued one never starts, a running one's worker is killed. Returns the job's status (`cancelled` once it has stopped); a finished job is left as it is. | not read-only, idempotent, non-destructive |
 
 ### Output formats
 
@@ -79,7 +86,82 @@ Failures are tool results with `isError: true` and
 `source_too_large`, `unsupported_format`, `invalid_dimensions`,
 `too_many_pixels`, `postscript_error`, `limit_exceeded`, `timeout`,
 `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
-`worker_failed`. A failed render never returns an image.
+`worker_failed`, and for async jobs `unknown_job`, `job_not_finished` and
+`results_budget_exceeded`. A failed render never returns an image.
+
+## Long renders: async jobs
+
+A synchronous call is limited by `PSCAT_MCP_RENDER_TIMEOUT_MS` (20 s) and,
+in practice, by the client's own tool-call timeout (Codex's is 60 s). For a
+longer render there are two ways in, served by one job store in the render
+service:
+
+1. **The explicit tools**, as in the PSCat plugin: `start_render` returns a
+   `job_id`, `render_status` polls it, `render_result` fetches the pages and
+   `cancel_render` stops it. They are ordinary tools, so every client can
+   use them. They run `render_postscript` only.
+2. **The MCP Tasks extension** (SEP-2663, `io.modelcontextprotocol/tasks`),
+   with `PSCAT_MCP_TASKS=true`. The server then advertises the extension,
+   and a `tools/call` of `render_postscript`, `chalkboard_math` or
+   `handwrite` that declares it in its client capabilities gets a task
+   handle; `tasks/get` returns the tool's result once it is done, and
+   `tasks/cancel` kills the worker. A call that does not declare it gets
+   today's synchronous result. A task is a job: the explicit tools see it
+   too. `review_sheet` always answers synchronously: its plan shares out its
+   own deadline (`PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) between its cells.
+
+How it behaves:
+
+* **Ownership.** A job belongs to the client that started it: the bearer
+  token over HTTP (its position in the configured list, never the token),
+  the local user over stdio. Any other client gets the same `unknown_job`
+  (or "unknown task") as for an id that never existed.
+* **Render slots.** A job holds one render slot while it runs, shared with
+  synchronous calls. At most `PSCAT_MCP_MAX_RUNNING_JOBS` jobs run at once
+  (half the slots by default, and always fewer than the slots, so a
+  synchronous call always has one; with a single slot it is 1, and a running
+  job then makes synchronous calls wait). More jobs wait `queued`, with no
+  queue timeout; time queued does not count against the job deadline.
+* **Caps and memory.** At most `PSCAT_MCP_MAX_JOBS_PER_PRINCIPAL` unfinished
+  jobs per client and `PSCAT_MCP_MAX_JOBS` in all (`server_busy`). Results
+  are held in memory: a job reserves its largest possible result
+  (`PSCAT_MCP_MAX_OUTPUT_BYTES` as base64, plus stdout) when it is accepted
+  and keeps what it produced once it finishes, all against
+  `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (`results_budget_exceeded`). A
+  finished job is kept for `PSCAT_MCP_JOB_RESULT_TTL_MS` (an hour, as in
+  the plugin) and can be fetched again until then; when the budget is short,
+  results already fetched are dropped first.
+* **Deadline.** `PSCAT_MCP_JOB_TIMEOUT_MS`, 10 minutes by default: thirty
+  times the sync deadline, while one job holds a slot and up to the memory
+  limit for that long. The plugin allows an hour; set 3600000 to match.
+  PSCat's own time limit and the worker's CPU rlimit follow it. A job's
+  step limit is `PSCAT_MCP_JOB_MAX_STEPS` (25,000,000,000 by default, PSCat's
+  own default for untrusted programs and the plugin's; the sync 5,000,000,000
+  would stop a busy program long before the deadline). Every other limit
+  (memory, pixels, pages, output) is the render's.
+* **Shutdown.** Running jobs are killed (not drained) when the stdio client
+  disconnects or after the HTTP grace period; their results are lost.
+* **Hosted HTTP.** Off by default (`PSCAT_MCP_ASYNC_JOBS=false`): with it
+  off the four tools are not listed and the Tasks extension is not
+  advertised. The store is in memory, so it only works on **one instance
+  whose CPU stays allocated**: on Cloud Run with more than one instance a
+  status call can reach an instance that never saw the job, a scale-to-zero
+  loses every job, and with CPU allocated only during requests a job gets
+  almost no CPU between polls. A shared store and somewhere the render gets
+  CPU are tracked in the `pscat-cloud` design (see
+  [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#async-render-jobs)).
+
+Which clients send the Tasks capability (November 2026):
+
+| Client | Declares `io.modelcontextprotocol/tasks` on `tools/call`? | How we know |
+|---|---|---|
+| Claude Code 2.1.322 (HTTP) | **No.** It declares it on `server/discover` and `tools/list`, not on `tools/call`, so it always gets the synchronous result. | verified: the capture in `evals/server/fixtures/claude-code.json` |
+| Codex | unknown | no capture; the MCP extension matrix lists no support (docs only) |
+| Claude.ai, ChatGPT | unknown | not tested; the community-maintained extension matrix on modelcontextprotocol.io gives no confirmed support (docs only) |
+| rmcp 3.9 client | yes, when built with `ClientCapabilities::builder().enable_tasks()` | verified: `tests/jobs.rs` |
+
+So the Tasks path is off by default and the explicit tools are the way in
+for the clients in use today.
 
 ## Build
 
@@ -227,6 +309,15 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_OUTPUT_BYTES` | 8388608 | inline output per render |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
+| `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
+| `PSCAT_MCP_TASKS` | `false` | also serve the MCP Tasks extension on top of the jobs (needs async jobs) |
+| `PSCAT_MCP_JOB_TIMEOUT_MS` | 600000 | wall-clock deadline of one job's worker (SIGKILL after it); PSCat's time limit and the CPU rlimit follow it |
+| `PSCAT_MCP_JOB_MAX_STEPS` | 25000000000 (0 if `PSCAT_MCP_MAX_STEPS` is 0) | PSCat step limit of a job |
+| `PSCAT_MCP_MAX_RUNNING_JOBS` | half the render slots, at least 1 | jobs running at once (more wait queued); must stay below `PSCAT_MCP_MAX_CONCURRENT_RENDERS` (1 with one slot) |
+| `PSCAT_MCP_MAX_JOBS_PER_PRINCIPAL` | 4 | queued or running jobs one client (token, or the stdio user) may have |
+| `PSCAT_MCP_MAX_JOBS` | 16 | queued or running jobs in all |
+| `PSCAT_MCP_JOB_RESULT_TTL_MS` | 3600000 | how long a finished job and its result are kept |
+| `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` | 134217728 | memory for job results, all jobs together; at least one largest result (`PSCAT_MCP_MAX_OUTPUT_BYTES` × 4/3 plus stdout and 4 KiB) |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level |
 | `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 
@@ -317,6 +408,12 @@ control is enforced by PSCat and which by the server.
   Labels in Korean, Japanese, Chinese or Thai need PSCat's `cjk-thai` font
   pack, which the worker's empty environment does not find with a standard
   install: they are drawn as `?`. A label is text only, never PostScript.
+* **Async jobs are in memory.** They live in the server process: lost on
+  a restart, killed at shutdown, and on HTTP usable only on a single
+  always-on instance (off by default there). `render_status` has no
+  `pages_done` (the plugin counts pages as `showpage` ends them; this
+  server's worker reports its pages only at the end). `review_sheet` does
+  not run as a job.
 * **`validate_postscript` executes the program.** PSCat has no separate
   static checker beyond its tokenizer, so validation runs the program under
   the same limits.
@@ -361,6 +458,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 board (dark slate, bright chalk, same image twice), `board: false` transparent and an RGB board, SVG and PDF inline, the LaTeX size limit, an unsupported command as `postscript_error` naming it, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |
 | `tests/handwrite.rs` | `handwrite` over stdio: the tool's schema matches the plugin's arguments, a default 612×146 note with ink pixels in the ink colour, ink, size, width, dpi and `paper: ruled` (ruled lines and margin rule, none on plain paper), the same seed twice giving identical bytes, the text limit, a note too tall for the pixel cap or the side limit as a structured error (and a 500 000-line text refused, not killed) with the server serving the next call, the measuring pass under the step limit (and a limit hit inside a megabyte word keeping the reply small), argument errors through the envelope, and empty, whitespace-only, non-Latin and control-character text |
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
+| `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client gets a task handle (render and `handwrite`), a plain one or one on a server without `--tasks` the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Exact assertions on `isError` and the error code, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |

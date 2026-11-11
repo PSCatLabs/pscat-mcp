@@ -72,14 +72,38 @@ This document lists what that deployment must get right for this image.
   `PSCAT_MCP_QUEUE_TIMEOUT_MS` (30 s by default: the sheet deadline
   defaults to the render timeout). 60 s is a good default.
 * **CPU allocation.** Keep "CPU only during requests" (the default). The
-  server does no background work.
+  server does no background work unless async jobs are on, which this
+  deployment should not do (see below).
 
 ## Shutdown
 
 On SIGTERM the server stops accepting connections and waits up to
 `PSCAT_MCP_SHUTDOWN_GRACE_SECS` (default 8; Cloud Run allows 10) for
 in-flight renders, then cancels whatever remains. Worker processes die with
-the instance's container.
+the instance's container. Async jobs, if on, are killed after the grace
+period; their results are lost.
+
+## Async render jobs
+
+`start_render`, `render_status`, `render_result`, `cancel_render` and the
+MCP Tasks extension keep their jobs and results in the server's memory. On
+Cloud Run that does not work:
+
+* a status or result call can reach another instance, or a new one after
+  scale-to-zero, which has never heard of the job (`unknown_job`);
+* with "CPU only during requests", a job running between polls gets almost
+  no CPU;
+* a restart or a scale-in loses every job.
+
+So they are **off by default over HTTP** (`PSCAT_MCP_ASYNC_JOBS=false`): the
+four tools are not listed and the Tasks extension is not advertised. Turn
+them on only for a single instance whose CPU stays allocated: one machine,
+or a Cloud Run service with `--max-instances 1`, `--min-instances 1` and
+CPU always allocated (and sized for `PSCAT_MCP_MAX_RUNNING_JOBS` workers of
+up to the memory limit each, beside the synchronous ones; results add up to
+`PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`). A hosted design (a shared job and
+result store, and a place the render gets CPU, such as a Cloud Run Job) is
+tracked in the `pscat-cloud` brief, not here.
 
 ## Sandbox
 

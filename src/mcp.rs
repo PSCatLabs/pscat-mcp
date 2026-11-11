@@ -25,6 +25,18 @@
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
 //!   [`CatalogSlice`] fields at the top level) plus the same slice as text.
 //! * `get_renderer_info` — a [`RendererInfo`] object.
+//! * `start_render`, `render_status`, `cancel_render` — a [`JobToolOutput`]
+//!   envelope (the [`JobStatus`] fields at the top level) plus the same as
+//!   JSON text. `render_result` — exactly what `render_postscript` returns
+//!   for the job's render, or a [`RenderToolOutput`] failure envelope
+//!   (`unknown_job`, `job_not_finished`, `cancelled`).
+//!
+//! The four job tools are listed only when async jobs are on (always over
+//! stdio, `--async-jobs` over HTTP). With `--tasks` too, a client that
+//! declares the MCP Tasks extension on a `tools/call` of
+//! `render_postscript`, `chalkboard_math` or `handwrite` gets a task handle
+//! (`CreateTaskResult`) instead, served by `tasks/get` and `tasks/cancel`
+//! from the same job store (see [`crate::jobs`]).
 
 use std::sync::Arc;
 
@@ -33,8 +45,10 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ResourceContents, ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ContentBlock,
+    CreateTaskResult, DetailedTask, Extensions, GetTaskParams, GetTaskResult, Implementation,
+    JsonObject, ResourceContents, ServerCapabilities, ServerConfig, TASKS_EXTENSION_ID, Task,
+    TaskPayload, TaskStatus, UpdateTaskParams,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -48,9 +62,10 @@ use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{ChalkboardParams, GenerateJob};
 use crate::handwrite::HandwriteParams;
+use crate::jobs::{JobResult, JobState, JobStatus, LOCAL_PRINCIPAL};
 use crate::render::{
-    DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, RenderError, RenderOutput, RenderRequest,
-    RenderService, ValidationReport,
+    DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, JobRequest, RenderError, RenderOutput,
+    RenderRequest, RenderService, ValidationReport,
 };
 use crate::sheet::{
     MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
@@ -82,6 +97,47 @@ pub struct RenderArgs {
     /// the call fails with invalid_request. Default false.
     #[schemars(extend("default" = false))]
     pub halftone: Option<bool>,
+}
+
+impl RenderArgs {
+    fn into_request(self) -> RenderRequest {
+        RenderRequest {
+            source: self.source,
+            format: self.format,
+            width: self.width,
+            height: self.height,
+            dpi: self.dpi,
+            halftone: self.halftone.unwrap_or(false),
+        }
+    }
+}
+
+/// Arguments of `render_status`, `render_result` and `cancel_render`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct JobIdArgs {
+    /// The job_id start_render returned.
+    pub job_id: String,
+}
+
+/// `structuredContent` of `start_render`, `render_status` and
+/// `cancel_render`. When the call worked, `ok` is true and the job's
+/// [`JobStatus`] fields are present (a failed job is still `ok`: its error
+/// is `job_error`). Otherwise `ok` is false and `error` says why.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct JobToolOutput {
+    /// True when the call worked (whatever the job's state).
+    pub ok: bool,
+    /// The job.
+    #[serde(flatten)]
+    pub job: Option<JobStatus>,
+    /// What to call next, for `start_render`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    /// Why the call failed, when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RenderError>,
+    /// The renderer that handled the request.
+    pub renderer: RendererIdentity,
 }
 
 /// Arguments of `chalkboard_math`. Defaults, ranges and the way the board
@@ -577,6 +633,30 @@ pub struct LimitsInfo {
     pub default_page_points: [u32; 2],
 }
 
+/// Async job settings, in `get_renderer_info`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct JobsInfo {
+    /// Whether `start_render` and its companions are served.
+    pub enabled: bool,
+    /// Whether the MCP Tasks extension is served.
+    pub tasks: bool,
+    /// Wall-clock deadline of one job's worker, in milliseconds.
+    pub job_timeout_ms: u64,
+    /// PSCat's step limit for a job; absent when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_max_steps: Option<u64>,
+    /// Jobs running at once (more wait queued).
+    pub max_running_jobs: usize,
+    /// Unfinished jobs one client may have.
+    pub max_jobs_per_principal: usize,
+    /// Unfinished jobs on the server.
+    pub max_jobs: usize,
+    /// How long a finished job is kept, in milliseconds.
+    pub result_ttl_ms: u64,
+    /// Bytes of results held, all jobs together.
+    pub results_budget_bytes: usize,
+}
+
 /// Result of `get_renderer_info`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RendererInfo {
@@ -588,6 +668,8 @@ pub struct RendererInfo {
     pub formats: Vec<FormatInfo>,
     /// Limits in force.
     pub limits: LimitsInfo,
+    /// Async jobs.
+    pub jobs: JobsInfo,
     /// What a program can and cannot reach.
     pub capabilities: Vec<String>,
 }
@@ -687,6 +769,45 @@ impl PscatMcp {
                 entries.insert("maxItems".into(), limits.max_sheet_cells.into());
             }
         }
+        let jobs = service.jobs();
+        if jobs.enabled() {
+            let c = jobs.config();
+            if let Some(route) = tool_router.map.get_mut("render_postscript") {
+                let base = route.attr.description.clone().unwrap_or_default();
+                route.attr.description = Some(
+                    format!(
+                        "{base} For a render that may take longer, start_render runs the same \
+                         arguments as a job of up to {} ms.",
+                        c.job_timeout_ms
+                    )
+                    .into(),
+                );
+            }
+            if let Some(route) = tool_router.map.get_mut("start_render") {
+                let base = route.attr.description.clone().unwrap_or_default();
+                route.attr.description = Some(
+                    format!(
+                        "{base} Limits on this server: a job's worker may run {} ms{}, under \
+                         the same memory, pixel, page and output limits as render_postscript; \
+                         {} jobs run at once and more wait queued; at most {} unfinished jobs \
+                         per client and {} in all; a finished job is kept {} ms.",
+                        c.job_timeout_ms,
+                        c.job_limits(limits)
+                            .steps()
+                            .map_or(String::new(), |n| format!(" and {n} interpreter steps")),
+                        c.running_jobs(limits),
+                        c.max_jobs_per_principal,
+                        c.max_jobs,
+                        c.job_result_ttl_ms
+                    )
+                    .into(),
+                );
+            }
+        } else {
+            for name in JOB_TOOLS {
+                tool_router.remove_route(name);
+            }
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -750,6 +871,21 @@ impl PscatMcp {
                 max_dpi: MAX_DPI,
                 max_concurrent_renders: l.concurrency(),
                 default_page_points: [DEFAULT_PAGE_POINTS.0, DEFAULT_PAGE_POINTS.1],
+            },
+            jobs: {
+                let jobs = self.service.jobs();
+                let c = jobs.config();
+                JobsInfo {
+                    enabled: jobs.enabled(),
+                    tasks: jobs.tasks_enabled(),
+                    job_timeout_ms: c.job_timeout_ms,
+                    job_max_steps: c.job_limits(l).steps(),
+                    max_running_jobs: c.running_jobs(l),
+                    max_jobs_per_principal: c.max_jobs_per_principal,
+                    max_jobs: c.max_jobs,
+                    result_ttl_ms: c.job_result_ttl_ms,
+                    results_budget_bytes: c.job_results_budget_bytes,
+                }
             },
             capabilities: vec![
                 "File reads are confined to PSCat's built-in lib/ directory (for example \
@@ -829,16 +965,8 @@ impl PscatMcp {
         Parameters(args): Parameters<RenderArgs>,
         ct: CancellationToken,
     ) -> CallToolResult {
-        let req = RenderRequest {
-            source: args.source,
-            format: args.format,
-            width: args.width,
-            height: args.height,
-            dpi: args.dpi,
-            halftone: args.halftone.unwrap_or(false),
-        };
         let outcome = tokio::select! {
-            r = self.service.render(req) => r,
+            r = self.service.render(args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
@@ -1064,6 +1192,133 @@ impl PscatMcp {
     }
 
     #[tool(
+        name = "start_render",
+        title = "Start a render job",
+        description = "Starts render_postscript as a background job, for a render that may take \
+                       longer than one call: the same arguments, and it returns a job_id at \
+                       once. render_status(job_id) reports the state (queued, running, done, \
+                       failed or cancelled); render_result(job_id) then returns what \
+                       render_postscript would have (the pages, or the error); cancel_render \
+                       (job_id) stops it. Arguments are checked here, before a job is \
+                       accepted. A job belongs to the client that started it.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<JobToolOutput>(),
+        annotations(
+            title = "Start a render job",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn start_render(
+        &self,
+        Parameters(args): Parameters<RenderArgs>,
+        ext: Extensions,
+    ) -> CallToolResult {
+        let started = principal(&ext).and_then(|owner| {
+            self.service
+                .start_job(&owner, JobRequest::Render(args.into_request()))
+        });
+        match started {
+            Ok(status) => job_success(
+                status,
+                Some(
+                    "poll render_status with this job_id until its state is done, failed or \
+                     cancelled, then call render_result"
+                        .into(),
+                ),
+            ),
+            Err(err) => job_failure("Job not started", err),
+        }
+    }
+
+    #[tool(
+        name = "render_status",
+        title = "Render job status",
+        description = "The state of a start_render job: queued, running, done, failed or \
+                       cancelled, with elapsed_seconds and the job's timeout_seconds; for a \
+                       failed job, job_error (its code and message); for a finished one, \
+                       expires_in_seconds. Answers at once, while renders run. An unknown, \
+                       expired or other client's job_id is unknown_job.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<JobToolOutput>(),
+        annotations(
+            title = "Render job status",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn render_status(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+        ext: Extensions,
+    ) -> CallToolResult {
+        match principal(&ext).and_then(|owner| self.service.jobs().status(&owner, &args.job_id)) {
+            Ok(status) => job_success(status, None),
+            Err(err) => job_failure("No job status", err),
+        }
+    }
+
+    #[tool(
+        name = "render_result",
+        title = "Render job result",
+        description = "The result of a finished start_render job: what render_postscript \
+                       returns, the pages as content blocks, or a failed render's error with \
+                       isError. A job still queued or running is job_not_finished; a cancelled \
+                       one, cancelled; an unknown, expired or other client's job_id, \
+                       unknown_job. The result can be fetched again until the job expires.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
+        annotations(
+            title = "Render job result",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn render_result(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+        ext: Extensions,
+    ) -> CallToolResult {
+        match principal(&ext).and_then(|owner| self.service.jobs().result(&owner, &args.job_id)) {
+            Ok(result) => job_result(result),
+            Err(err) => failure_with("No render result", err),
+        }
+    }
+
+    #[tool(
+        name = "cancel_render",
+        title = "Cancel a render job",
+        description = "Cancels a start_render job: a queued job never starts, a running one's \
+                       worker is stopped. Returns the job's status, cancelled once it has \
+                       stopped. A finished job is left as it is.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<JobToolOutput>(),
+        annotations(
+            title = "Cancel a render job",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn cancel_render(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+        ext: Extensions,
+    ) -> CallToolResult {
+        let owner = match principal(&ext) {
+            Ok(owner) => owner,
+            Err(err) => return job_failure("Job not cancelled", err),
+        };
+        match self.service.cancel_job(&owner, &args.job_id).await {
+            Ok(status) => job_success(status, None),
+            Err(err) => job_failure("Job not cancelled", err),
+        }
+    }
+
+    #[tool(
         name = "get_renderer_info",
         title = "PSCat renderer info",
         description = "Reports the PSCat renderer version, this server's version, the supported \
@@ -1094,6 +1349,22 @@ impl ServerHandler for PscatMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let tool = request.name.clone();
+        let wants_task = self.service.jobs().tasks_enabled()
+            && context
+                .client_capabilities()
+                .is_some_and(|caps| caps.supports_tasks());
+        if wants_task && let Some(job) = task_request(&request) {
+            let started = principal(&context.extensions)
+                .and_then(|owner| self.service.start_job(&owner, job));
+            return Ok(match started {
+                Ok(status) => CallToolResponse::Task(CreateTaskResult::new(task_of(
+                    &status,
+                    self.service.jobs().config(),
+                ))),
+                // Refused before a job exists: the tool's usual failure.
+                Err(err) => CallToolResponse::Complete(failure_with(failure_lead(&tool), err)),
+            });
+        }
         let tcc = ToolCallContext::new(self, request, context);
         Ok(match self.tool_router.call(tcc).await? {
             CallToolResponse::Complete(result) => {
@@ -1103,8 +1374,62 @@ impl ServerHandler for PscatMcp {
         })
     }
 
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, ErrorData> {
+        let jobs = self.service.jobs();
+        let (status, result) = principal(&context.extensions)
+            .and_then(|owner| jobs.status_and_result(&owner, &request.task_id))
+            .map_err(|_| unknown_task(&request.task_id))?;
+        let payload = match (status.state, result) {
+            (JobState::Cancelled, _) => TaskPayload::Cancelled,
+            // A render that failed is still a completed tool call, with
+            // `isError: true` (SEP-2663: `failed` is for JSON-RPC errors).
+            (_, Some(result)) => TaskPayload::Completed {
+                result: result_object(&job_result(result)),
+            },
+            _ => TaskPayload::Working,
+        };
+        Ok(GetTaskResult::new(DetailedTask::new(
+            task_of(&status, jobs.config()),
+            payload,
+        )))
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        principal(&context.extensions)
+            .and_then(|owner| self.service.jobs().request_cancel(&owner, &request.task_id))
+            .map_err(|_| unknown_task(&request.task_id))
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        // A render never asks for input, so every response is for an
+        // unknown key and is ignored, as the extension requires.
+        principal(&context.extensions)
+            .and_then(|owner| self.service.jobs().status(&owner, &request.task_id))
+            .map(|_| ())
+            .map_err(|_| unknown_task(&request.task_id))
+    }
+
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        if self.service.jobs().tasks_enabled() {
+            capabilities
+                .extensions
+                .get_or_insert_with(Default::default)
+                .insert(TASKS_EXTENSION_ID.to_string(), JsonObject::new());
+        }
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
                 "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
@@ -1120,12 +1445,174 @@ impl ServerHandler for PscatMcp {
 
 /// Serve MCP over stdin/stdout until the client disconnects.
 pub async fn serve_stdio(service: Arc<RenderService>) -> anyhow::Result<()> {
-    let running = PscatMcp::new(service)
+    let running = PscatMcp::new(service.clone())
         .serve(rmcp::transport::stdio())
         .await?;
-    let reason = running.waiting().await?;
-    tracing::info!(?reason, "stdio session ended");
+    let reason = running.waiting().await;
+    // Jobs are killed, not drained: the client that could fetch them is gone.
+    service
+        .shutdown_jobs(std::time::Duration::from_secs(2))
+        .await;
+    tracing::info!(reason = ?reason.as_ref().ok(), "stdio session ended");
+    reason?;
     Ok(())
+}
+
+/// The tools that exist only while async jobs are on.
+const JOB_TOOLS: [&str; 4] = [
+    "start_render",
+    "render_status",
+    "render_result",
+    "cancel_render",
+];
+
+/// The tools a Tasks-capable client's `tools/call` runs as a task: those
+/// whose result is a [`RenderToolOutput`] and whose plan takes the job
+/// deadline (`review_sheet`'s plan shares out its own deadline).
+const TASK_TOOLS: [&str; 3] = ["render_postscript", "chalkboard_math", "handwrite"];
+
+/// Who is calling: the authenticated principal over HTTP (the auth layer
+/// puts it in the request's extensions), the local user over stdio. An HTTP
+/// request without one is refused rather than given the local identity.
+fn principal(ext: &Extensions) -> Result<String, RenderError> {
+    match ext.get::<http::request::Parts>() {
+        None => Ok(LOCAL_PRINCIPAL.to_string()),
+        Some(parts) => parts
+            .extensions
+            .get::<crate::auth::Principal>()
+            .map(|p| p.id.clone())
+            .ok_or_else(|| {
+                RenderError::new(
+                    ErrorCode::InvalidRequest,
+                    "this request has no authenticated client, so it cannot own a job",
+                )
+            }),
+    }
+}
+
+/// The job a task-eligible `tools/call` asks for, or `None` when it is not
+/// eligible or its arguments do not parse (the synchronous path then gives
+/// the argument error its usual envelope).
+fn task_request(request: &CallToolRequestParams) -> Option<JobRequest> {
+    if !TASK_TOOLS.contains(&request.name.as_ref()) {
+        return None;
+    }
+    let args = Value::Object(request.arguments.clone().unwrap_or_default());
+    match request.name.as_ref() {
+        "render_postscript" => serde_json::from_value::<RenderArgs>(args)
+            .ok()
+            .map(|a| JobRequest::Render(a.into_request())),
+        "chalkboard_math" => serde_json::from_value::<ChalkboardArgs>(args)
+            .ok()
+            .map(|a| JobRequest::Generate(a.into_request())),
+        "handwrite" => serde_json::from_value::<HandwriteArgs>(args)
+            .ok()
+            .map(|a| JobRequest::Generate(a.into_request())),
+        _ => None,
+    }
+}
+
+/// Suggested `tasks/get` interval.
+const TASK_POLL_INTERVAL_MS: u64 = 1000;
+
+/// The Tasks extension's view of a job.
+fn task_of(status: &JobStatus, config: &crate::config::JobsConfig) -> Task {
+    let stamp = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339();
+    let task_status = match status.state {
+        JobState::Queued | JobState::Running => TaskStatus::Working,
+        JobState::Done | JobState::Failed => TaskStatus::Completed,
+        JobState::Cancelled => TaskStatus::Cancelled,
+    };
+    let message = match status.state {
+        _ if status.cancel_requested => "cancel requested",
+        JobState::Queued => "queued: waiting for a render slot",
+        JobState::Running => "rendering",
+        JobState::Done => "done",
+        JobState::Failed => "the render failed; the result has the error",
+        JobState::Cancelled => "cancelled",
+    };
+    // The longest a task can be kept: its run, then the result TTL (time
+    // queued comes on top).
+    let ttl_ms = config
+        .job_timeout_ms
+        .saturating_add(config.job_result_ttl_ms);
+    Task::new(
+        status.job_id.clone(),
+        task_status,
+        stamp(status.created_at),
+        stamp(status.updated_at),
+    )
+    .with_status_message(message)
+    .with_ttl_ms(ttl_ms)
+    .with_poll_interval_ms(TASK_POLL_INTERVAL_MS)
+}
+
+/// The same "unknown task" error rmcp's own task store gives, for an
+/// unknown, expired or other client's task.
+fn unknown_task(id: &str) -> ErrorData {
+    let shown: String = id.chars().take(64).collect();
+    ErrorData::invalid_params(format!("unknown task: {shown}"), None)
+}
+
+fn result_object(result: &CallToolResult) -> JsonObject {
+    match serde_json::to_value(result) {
+        Ok(Value::Object(map)) => map,
+        _ => JsonObject::new(),
+    }
+}
+
+/// What the job's tool would have returned.
+fn job_result(result: JobResult) -> CallToolResult {
+    match result.outcome {
+        Ok(out) => render_success((*out).clone()),
+        Err(err) => failure_with(failure_lead(&result.tool), (*err).clone()),
+    }
+}
+
+/// The first words of a failed render tool's text.
+fn failure_lead(tool: &str) -> &'static str {
+    match tool {
+        "chalkboard_math" => "Chalkboard failed",
+        "handwrite" => "Handwrite failed",
+        _ => "Render failed",
+    }
+}
+
+fn job_success(status: JobStatus, next: Option<String>) -> CallToolResult {
+    let envelope = JobToolOutput {
+        ok: true,
+        job: Some(status),
+        next,
+        error: None,
+        renderer: RendererIdentity::current(),
+    };
+    let text = serde_json::to_value(&envelope)
+        .map(|mut v| {
+            if let Some(m) = v.as_object_mut() {
+                m.remove("renderer");
+            }
+            v.to_string()
+        })
+        .unwrap_or_default();
+    with_structured(
+        CallToolResult::success(vec![ContentBlock::text(text)]),
+        &envelope,
+    )
+}
+
+fn job_failure(lead: &str, err: RenderError) -> CallToolResult {
+    let text = error_text(lead, &err);
+    let envelope = JobToolOutput {
+        ok: false,
+        job: None,
+        next: None,
+        error: Some(err),
+        renderer: RendererIdentity::current(),
+    };
+    with_structured(
+        CallToolResult::error(vec![ContentBlock::text(text)]),
+        &envelope,
+    )
 }
 
 fn cancelled() -> RenderError {
@@ -1398,6 +1885,10 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
         "review_sheet" => sheet_failure(err),
         "validate_postscript" => validate_failure(err),
         "describe_art_capabilities" => capabilities_failure(err),
+        "start_render" => job_failure("Job not started", err),
+        "render_status" => job_failure("No job status", err),
+        "render_result" => failure_with("No render result", err),
+        "cancel_render" => job_failure("Job not cancelled", err),
         _ => result,
     }
 }

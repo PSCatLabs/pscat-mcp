@@ -389,6 +389,7 @@ pub async fn serve_with_capture(
     }
     let auth = authenticator(&config)?;
     let mcp_ct = CancellationToken::new();
+    let jobs_service = service.clone();
     let app = router_with_capture(
         service,
         auth.clone(),
@@ -403,6 +404,7 @@ pub async fn serve_with_capture(
     tracing::info!(
         %addr,
         auth = %auth.describe(),
+        async_jobs = jobs_service.jobs().enabled(),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
         "listening; MCP endpoint at /mcp, health at /healthz"
@@ -458,5 +460,8 @@ pub async fn serve_with_capture(
             server.abort();
         }
     }
+    // Async jobs are killed, not drained: a job may run for minutes, and its
+    // in-memory result would not outlive the process anyway.
+    jobs_service.shutdown_jobs(Duration::from_secs(2)).await;
     Ok(())
 }

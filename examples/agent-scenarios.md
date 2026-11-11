@@ -522,6 +522,57 @@ through an agent against the container image.
 
 ---
 
+## 10. Run a long render as a background job
+
+Async jobs are on over stdio; over HTTP only with `PSCAT_MCP_ASYNC_JOBS=true`
+(one instance). Without them the four job tools are not listed.
+
+**Prompt**
+
+> Run this PostScript program as a background render job instead of a
+> single call (it takes a few seconds on purpose), wait until it has
+> finished, fetch its result, and tell me what came back:
+>
+> ```postscript
+> %!PS
+> realtime /t0 exch def { realtime t0 sub 3000 gt { exit } if } loop
+> 0 0.6 0 setrgbcolor 0 0 200 100 rectfill
+> showpage
+> ```
+>
+> Use a 200 x 100 point page.
+
+**Expected tool calls**
+
+```json
+{ "name": "start_render", "arguments": { "source": "%!PS\nrealtime ...", "width": 200, "height": 100 } }
+{ "name": "render_status", "arguments": { "job_id": "<the job_id>" } }
+{ "name": "render_result", "arguments": { "job_id": "<the job_id>" } }
+```
+
+**Expected result**
+
+- `start_render` answers at once: `ok: true`, `job_id` (a UUID),
+  `state: "queued"`, `timeout_seconds: 600`, and a `next` hint.
+- `render_status` goes `queued` → `running` → `done` (about 3 s), with
+  `elapsed_seconds`; once finished, `expires_in_seconds` (an hour).
+- `render_result` returns exactly what `render_postscript` would: one PNG,
+  200×100 pixels, all green, `ok: true`, `format: "png"`. Called while the
+  job runs, it is `job_not_finished`.
+- `cancel_render` on a running job kills its worker and answers
+  `state: "cancelled"`; `render_result` is then `cancelled`.
+- A `job_id` that is unknown, expired, or another client's (another bearer
+  token over HTTP) is `unknown_job`. Over the per-client cap (4 unfinished
+  jobs) or the server's (16), `start_render` is `server_busy`; when results
+  waiting to be fetched fill the memory budget, `results_budget_exceeded`.
+
+This case is covered by `tests/jobs.rs` and
+`evals/server/scenarios/65-async-job.json`; the agent case is
+`evals/agent/cases/95-async-job.json` (stdio only, unbaselined). It has not
+been run through an agent.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -538,3 +589,4 @@ through an agent against the container image.
 | 7 | Chalkboard | `chalkboard_math` | PNG 1600×800 board with yellow chalk; an unsupported command is `postscript_error` naming it |
 | 8 | Handwritten note | `handwrite` | PNG 612×146 on ruled paper in green ink; a note too tall for the limits is `invalid_dimensions` or `too_many_pixels` |
 | 9 | Review sheet | `review_sheet` | PNG 363×396, two rows of three cells (128 px, 32 px, 32 px at 4x); a failing cell drawn with its error; budgets refused before execution |
+| 10 | Background job | `start_render`, `render_status`, `render_result` | job `queued` then `done`; PNG 200×100 green from `render_result`; `job_not_finished` before, `unknown_job` for another client |
