@@ -1,0 +1,89 @@
+{
+  "id": "runaway-steps",
+  "title": "Scenario 5a: an infinite loop stops at PSCat's step limit (limit_exceeded, limit steps) and the server keeps rendering",
+  "origin": "examples/agent-scenarios.md section 5a; docs/LOCAL_TESTING.md section 5 step 5",
+  "server_env": {
+    "PSCAT_MCP_MAX_STEPS": "1000000",
+    "PSCAT_MCP_INTERP_TIME_LIMIT_MS": "0",
+    "PSCAT_MCP_RENDER_TIMEOUT_MS": "10000"
+  },
+  "steps": [
+    {
+      "label": "{ 1 pop } loop",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n{ 1 pop } loop\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "limit_exceeded",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "limit_exceeded",
+          "error.message": "the program was stopped at the steps limit",
+          "error.postscript.name": "limitexceeded",
+          "error.postscript.limit": "steps",
+          "error.postscript.report": {
+            "contains": [
+              "limitexceeded (steps)",
+              "OffendingCommand: pop"
+            ]
+          }
+        },
+        "text_contains": [
+          "limit_exceeded"
+        ],
+        "elapsed_ms": {
+          "max": 9000
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "{ } loop showpage",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n{ } loop showpage"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "limit_exceeded",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "limit_exceeded",
+          "error.postscript.limit": "steps"
+        },
+        "elapsed_ms": {
+          "max": 9000
+        }
+      }
+    },
+    {
+      "label": "the server still renders",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    }
+  ]
+}

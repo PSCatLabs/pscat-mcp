@@ -36,6 +36,13 @@ boundaries are, and where to extend it.
                            • PNG / SVG / PDF encoding, page + byte caps
 ```
 
+On HTTP the `/mcp` stack, outermost first, is: request id and tracing,
+authentication, the body limit, the optional capture layer (`capture.rs`,
+off unless `--capture-file` is set; it records each authenticated request
+just before rmcp sees it, without tokens), then rmcp. `render.rs` logs one
+`render started` line per job it hands to a worker; the server-layer evals
+count those lines to assert how many renders a scenario executed.
+
 Every layer below `mcp.rs` is transport independent. A REST API would be a
 second caller of `RenderService` and reuse all validation, limits and error
 codes.

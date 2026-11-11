@@ -1,0 +1,119 @@
+{
+  "id": "oversized-page",
+  "title": "Scenario 5b: a 10000x10000 point page is refused (invalid_dimensions); so are a bad dpi and a zero size",
+  "origin": "examples/agent-scenarios.md section 5b",
+  "steps": [
+    {
+      "label": "10000x10000",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0 0 moveto 10000 10000 lineto stroke showpage",
+        "width": 10000,
+        "height": 10000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_dimensions",
+          "error.message": "page is 10000x10000 pixels at 72 dpi; PSCat allows at most 8000 pixels a side"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "dpi below the minimum",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "dpi": 5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_dimensions",
+          "error.message": "dpi must be between 9 and 1200, got 5"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "dpi above the maximum",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "dpi": 2000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_dimensions"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "zero width",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "width": 0,
+        "height": 10
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_dimensions",
+          "error.message": "width and height must be at least 1 point"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a program that sets a huge page itself is refused inside PSCat",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n<< /PageSize [10000 10000] >> setpagedevice\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.postscript.name": "configurationerror",
+          "error.postscript.report": {
+            "contains": "OffendingCommand: setpagedevice"
+          }
+        }
+      }
+    }
+  ]
+}

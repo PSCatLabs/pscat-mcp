@@ -405,6 +405,9 @@ impl RenderService {
         .map_err(|_| RenderError::new(ErrorCode::ServerBusy, "the server is shutting down"))?;
         self.counters.executed.fetch_add(1, Ordering::Relaxed);
         let source_len = validated.job.source.len();
+        // One line per job handed to a worker; the server-layer evals count
+        // these to assert how many renders a scenario executed.
+        tracing::info!(source_bytes = source_len, "render started");
         let outcome = self
             .backend
             .execute(validated.job, self.limits.render_timeout())

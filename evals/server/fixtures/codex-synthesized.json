@@ -1,0 +1,157 @@
+{
+  "id": "codex-synthesized",
+  "client": {
+    "name": "codex-mcp-client",
+    "version": "0.167.1"
+  },
+  "obtained": "synthesized",
+  "how": "derived from the rmcp-client capture: Codex's MCP client is built on rmcp (its binary contains rmcp-client and the user agent codex-mcp-client/0.167.1), but Codex itself was not run (its usage limit is exhausted), so the exact headers, protocol version and clientInfo it sends are NOT captured",
+  "captured_on": "2026-11-10",
+  "requests": [
+    {
+      "name": "initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "user-agent": "codex-mcp-client/0.167.1"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "version": "0.167.1"
+          },
+          "protocolVersion": "2026-07-28"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "user-agent": "codex-mcp-client/0.167.1"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      },
+      "observed": {
+        "status": 202,
+        "content_type": null
+      }
+    },
+    {
+      "name": "tools/list",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "user-agent": "codex-mcp-client/0.167.1"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/call get_renderer_info",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "user-agent": "codex-mcp-client/0.167.1"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "progressToken": 1
+          },
+          "arguments": {},
+          "name": "get_renderer_info"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/call render_postscript",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "user-agent": "codex-mcp-client/0.167.1"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "progressToken": 2
+          },
+          "arguments": {
+            "height": 50,
+            "source": "%!PS\n0 0 1 setrgbcolor 0 0 100 50 rectfill\nshowpage\n",
+            "width": 100
+          },
+          "name": "render_postscript"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    }
+  ],
+  "note": "Replace with a real capture (record with --capture-file while Codex lists and calls a tool) when Codex can run. Codex 0.167.1's binary also contains Mcp-Method and Mcp-Name header names and the 2026-07-28 protocol version, so it may behave like the claude-code fixture."
+}

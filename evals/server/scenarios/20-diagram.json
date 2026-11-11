@@ -1,0 +1,80 @@
+{
+  "id": "diagram",
+  "title": "Scenario 2: the example flowchart renders and validates; an unsupported operator (arcto) is a postscript_error with the offending command",
+  "origin": "examples/agent-scenarios.md section 2",
+  "steps": [
+    {
+      "label": "validate the flowchart",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "{{file:examples/flowchart.ps}}"
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "valid": true,
+          "page_count": 1
+        }
+      }
+    },
+    {
+      "label": "flowchart PNG 360x420",
+      "tool": "render_postscript",
+      "args": {
+        "source": "{{file:examples/flowchart.ps}}",
+        "width": 360,
+        "height": 420
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 360,
+          "height": 420,
+          "pixels": [
+            {
+              "x": 0,
+              "y": 0,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 40
+            }
+          ]
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "label": "arcto is not implemented",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0 0 moveto 50 50 50 50 10 arcto\nshowpage\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.postscript.name": "undefined",
+          "error.postscript.report": {
+            "contains": [
+              "OffendingCommand: arcto",
+              "Line: 2"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

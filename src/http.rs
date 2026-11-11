@@ -31,6 +31,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
 use crate::auth::{AuthError, Authenticator, BearerTokenAuth, NoAuth};
+use crate::capture::{Capture, capture_layer};
 use crate::config::HttpConfig;
 use crate::mcp::PscatMcp;
 use crate::render::RenderService;
@@ -144,6 +145,18 @@ pub fn router(
     auth: Arc<dyn Authenticator>,
     mcp_config: StreamableHttpServerConfig,
 ) -> Router {
+    router_with_capture(service, auth, mcp_config, None)
+}
+
+/// [`router`] with capture mode (see [`crate::capture`]): when `capture` is
+/// set, each request that passed authentication and the body limit is
+/// recorded just before rmcp handles it.
+pub fn router_with_capture(
+    service: Arc<RenderService>,
+    auth: Arc<dyn Authenticator>,
+    mcp_config: StreamableHttpServerConfig,
+    capture: Option<Arc<Capture>>,
+) -> Router {
     let body_limit = mcp_body_limit(service.limits().max_source_bytes);
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
     let mcp = StreamableHttpService::new(
@@ -156,6 +169,7 @@ pub fn router(
     let mcp = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(auth, require_auth))
         .layer(middleware::from_fn_with_state(body_limit, limit_body))
+        .layer(middleware::from_fn_with_state(capture, capture_layer))
         .service(mcp);
 
     Router::new()
@@ -342,12 +356,22 @@ async fn shutdown_signal() {
 /// turn every running render into an error. Whatever is still running when
 /// the grace period ends is cancelled and the function returns.
 pub async fn serve(config: HttpConfig, service: Arc<RenderService>) -> anyhow::Result<()> {
+    serve_with_capture(config, service, None).await
+}
+
+/// [`serve`] with capture mode on when `capture` is set.
+pub async fn serve_with_capture(
+    config: HttpConfig,
+    service: Arc<RenderService>,
+    capture: Option<Arc<Capture>>,
+) -> anyhow::Result<()> {
     let auth = authenticator(&config)?;
     let mcp_ct = CancellationToken::new();
-    let app = router(
+    let app = router_with_capture(
         service,
         auth.clone(),
         mcp_server_config(&config, mcp_ct.clone()),
+        capture,
     );
 
     let listener = tokio::net::TcpListener::bind(config.addr())

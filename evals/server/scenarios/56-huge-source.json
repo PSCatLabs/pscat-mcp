@@ -1,0 +1,53 @@
+{
+  "id": "huge-source",
+  "title": "Scenario 5c: a source over 256 KiB is refused (source_too_large) by render and validate, with no render executed",
+  "origin": "examples/agent-scenarios.md section 5c",
+  "steps": [
+    {
+      "label": "render",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n{{huge_source}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "source_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "source_too_large",
+          "error.message": {
+            "regex": "^source is \\d+ bytes; the limit is 262144 bytes$"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "validate",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\n{{huge_source}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "source_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "source_too_large"
+        },
+        "renders_executed": 0,
+        "text_contains": [
+          "Validation could not run"
+        ]
+      }
+    }
+  ]
+}

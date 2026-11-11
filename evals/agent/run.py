@@ -143,8 +143,10 @@ def placeholder_ctx(info: dict) -> dict:
 class HttpServer:
     """serve-http on a free loopback port with a throwaway bearer token."""
 
-    def __init__(self, binary: Path):
+    def __init__(self, binary: Path, extra_args: list[str] | None = None):
         self.binary = binary
+        # e.g. ["--capture-file", path] (evals/server/record_claude.py)
+        self.extra_args = list(extra_args or [])
         self.token = secrets.token_hex(32)
         self.secret_dir = Path(tempfile.mkdtemp(prefix="pscat-eval-http-"))
         os.chmod(self.secret_dir, 0o700)
@@ -169,6 +171,7 @@ class HttpServer:
                 "0",
                 "--auth-token-file",
                 str(self.token_file),
+                *self.extra_args,
             ],
             stdin=subprocess.DEVNULL,
             stdout=self._log,

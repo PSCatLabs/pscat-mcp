@@ -508,3 +508,183 @@ An embedded resource becomes a text block,
 `Binary content (application/pdf, 3.4KB) saved to <path>`. And the
 `structuredContent` JSON replaces the server's text summary. The checks
 read those forms.
+
+## 10. Server-layer evals
+
+The agent evals in section 9 judge what an agent does with the server. The
+server-layer evals check the server itself, with no model, no tokens and no
+network beyond loopback, so they run in CI on every pull request. They
+automate what the manual prompts in sections 5 and 6 and
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) check by
+eye.
+
+```bash
+cargo test --test eval_server -- --nocapture   # stdio + HTTP (bearer token); about 15 s
+cargo test --test eval_replay -- --nocapture   # recorded client traffic
+scripts/container-eval.sh                      # the same scenarios in the image (needs Docker)
+IMAGE=pscat-mcp:ci SKIP_BUILD=1 scripts/container-eval.sh
+```
+
+`cargo test --all` runs the first two. The container run is a separate step
+in `container.yml`, after the smoke test. It builds the test crate (cold,
+a few minutes; cached after that) and starts one hardened container per
+server configuration. The test reads `PSCAT_MCP_EVAL_IMAGE`; the script
+maps `IMAGE` onto it. `IMAGE` itself is deliberately not read, because
+`container.yml` sets `IMAGE` to the published name for the whole workflow.
+
+The runner is Rust, not a script, because the issue asks for the rmcp client
+and a Rust test needs nothing the required checks do not already have:
+`test (ubuntu-latest)`, `test (macos-latest)` and the MSRV job build and run
+it. The scenarios are data, so a new case is a JSON file, not Rust.
+
+### Scenarios
+
+`evals/server/scenarios/*.json`, one scenario per file, named like the agent
+cases. A scenario runs on every target (stdio, http, container) unless
+`transports` narrows it, and has the agent cases' vocabulary where it fits:
+
+```json
+{
+  "id": "render-shapes",
+  "title": "Scenario 1: render a supplied program verbatim at 400x300",
+  "origin": "examples/agent-scenarios.md section 1",
+  "server_env": {"PSCAT_MCP_MAX_PAGES": "2"},
+  "steps": [{
+    "label": "PNG 400x300 with the expected shapes",
+    "tool": "render_postscript",
+    "args": {"source": "{{file:examples/shapes.ps}}", "width": 400, "height": 300},
+    "result": {
+      "is_error": false,
+      "content_types": ["image:image/png", "text"],
+      "structured": {"ok": true, "artifacts.0.width_px": 400},
+      "png": {"width": 400, "height": 300,
+              "pixels": [{"x": 90, "y": 130, "rgb": [230, 64, 64]}]},
+      "elapsed_ms": {"max": 10000},
+      "renders_executed": 1
+    }
+  }]
+}
+```
+
+* **`server_env`** sets `PSCAT_MCP_*` variables for the server the scenario
+  runs on, so stdio, HTTP and the container are configured the same way
+  (the child's environment, or `docker run -e`). Scenarios with the same
+  `server_env` share one server. The runaway-program scenarios use short
+  deadlines this way (`PSCAT_MCP_RENDER_TIMEOUT_MS=1500`, a step cap, or
+  PSCat's own limits off so only the kill can stop the loop); the full
+  scenario run takes about 15 s.
+* **`result`** has the agent cases' `is_error` (omitted means false),
+  `error_code`, `structured` (dotted paths into `structuredContent`),
+  `text_contains` and `content_types`, and the same matchers (`equals`,
+  `equals_text`, `contains`, `not_contains`, `in`, `absent`, `min`, `max`,
+  `regex`). Content types are `text`, `image:<mime>` and
+  `resource:<mime>`, matched by prefix; `forbid_content_types` asserts a
+  failed render has no image. The server layer adds:
+  * `png`: `width`, `height` and `pixels` (`x`, `y` from the top left,
+    `rgb`, `tolerance` default 10);
+  * `resource`: `mime`, `starts_with` (a string or a list of alternatives),
+    `contains`, `min_bytes`, for an SVG or PDF signature;
+  * `elapsed_ms`: a matcher on the call's duration. Bounds are generous
+    because CI machines are slow; a `min` is safe for a deadline;
+  * `renders_executed`: how many jobs the server handed to a worker during
+    the step, counted from its `render started` log line, so it works on
+    every target. Requests refused before execution assert `0`.
+* **`parallel`** (with `outcomes`) fires calls at once and compares the
+  sorted list of results (`ok`, or the error code) with `outcomes`, which
+  is how `server_busy` is tested without depending on which call wins the
+  slot.
+* **Placeholders:** `{{file:PATH}}`, `{{server_version}}`,
+  `{{pscat_version}}`, `{{pscat_revision}}` (from `Cargo.lock`),
+  `{{huge_source}}` and `{{pages:N}}`.
+* Unknown keys are an error, so a typo cannot turn an assertion off.
+
+What is covered: the first prompt in section 5 (the runaway loop is
+`runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 5 of
+`agent-scenarios.md`, and every error code in its list except `cancelled`
+(`tests/mcp_cancel.rs` covers it: an rmcp client's cancellation kills the
+worker). Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
+lines: `%` starts a comment that runs to the end of the line.
+
+The run prints a table (scenario, step, result, milliseconds) and writes
+`target/eval/<target>.json` and `<target>.xml` (JUnit);
+`PSCAT_EVAL_REPORT_DIR` changes the directory, and `$GITHUB_STEP_SUMMARY`
+gets a markdown table when it is set.
+
+### Recorded client traffic
+
+`evals/server/fixtures/*.json` hold what clients send over HTTP: the
+headers (`Accept`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`,
+`Content-Type`, `User-Agent`), the `initialize` capabilities (or
+`server/discover`), `tools/list` and `tools/call`. `tests/eval_replay.rs`
+sends each request to the in-process server with the real worker and checks
+the reply is 2xx with valid JSON-RPC (a matching id, a result, no tool
+error). Every fixture says in its metadata how it was obtained:
+
+| Fixture | `obtained` | How |
+|---|---|---|
+| `claude-code.json` | real-capture | Claude Code 2.1.322, one `claude -p` prompt, one tool call, through the billing guard |
+| `rmcp-client.json` | real-capture | the rmcp 3.9 client |
+| `codex-synthesized.json` | synthesized | the rmcp capture with Codex's User-Agent; Codex was not run |
+| `curl-smoke.json`, `legacy-2025-03-26.json` | synthesized | written to match `scripts/container-smoke.sh` and the legacy cases in `tests/http.rs` |
+| `accept-json-only.json` | synthesized | the report in [#17](https://github.com/PSCatLabs/pscat-mcp/issues/17) |
+
+Claude Code 2.1.322 speaks the 2026-07-28 stateless protocol: no
+`initialize` and no session, a `server/discover` probe, then `tools/list`
+and `tools/call`, each with `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method`
+and `Mcp-Name` headers and the client info in `params._meta`.
+
+**Known failures.** A request can carry `"known_failure": {"issue": 17,
+"status": 406}`. Its `expect` (by default 2xx and a JSON-RPC result) is
+what it must do once fixed. The test passes while the server still returns
+that status, fails with a changed status, and **fails when the request
+starts to pass**, so whoever fixes #17 deletes `known_failure` from
+`accept-json-only.json` in the same change and the fixture then guards the
+fix.
+
+### Capture mode and recording a fixture
+
+`serve-http --capture-file PATH` (`PSCAT_MCP_CAPTURE_FILE`) is off by
+default. When set, the server appends one JSON line per `/mcp` request that
+passed authentication and the body limit: the method and path, the values
+of `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Session-Id`,
+`Mcp-Method`, `Mcp-Name`, `User-Agent` and `Host`, the names (not values)
+of all other headers, the scheme of `Authorization` and nothing else of it,
+the body (cut at 64 KiB), and the response status. It never records tokens
+or the query string, and the file is created with mode 0600. The server
+logs a warning at startup. Header names are lowercase because the server
+sees them after HTTP parsing. A test sends tokens in the header, the query
+string, a cookie and an API-key header and checks none appears in the file.
+The file contains the PostScript sources clients send, so it is for local
+debugging only; the container's root filesystem is read-only, so capture
+there needs a mounted writable path.
+
+To record a client:
+
+```bash
+# the rmcp client (needs no credential)
+PSCAT_EVAL_RECORD_DIR=/tmp/rec cargo test --test eval_replay \
+  record_rmcp_client_traffic -- --ignored --nocapture
+python3 -I evals/server/capture_to_fixture.py /tmp/rec/rmcp-client.capture.jsonl \
+  --id rmcp-client --client-name rmcp --client-version 3.9.0 \
+  --how "..." -o evals/server/fixtures/rmcp-client.json
+
+# Claude Code: one tiny prompt, subscription only, behind the billing guard
+cargo build --release
+python3 -I evals/server/record_claude.py --out evals/server/fixtures/claude-code.json
+
+# any other client: start the server with --capture-file, point the client
+# at it, then convert the capture the same way (and pass --secret TOKEN)
+```
+
+`record_claude.py` reuses `evals/agent/guard.py` and the agent harness's
+server and `claude` wrappers, and so inherits the guard: it refuses to run
+unless `claude auth status` shows a claude.ai login, drops the API-key
+environment variables, and stops if any event shows per-token billing. It
+makes one `claude -p` call with a prompt that triggers a single tool call.
+`capture_to_fixture.py` drops the `Host` and session headers and timings,
+replaces tool-use ids, and refuses to write a fixture containing a
+`--secret` value. Read a new fixture before committing it.
+
+Not recorded yet: Codex (not run), ChatGPT, Claude.ai, Gemini, MCP
+Inspector. Codex 0.167.1's binary contains the strings `Mcp-Method`,
+`Mcp-Name` and `2026-07-28`, so it probably behaves like Claude Code.

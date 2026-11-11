@@ -1,0 +1,93 @@
+{
+  "id": "postscript-errors",
+  "title": "A failed program returns the PostScript error and the program's output so far, and no image; files are not readable or writable",
+  "origin": "docs/LOCAL_TESTING.md section 6 (Errors); get_renderer_info capabilities",
+  "steps": [
+    {
+      "label": "undefined operator after some output",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(hi) print\n0 0 1 setrgbcolor\nfoo\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.postscript.name": "undefined",
+          "error.postscript.report": "%%[ Error: undefined; OffendingCommand: foo; Line: 4 ]%%",
+          "error.program_output": "hi"
+        },
+        "text_contains": [
+          "Render failed (postscript_error)",
+          "Program output before the error"
+        ]
+      }
+    },
+    {
+      "label": "reading a file outside lib/ is refused",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(/etc/passwd) (r) file\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.postscript.name": "invalidfileaccess"
+        }
+      }
+    },
+    {
+      "label": "writing a file is refused",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(/tmp/pscat-eval-should-not-exist) (w) file\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.postscript.name": "invalidfileaccess"
+        }
+      }
+    },
+    {
+      "label": "a program that prints and draws succeeds",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(hello from the program) print\n0 0 10 10 rectfill\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true,
+          "program_output": "hello from the program"
+        }
+      }
+    }
+  ]
+}

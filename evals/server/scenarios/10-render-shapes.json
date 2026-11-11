@@ -1,0 +1,87 @@
+{
+  "id": "render-shapes",
+  "title": "Scenario 1: render a supplied program verbatim at 400x300",
+  "origin": "examples/agent-scenarios.md section 1",
+  "steps": [
+    {
+      "label": "PNG 400x300 with the expected shapes",
+      "tool": "render_postscript",
+      "args": {
+        "source": "{{file:examples/shapes.ps}}",
+        "width": 400,
+        "height": 300
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "mime_type": "image/png",
+          "page_count": 1,
+          "artifacts.0.page": 1,
+          "artifacts.0.width_px": 400,
+          "artifacts.0.height_px": 300,
+          "artifacts.0.mime_type": "image/png"
+        },
+        "text_contains": [
+          "Rendered 1 page as PNG (400x300 px"
+        ],
+        "png": {
+          "width": 400,
+          "height": 300,
+          "pixels": [
+            {
+              "x": 90,
+              "y": 130,
+              "rgb": [
+                230,
+                64,
+                64
+              ]
+            },
+            {
+              "x": 185,
+              "y": 170,
+              "rgb": [
+                64,
+                179,
+                102
+              ]
+            },
+            {
+              "x": 265,
+              "y": 120,
+              "rgb": [
+                51,
+                115,
+                217
+              ]
+            },
+            {
+              "x": 347,
+              "y": 120,
+              "rgb": [
+                250,
+                199,
+                38
+              ]
+            },
+            {
+              "x": 5,
+              "y": 5,
+              "rgb": [
+                222,
+                235,
+                255
+              ]
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    }
+  ]
+}
