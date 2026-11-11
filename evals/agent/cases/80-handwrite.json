@@ -1,0 +1,42 @@
+{
+  "id": "handwrite",
+  "title": "Scenario 8: a handwritten note on ruled paper in green ink, with handwrite",
+  "origin": "examples/agent-scenarios.md section 8",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, write \"see you at the lake on saturday!\" as a handwritten note on ruled paper, in green ink, and tell me what came back.\n",
+  "expect": {
+    "tools_required": [
+      "handwrite"
+    ],
+    "calls": [
+      {
+        "tool": "handwrite",
+        "args": {
+          "text": {
+            "regex": "lake"
+          },
+          "paper": "ruled"
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "png"
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "note",
+          "handwrit",
+          "ruled"
+        ]
+      ]
+    }
+  }
+}

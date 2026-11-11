@@ -31,6 +31,12 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_MAX_LATEX_BYTES", default_value_t = 4096)]
     pub max_latex_bytes: usize,
 
+    /// Largest note text `handwrite` accepts, in bytes. Checked before
+    /// execution. The PSCat plugin's limit for any text input (1 MiB); the
+    /// note's size is bounded by the pixel limits whatever the text.
+    #[arg(long, env = "PSCAT_MCP_MAX_HANDWRITE_BYTES", default_value_t = 1024 * 1024)]
+    pub max_handwrite_bytes: usize,
+
     /// Wall-clock deadline for one render, in milliseconds. The worker
     /// process is killed (SIGKILL) when it passes; PSCat's own time limit is
     /// set a little below it so most runaways stop cleanly first.
@@ -88,6 +94,7 @@ impl Default for LimitsConfig {
         LimitsConfig {
             max_source_bytes: 256 * 1024,
             max_latex_bytes: 4096,
+            max_handwrite_bytes: 1024 * 1024,
             render_timeout_ms: 20_000,
             interp_time_limit_ms: None,
             max_steps: 5_000_000_000,
@@ -167,6 +174,9 @@ impl LimitsConfig {
         }
         if self.max_latex_bytes == 0 {
             return Err("max-latex-bytes must be positive".into());
+        }
+        if self.max_handwrite_bytes == 0 {
+            return Err("max-handwrite-bytes must be positive".into());
         }
         if self.render_timeout_ms == 0 {
             return Err("render-timeout-ms must be positive".into());

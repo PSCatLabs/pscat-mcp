@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 
 use crate::backend::{BackendError, RenderBackend};
 use crate::config::{LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
-use crate::generate::GenerateJob;
+use crate::generate::{GenerateJob, PlannedPage};
 use crate::worker::{
     Artifact, InterpLimits, JobMode, LintNote, OutputFormat, PsDiagnostic, SyntaxScan,
     WorkerFailure, WorkerJob, WorkerResult,
@@ -388,6 +388,7 @@ pub fn validate_request(
             halftone: req.halftone,
             limits: interp_limits(limits),
             generate: None,
+            decided_height: None,
         },
     })
 }
@@ -401,14 +402,28 @@ pub fn validate_generate(
 ) -> Result<ValidatedRequest, RenderError> {
     let plan = req.job.plan(limits)?;
     let format = parse_format(req.format.as_deref())?;
-    let page_px = check_page(plan.page_points, plan.dpi, limits)?;
+    // A fixed page is checked whole. When the generator decides the height,
+    // the width is checked as a page one pixel tall (the least a page can
+    // be) and the worker checks the whole page before it allocates it.
+    let (page_px, page_points, decided_height) = match plan.page {
+        PlannedPage::Fixed { page_points } => (
+            check_page(page_points, plan.dpi, limits)?,
+            Some(page_points),
+            None,
+        ),
+        PlannedPage::FixedWidth(budget) => {
+            let px = check_page((budget.width_points, 1), plan.dpi, limits)?;
+            (px, None, Some(budget))
+        }
+    };
     Ok(ValidatedRequest {
         page_px,
         job: WorkerJob {
             mode: JobMode::Generate,
             source: String::new(),
             format,
-            page_points: Some(plan.page_points),
+            page_points,
+            decided_height,
             dpi: plan.dpi,
             halftone: false,
             limits: interp_limits(limits),
@@ -607,6 +622,7 @@ impl RenderService {
             halftone: false,
             limits: interp_limits(&self.limits),
             generate: None,
+            decided_height: None,
         };
         let result = self.run(job).await?;
         if let Some(failure) = result.failure.clone() {

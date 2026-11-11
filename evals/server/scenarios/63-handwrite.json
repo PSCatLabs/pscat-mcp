@@ -1,0 +1,289 @@
+{
+  "id": "handwrite",
+  "title": "Scenario 8: a handwritten note (PNG), ruled paper, the same seed twice, and notes too tall, too long or malformed refused with structured errors",
+  "origin": "examples/agent-scenarios.md section 8; tests/handwrite.rs",
+  "steps": [
+    {
+      "label": "the default note: 612x146, white paper",
+      "tool": "handwrite",
+      "args": {
+        "text": "see you at the lake on saturday!"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "page_count": 1,
+          "artifacts.0.width_px": 612,
+          "artifacts.0.height_px": 146,
+          "artifacts.0.mime_type": "image/png",
+          "renderer.engine": "pscat"
+        },
+        "png": {
+          "width": 612,
+          "height": 146,
+          "pixels": [
+            {
+              "x": 3,
+              "y": 3,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 2
+            },
+            {
+              "x": 608,
+              "y": 142,
+              "rgb": [
+                255,
+                255,
+                255
+              ],
+              "tolerance": 2
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "ruled paper, green ink, two lines, 2x dpi",
+      "tool": "handwrite",
+      "args": {
+        "text": "one\ntwo",
+        "paper": "ruled",
+        "ink": "0.1,0.5,0.2",
+        "dpi": 144,
+        "seed": 7
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "artifacts.0.width_px": 1224,
+          "artifacts.0.height_px": 400
+        },
+        "png": {
+          "width": 1224,
+          "height": 400
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "a note too tall for the pixel cap (4000 points wide, 100 lines)",
+      "tool": "handwrite",
+      "args": {
+        "text": "{{lines:100}}",
+        "width": 4000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pixels",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "too_many_pixels",
+          "error.message": {
+            "contains": "100 lines"
+          },
+          "error.input.code": "height"
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "a note over the side limit (160 lines at the default width)",
+      "tool": "handwrite",
+      "args": {
+        "text": "{{lines:160}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_dimensions",
+          "error.message": {
+            "contains": "8000 pixels a side"
+          },
+          "error.input.code": "height"
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "the server still serves the next note",
+      "tool": "handwrite",
+      "args": {
+        "text": "still here"
+      },
+      "result": {
+        "structured": {
+          "ok": true
+        },
+        "png": {
+          "width": 612,
+          "height": 146
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "text over the 1 MiB limit",
+      "tool": "handwrite",
+      "args": {
+        "text": "{{huge_note}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "source_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "source_too_large",
+          "error.message": {
+            "contains": "the limit is 1048576 bytes"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an empty text",
+      "tool": "handwrite",
+      "args": {
+        "text": " \n "
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "text is empty"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "text with no character the hand can draw",
+      "tool": "handwrite",
+      "args": {
+        "text": "你好"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "no character"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a bad paper style",
+      "tool": "handwrite",
+      "args": {
+        "text": "hi",
+        "paper": "lined"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "paper must be plain or ruled"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "ink on the wrong scale",
+      "tool": "handwrite",
+      "args": {
+        "text": "hi",
+        "ink": "255,0,0"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "ink must be R,G,B"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a width past the page limit",
+      "tool": "handwrite",
+      "args": {
+        "text": "hi",
+        "width": 9000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_dimensions",
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "width must be"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an argument of the wrong type",
+      "tool": "handwrite",
+      "args": {
+        "text": "hi",
+        "size": "big"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "invalid arguments:"
+          }
+        },
+        "renders_executed": 0
+      }
+    }
+  ]
+}
