@@ -84,7 +84,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
           title="Bump PSCat to $NEW_TAG${RELEASE:+ and release $RELEASE}"
-          git commit -am "$title"
+          # -A: the refreshed guide/ can add and remove files.
+          git add -A Cargo.toml Cargo.lock guide
+          git commit -m "$title"
           git push origin "$BRANCH"
 
           body=$(cat <<EOF

@@ -1,0 +1,41 @@
+{
+  "id": "guide-prompt-chart",
+  "title": "Scenario 9: start from the server's `chart` MCP prompt (kind bar), give the data, and render a bar chart with lib/dataviz.ps",
+  "origin": "examples/agent-scenarios.md section 9; issue #39",
+  "max_turns": 10,
+  "timeout_s": 420,
+  "mcp_prompt": {
+    "name": "chart",
+    "arguments": {
+      "kind": "bar"
+    }
+  },
+  "prompt": "The data: quarterly sign-ups, Q1 8, Q2 15, Q3 12, Q4 19. Label the four bars Q1 to Q4 and give the chart a title. Show me the rendered image.",
+  "expect": {
+    "tools_required": [
+      "render_postscript"
+    ],
+    "calls": [
+      {
+        "label": "final render uses dataviz.ps barchart and succeeds",
+        "tool": "render_postscript",
+        "which": "last",
+        "args": {
+          "source": {
+            "contains": [
+              "(lib/dataviz.ps) run",
+              "barchart"
+            ]
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ]
+        }
+      }
+    ]
+  },
+  "notes": "Unbaselined. The runner fetches the prompt with prompts/get (no model) and sends its text, then the case's prompt, as the user's message, as Claude Code does for /mcp__pscat-render__chart bar followed by typed text. The data goes in the typed text because Claude Code passes one whitespace-separated token per prompt argument."
+}

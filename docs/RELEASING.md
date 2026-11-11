@@ -18,6 +18,7 @@ This line is the only place the version is chosen.
 - Every build in CI and in the Dockerfile uses `--locked`, so a build can't silently move to a different commit.
 - `build.rs` reads the PSCat version and commit from `Cargo.lock`. They show up in `get_renderer_info`, in every tool result's `renderer` field, and as the image tag `pscat-<version>`.
 - A test checks that these values match the lockfile.
+- `scripts/vendor-guide.py` copies the PSCat plugin's skills (`plugin/skills/`) from that commit into `guide/`, and `guide/SOURCE.json` records the tag and commit. The server serves them as MCP resources and prompts. `tests/guide.rs` fails if `guide/` differs from the pinned checkout, or if `SOURCE.json` names another commit than `Cargo.lock`.
 
 There is deliberately no build argument or environment variable that overrides the PSCat version at build time. One would bypass the lockfile, and an image could then report one PSCat version while containing another.
 
@@ -30,7 +31,9 @@ There is deliberately no build argument or environment variable that overrides t
 
    The daily run follows PSCat **pre-release** tags too (`v0.7.0-rc.N`), and it doesn't change the server's version. Before merging a scheduled bump that you want to release, set the version: re-run the workflow with `release_version`, or push a commit to the bump branch with `scripts/bump-pscat.sh --latest --release-version X.Y.Z`. The tag check in step 3 rejects a release whose tag doesn't match `Cargo.toml`.
 
-   The workflow runs `cargo test --all --locked`, pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request as `github-actions[bot]`.
+   `bump-pscat.sh` also refreshes `guide/` from the new pin. PSCat may have changed the skills' text, so look over the `guide/` diff. The server's note on each guide (`src/guide.rs`) is built from the tool list, so it needs no edit unless a skill now describes something this server handles differently; `FILE_NOTES` holds per-file lines.
+
+   The workflow runs `cargo test --all --locked`, commits `Cargo.toml`, `Cargo.lock` and `guide/` (with `git add -A`, so new and removed guide files are included), pushes `bump/pscat-<tag>[-release-<version>]` and opens the pull request as `github-actions[bot]`.
 
    **Approve the checks.** GitHub holds the workflows of a pull request opened by a workflow. Open the pull request and approve the workflows awaiting approval, using the banner and button near the merge box. The five required checks then run: fmt + clippy, tests on Linux and macOS, MSRV, and the amd64 image with the smoke test.
 

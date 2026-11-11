@@ -108,8 +108,9 @@ def load_cases() -> list[dict]:
 # Server
 
 
-def server_info(binary: Path) -> dict:
-    """get_renderer_info over raw JSON-RPC on stdio; no model involved."""
+def stdio_request(binary: Path, method: str, params: dict) -> dict:
+    """One MCP request over raw JSON-RPC on stdio, after initialize; no
+    model involved. Returns the JSON-RPC result; a JSON-RPC error raises."""
     msgs = [
         {
             "jsonrpc": "2.0",
@@ -122,12 +123,7 @@ def server_info(binary: Path) -> dict:
             },
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "get_renderer_info", "arguments": {}},
-        },
+        {"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
     ]
     proc = subprocess.Popen(
         [str(binary), "serve-stdio"],
@@ -153,15 +149,38 @@ def server_info(binary: Path) -> dict:
                 proc.stdin.flush()
                 sent_rest = True
             elif msg.get("id") == 2:
-                result = msg["result"]
-                info = result.get("structuredContent")
-                if info is None:
-                    info = json.loads(result["content"][0]["text"])
-                return info
-        raise RuntimeError("no get_renderer_info reply from the server")
+                if "error" in msg:
+                    raise RuntimeError(f"{method}: {msg['error']}")
+                return msg["result"]
+        raise RuntimeError(f"no {method} reply from the server")
     finally:
         proc.kill()
         proc.wait()
+
+
+def server_info(binary: Path) -> dict:
+    """get_renderer_info, no model involved."""
+    result = stdio_request(binary, "tools/call", {"name": "get_renderer_info", "arguments": {}})
+    info = result.get("structuredContent")
+    if info is None:
+        info = json.loads(result["content"][0]["text"])
+    return info
+
+
+def compose_prompt(mcp_prompt_result: dict | None, typed: str) -> str:
+    """What the user sends when they pick an MCP prompt (Claude Code's
+    `/mcp__<server>__<prompt>`) and then type `typed`: the prompt's text
+    messages, then the typed text. Without an MCP prompt, just `typed`."""
+    if not mcp_prompt_result:
+        return typed
+    parts = []
+    for m in mcp_prompt_result.get("messages") or []:
+        content = m.get("content") or {}
+        if m.get("role") == "user" and content.get("type") == "text":
+            parts.append(content["text"])
+    if not parts:
+        raise RuntimeError("the MCP prompt has no user text message")
+    return "\n\n".join(parts + [typed])
 
 
 def placeholder_ctx(info: dict) -> dict:
@@ -954,6 +973,12 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
     timeout_s = case.get("timeout_s", DEFAULT_TIMEOUT_S)
     ctx = dict(ctx0)
     prompt = tx.expand(case["prompt"], ctx)
+    if case.get("mcp_prompt"):
+        # A case may start from one of the server's MCP prompts, as a user
+        # picking it in the client would; the server renders its text.
+        mp = case["mcp_prompt"]
+        got = stdio_request(binary, "prompts/get", {"name": mp["name"], "arguments": mp.get("arguments") or {}})
+        prompt = compose_prompt(got, prompt)
     workdir = Path(tempfile.mkdtemp(prefix="pscat-eval-cwd-"))
     out_path = run_dir / "transcripts" / f"{name}.jsonl"
     err_path = run_dir / "transcripts" / f"{name}.stderr"
