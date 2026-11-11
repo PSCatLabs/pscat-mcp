@@ -54,13 +54,39 @@ REDACTED = "<redacted-token>"
 # Cases
 
 
-def cases_sha256() -> str:
-    """A hash of every case file (name and content), so a run or baseline
-    says which case definitions its verdicts were computed under."""
-    h = hashlib.sha256()
+def case_hashes() -> dict[str, str]:
+    """A hash per case file (name and content), keyed by case id, so a run
+    or baseline says which definition of each case its verdicts were
+    computed under. One case's edit leaves every other case's hash alone."""
+    out = {}
     for path in sorted(CASES_DIR.glob("*.json")):
-        h.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
-    return h.hexdigest()[:16]
+        data = path.read_bytes()
+        h = hashlib.sha256(path.name.encode() + b"\0" + data + b"\0")
+        out[json.loads(data).get("id", path.stem)] = h.hexdigest()[:16]
+    return out
+
+
+def baseline_case_status(baseline: dict, hashes: dict[str, str]) -> tuple[list[str], list[str], list[str]]:
+    """The cases against a baseline's per-case hashes: (edited, unbaselined,
+    removed). Only an edited case makes the baseline stale: its verdicts
+    were computed under a different file. A case with no hash is new and
+    waits for the next refresh; a baselined case with no file is gone."""
+    was = baseline.get("cases", {})
+    edited = sorted(c for c in hashes if c in was and was[c] != hashes[c])
+    unbaselined = sorted(c for c in hashes if c not in was)
+    removed = sorted(c for c in was if c not in hashes)
+    return edited, unbaselined, removed
+
+
+def stale_baseline_message(name: str, edited: list[str]) -> str:
+    """What to do about baselined cases whose file changed since the baseline."""
+    return (
+        f"case file(s) edited since {name} was written: {', '.join(edited)}. Their baseline verdicts no longer "
+        "apply. Recheck the archived run directories (the baseline's runs_from) under the new files, with "
+        "`python3 -I evals/agent/run.py --recheck RUN_DIR` for each, then rebuild the baseline with "
+        "`python3 -I evals/agent/run.py --write-baseline evals/agent/baseline/<date>.json --rechecked "
+        "--from-run RUN_DIR ...` (docs/LOCAL_TESTING.md section 9). No live agent run is needed for that."
+    )
 
 
 def load_cases() -> list[dict]:
@@ -459,24 +485,32 @@ def run_totals(results: list[dict]) -> dict:
     }
 
 
-def compare(rows: list[dict], baseline: dict) -> tuple[list[str], int]:
+def compare(rows: list[dict], baseline: dict, hashes: dict[str, str] | None = None) -> tuple[list[str], int]:
     """Rows against a committed baseline: verdict changes and pass rates.
+    A row for a case the baseline has no row for is listed as unbaselined.
+    With `hashes` (the current case hashes), a row whose case file changed
+    since the baseline is listed apart and not counted: the two verdicts
+    were computed under different case definitions.
     Returns the report lines and the number of regressions."""
     base = {(r["case"], r["agent"], r["transport"]): r for r in baseline.get("rows", [])}
-    regressions, improvements, same = [], [], []
+    was_hashes = baseline.get("cases", {})
+    regressions, improvements, same, edited, unbaselined = [], [], [], [], []
     for r in rows:
         key = (r["case"], r["agent"], r["transport"])
         now = f"{r['verdict']} {r['pass']}/{r['runs']}"
         b = base.get(key)
         label = "/".join(key)
         if b is None:
-            same.append(f"  {label}: {now} (not in the baseline)")
+            unbaselined.append(f"  {label}: {now}")
             continue
         was = f"{b['verdict']} {b['pass']}/{b['runs']}"
+        line = f"  {label}: {was} -> {now}"
+        if hashes is not None and r["case"] in was_hashes and was_hashes[r["case"]] != hashes.get(r["case"]):
+            edited.append(line)
+            continue
         rank_now, rank_was = VERDICT_RANK[r["verdict"]], VERDICT_RANK[b["verdict"]]
         rate_now = r["pass"] / r["runs"] if r["runs"] else 0.0
         rate_was = b["pass"] / b["runs"] if b["runs"] else 0.0
-        line = f"  {label}: {was} -> {now}"
         if rank_now < rank_was or (rank_now == rank_was == 1 and rate_now < rate_was):
             regressions.append(line)
         elif rank_now > rank_was or (rank_now == rank_was == 1 and rate_now > rate_was):
@@ -484,9 +518,12 @@ def compare(rows: list[dict], baseline: dict) -> tuple[list[str], int]:
         else:
             same.append(line)
     lines = [f"compared with baseline {baseline.get('date', '?')} ({baseline.get('model', '?')}):"]
-    for title, group in (("regressions", regressions), ("improvements", improvements), ("unchanged", same)):
-        lines.append(f"{title}: {len(group)}")
-        lines.extend(group)
+    groups = [("regressions", regressions, True), ("improvements", improvements, True), ("unchanged", same, True)]
+    groups += [("case edited since the baseline, not compared", edited, False), ("unbaselined", unbaselined, False)]
+    for title, group, always in groups:
+        if always or group:
+            lines.append(f"{title}: {len(group)}")
+            lines.extend(group)
     return lines, len(regressions)
 
 
@@ -498,6 +535,7 @@ def make_baseline(run_dirs: list[Path], out: Path, rechecked: bool = False, serv
     --recheck) instead, i.e. under the case files as they are now."""
     results: list[dict] = []
     headers = []
+    cases: dict[str, str] = {}
     for d in run_dirs:
         name = "recheck.json" if rechecked else "summary.json"
         if not (d / name).exists():
@@ -507,7 +545,16 @@ def make_baseline(run_dirs: list[Path], out: Path, rechecked: bool = False, serv
             sys.exit(f"{d}: that run stopped early ({data['header']['stopped']}); not a baseline")
         headers.append(data["header"])
         results.extend(data["runs"])
-    keys = ("server_version", "pscat_version", "pscat_revision", "server_sha256", "model", "effort", "clients", "cases_sha256")
+        # Each case's hash, for the cases this run has results for.
+        hashes = data["header"].get("cases")
+        if hashes is None:
+            sys.exit(f"{d}: its header has no per-case hashes (a run from before they were recorded); --recheck it first")
+        for cid in sorted({r["case"] for r in data["runs"]}):
+            if cid not in hashes:
+                sys.exit(f"{d}: no case hash for {cid!r}")
+            if cases.setdefault(cid, hashes[cid]) != hashes[cid]:
+                sys.exit(f"runs differ in the case file of {cid!r}: {cases[cid]} vs {hashes[cid]}")
+    keys = ("server_version", "pscat_version", "pscat_revision", "server_sha256", "model", "effort", "clients")
     h0 = headers[0]
     for h in headers[1:]:
         for k in keys:
@@ -525,7 +572,7 @@ def make_baseline(run_dirs: list[Path], out: Path, rechecked: bool = False, serv
         "clients": h0["clients"],
         "model": h0["model"],
         "effort": h0.get("effort"),
-        "cases_sha256": h0.get("cases_sha256"),
+        "cases": dict(sorted(cases.items())),
         "verdicts": "rechecked under the cases above" if rechecked else "as run",
         "runs_from": [d.name for d in run_dirs],
         **run_totals(results),
@@ -739,7 +786,7 @@ def main(argv: list[str] | None = None) -> int:
         "pscat_version": ctx0["pscat_version"],
         "pscat_revision": ctx0["pscat_revision"],
         "server_sha256": file_sha256(binary),
-        "cases_sha256": cases_sha256(),
+        "cases": case_hashes(),
         "repo_commit": repo_commit(),
         "clients": clients,
         "model": args.model,
@@ -810,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         format_usage(header["usage"]),
     ]
     if baseline:
-        cmp_lines, _ = compare(rows, baseline)
+        cmp_lines, _ = compare(rows, baseline, case_hashes())
         tail += [""] + cmp_lines
     print("\n" + "\n".join(tail))
     text += "\n\n" + "\n".join(tail)
@@ -895,10 +942,10 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | Non
     rows = summarize(results)
     print()
     print_table(rows, header)
-    out_header = dict(header, cases_sha256=cases_sha256(), rechecked=_dt.datetime.now().isoformat(timespec="seconds"))
+    out_header = dict(header, cases=case_hashes(), rechecked=_dt.datetime.now().isoformat(timespec="seconds"))
     (run_dir / "recheck.json").write_text(json.dumps({"header": out_header, "rows": rows, "runs": results}, indent=2))
     if baseline:
-        print("\n" + "\n".join(compare(rows, baseline)[0]))
+        print("\n" + "\n".join(compare(rows, baseline, case_hashes())[0]))
     return 0 if all(r["verdict"] == "pass" for r in rows) else 1
 
 

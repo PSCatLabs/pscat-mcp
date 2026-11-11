@@ -285,8 +285,8 @@ scripts/agent-eval.sh              # every case, stdio and HTTP, once
 | `--server PATH` | Server binary. Default `target/release/pscat-mcp-server`. |
 | `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case, and write `RUN_DIR/recheck.json`. No agent runs. The HTTP POST check and an error (guard stop, timeout) keep their live result. |
 | `--max-sessions N` | Refuse to start when the plan has more than N agent sessions (default 120). The cap is per invocation; keep your own count across runs. |
-| `--compare BASELINE` | After the table, list the rows that regressed, improved or stayed the same against a baseline JSON (see below). Works with `--recheck` too. |
-| `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions, model and case files, and none may have stopped early. `--rechecked` takes each run's `recheck.json` instead; `--server-commit SHA` names the commit the binary was built from. |
+| `--compare BASELINE` | After the table, list the rows that regressed, improved or stayed the same against a baseline JSON, and those of cases the baseline has no row for as `unbaselined` (see below). Works with `--recheck` too. |
+| `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions and model, agree on the file of every case they cover, and none may have stopped early. `--rechecked` takes each run's `recheck.json` instead; `--server-commit SHA` names the commit the binary was built from. |
 
 `python3 -I evals/agent/run.py` takes the same options. The runner uses
 the Python 3 standard library only, so it needs no virtualenv and no
@@ -321,9 +321,11 @@ The exit status is 0 when every row passes, 1 when a check failed, and 2
 when the billing guard stopped the run or the plan was over
 `--max-sessions`.
 
-**Budget.** Cases run one at a time. A full default run is 22 sessions
-(11 cases × 2 transports). With `claude-sonnet-5-5` and Claude Code
-2.1.322 it takes about 62 turns, 40 tool calls and 4 to 5 minutes. Most
+**Budget.** Cases run one at a time. A full default run is 24 sessions
+(12 cases × 2 transports). The figures that follow were measured on the 22
+sessions of the 11 baselined default cases; `render-halftone` adds 2
+sessions nobody has timed yet. With `claude-sonnet-5-5` and Claude Code
+2.1.322 those 22 took about 62 turns, 40 tool calls and 4 to 5 minutes. Most
 cases take 2 or 3 turns, `describe-capabilities` takes 4 and the first
 prompt 7. The baseline below, three full runs (66 sessions) and
 `huge-source` once, moved the Max 5x plan's five-hour utilization from
@@ -353,19 +355,38 @@ between two `flaky` rows), improvements and unchanged rows. With one or
 three runs per row, a single changed row is not evidence on its own;
 repeat the case before you act on it.
 
-The baseline's verdicts hold for the case files named by its
-`cases_sha256`. Runs and rechecks record that hash too, and an offline
-test fails when the newest baseline doesn't match the case files. The
-committed 2026-11-10 baseline was rechecked under the case files it ships
-with, so the #44 case edits don't show up as improvements. When you edit
-a case, rebuild the baseline the same way from its archived run
-directories rather than compare across different case files:
+The baseline records a hash per case, in `cases` (the hash of the case
+file's name and content). A row's verdicts hold for the case file with that
+hash. Runs and rechecks record every case's hash too, and `--write-baseline`
+copies the hashes of the cases the runs cover. An offline test compares
+the newest baseline with the case files:
+
+* A case with **no** hash in the baseline is **unbaselined**. It passes the
+  test, `--compare` lists its rows under `unbaselined`, and the next live
+  baseline refresh picks up all new cases in one batch. So adding a case
+  needs no live run, and neither does a PR that adds several.
+* A baselined case whose file **changed** fails the test: its verdicts were
+  computed under the old file. `--compare` also lists such a row apart
+  (`case edited since the baseline, not compared`) instead of counting it
+  as a regression or improvement.
+* A baselined case whose file was deleted does not fail the test. Its rows
+  drop out at the next refresh.
+
+The committed 2026-11-10 baseline was rechecked under the case files it
+ships with, so the #44 case edits don't show up as improvements. When you
+edit a baselined case, recheck the archived run directories under the new
+file and rebuild the baseline, rather than compare across different case
+files. `--recheck` uses no model, only the saved transcripts:
 
 ```bash
 python3 -I evals/agent/run.py --recheck RUN_DIR      # once per run directory
 python3 -I evals/agent/run.py --write-baseline evals/agent/baseline/<date>.json \
   --rechecked --server-commit <sha> --from-run RUN_DIR [--from-run RUN_DIR ...]
 ```
+
+A run directory made before the per-case hashes existed has no `cases`
+in its `summary.json`; `--recheck` it first, and `--write-baseline` takes
+its `recheck.json`.
 
 ### Current agent behaviour
 

@@ -239,6 +239,41 @@ class TriagedCases(unittest.TestCase):
         self.assertTrue(self.passes("huge-source", [rejected], "Too big; use a loop instead."))
 
 
+class RenderHalftone(unittest.TestCase):
+    """The halftone case can pass, and fails for the wrong call or answer."""
+
+    def transcript(self, args, answer="A halftone of the shapes: black and white dots."):
+        call = tx.ToolCall("1", f"mcp__{SERVER}__render_postscript", SERVER, "render_postscript", args)
+        call.result = {
+            "is_error": False,
+            "text": "",
+            "content_types": ["image", "text"],
+            "structured": {"ok": True, "format": "png"},
+        }
+        return tx.Transcript(
+            agent="claude", calls=[call], answer=answer, num_turns=2, completed=True, stop="success"
+        )
+
+    def failed(self, t):
+        checks = tx.evaluate_case(case("render-halftone"), t, SERVER, CTX, "stdio")
+        return [c.name for c in checks if not c.ok]
+
+    def source(self):
+        return tx.expand("{{file:examples/shapes.ps}}", CTX)
+
+    def test_passes_with_halftone_true(self):
+        t = self.transcript({"source": self.source(), "width": 400, "height": 300, "halftone": True})
+        self.assertEqual(self.failed(t), [])
+
+    def test_fails_without_halftone(self):
+        t = self.transcript({"source": self.source(), "width": 400, "height": 300})
+        self.assertTrue(self.failed(t))
+
+    def test_fails_with_svg(self):
+        t = self.transcript({"source": self.source(), "halftone": True, "format": "svg"})
+        self.assertTrue(self.failed(t))
+
+
 class Matchers(unittest.TestCase):
     def m(self, spec, value=tx._MISSING):
         return tx.match_value(spec, value)[0]
@@ -393,7 +428,7 @@ class Recheck(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 run.main(["--recheck", str(d)])
             data = json.loads((d / "recheck.json").read_text())
-            self.assertEqual(data["header"]["cases_sha256"], run.cases_sha256())
+            self.assertEqual(data["header"]["cases"], run.case_hashes())
             second, first = data["runs"]
             self.assertIn(run.POST_CHECK, [c["name"] for c in first["checks"] if not c["ok"]])
             self.assertEqual(first["usage"], {"five_hour": [0.2, 0.21]})
@@ -402,7 +437,7 @@ class Recheck(unittest.TestCase):
             self.assertEqual([r["transcript"] for r in data["runs"]], [r["transcript"] for r in runs])
             rec = run.make_baseline([d], d / "base.json", rechecked=True)
             self.assertEqual(rec["verdicts"], "rechecked under the cases above")
-            self.assertEqual(rec["cases_sha256"], run.cases_sha256())
+            self.assertEqual(rec["cases"], {"first-prompt": run.case_hashes()["first-prompt"]})
             self.assertEqual(rec["runs_from"], [d.name])
             self.assertEqual(rec["duration_s"], 30.0)
 
@@ -431,6 +466,7 @@ class Baseline(unittest.TestCase):
         "model": "claude-sonnet-5-5",
         "effort": None,
         "stopped": None,
+        "cases": {"x": "hx", "y": "hy", "z": "hz", "w": "hw", "new": "hn"},
     }
 
     def write_run(self, d, runs, **header):
@@ -464,6 +500,7 @@ class Baseline(unittest.TestCase):
         self.assertEqual(rec["sessions"], 5)
         self.assertEqual(rec["turns"], 17)
         self.assertEqual(rec["server"]["commit"], "0a6e4ec")
+        self.assertEqual(rec["cases"], {"w": "hw", "x": "hx", "y": "hy", "z": "hz"})
         rows = {(r["case"], r["transport"]): r for r in rec["rows"]}
         self.assertEqual(rows[("x", "stdio")]["verdict"], "flaky")
         self.assertEqual((rows[("x", "stdio")]["pass"], rows[("x", "stdio")]["runs"]), (1, 2))
@@ -475,7 +512,8 @@ class Baseline(unittest.TestCase):
         self.assertEqual(regressions, 1)
         self.assertIn("regressions: 1\n  y/claude/stdio: pass 1/1 -> fail 0/1", text)
         self.assertIn("improvements: 1\n  x/claude/stdio: flaky 1/2 -> pass 1/1", text)
-        self.assertIn("new/claude/stdio: pass 1/1 (not in the baseline)", text)
+        self.assertIn("unbaselined: 1\n  new/claude/stdio: pass 1/1", text)
+        self.assertNotIn("not compared", text)
 
     def test_baseline_refuses_mismatched_or_stopped_runs(self):
         import tempfile
@@ -490,6 +528,31 @@ class Baseline(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 run.make_baseline([c], d / "o.json")
 
+    def test_baseline_refuses_runs_that_disagree_on_a_case_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(d / "a", [_run("x", "stdio", "pass")])
+            b = self.write_run(d / "b", [_run("x", "http", "pass")], cases={"x": "edited"})
+            with self.assertRaisesRegex(SystemExit, "differ in the case file of 'x'"):
+                run.make_baseline([a, b], d / "o.json")
+            # A case neither run covers may differ.
+            c = self.write_run(d / "c", [_run("y", "stdio", "pass")], cases={"x": "edited", "y": "hy"})
+            self.assertEqual(run.make_baseline([a, c], d / "o.json")["cases"], {"x": "hx", "y": "hy"})
+
+    def test_baseline_needs_per_case_hashes(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(d / "a", [_run("x", "stdio", "pass")])
+            data = json.loads((a / "summary.json").read_text())
+            del data["header"]["cases"]
+            (a / "summary.json").write_text(json.dumps(data))
+            with self.assertRaisesRegex(SystemExit, "--recheck it first"):
+                run.make_baseline([a], d / "o.json")
+
     def test_session_cap_refuses_before_any_agent_starts(self):
         import contextlib
         import io
@@ -501,15 +564,88 @@ class Baseline(unittest.TestCase):
         self.assertIn("more than --max-sessions 120", err.getvalue())
 
 
+class PerCaseBaseline(unittest.TestCase):
+    """A baseline holds a hash per case: a new case passes, an edited one
+    makes the baseline stale (issue #49). Runs on a copy of the case files."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cases = Path(self.tmp.name) / "cases"
+        shutil.copytree(run.CASES_DIR, self.cases)
+        saved = run.CASES_DIR
+        run.CASES_DIR = self.cases
+        self.addCleanup(setattr, run, "CASES_DIR", saved)
+        self.baseline = {"date": "d", "model": "m", "cases": run.case_hashes(), "rows": []}
+
+    def status(self):
+        return run.baseline_case_status(self.baseline, run.case_hashes())
+
+    def test_unchanged_cases_are_clean(self):
+        self.assertEqual(self.status(), ([], [], []))
+
+    def test_a_new_unbaselined_case_passes(self):
+        new = json.loads((self.cases / "10-render-shapes.json").read_text())
+        new["id"] = "brand-new"
+        (self.cases / "99-brand-new.json").write_text(json.dumps(new))
+        edited, unbaselined, removed = self.status()
+        self.assertEqual((edited, removed), ([], []))
+        self.assertEqual(unbaselined, ["brand-new"])
+        # Its neighbours' hashes did not move.
+        self.assertEqual({k: v for k, v in run.case_hashes().items() if k != "brand-new"}, self.baseline["cases"])
+
+    def test_an_edited_baselined_case_is_stale(self):
+        path = self.cases / "10-render-shapes.json"
+        path.write_text(path.read_text().replace("describe the image", "describe the picture"))
+        edited, unbaselined, _ = self.status()
+        self.assertEqual((edited, unbaselined), (["render-shapes"], []))
+        message = run.stale_baseline_message("2026-11-10.json", edited)
+        for part in ("render-shapes", "--recheck RUN_DIR", "--rechecked", "runs_from"):
+            self.assertIn(part, message)
+
+    def test_a_removed_case_is_reported_but_not_stale(self):
+        (self.cases / "10-render-shapes.json").unlink()
+        self.assertEqual(self.status(), ([], [], ["render-shapes"]))
+
+    def test_compare_lists_unbaselined_and_edited_rows(self):
+        self.baseline["rows"] = [
+            {"case": c, "agent": "claude", "transport": "stdio", "verdict": "pass", "pass": 1, "runs": 1, "turns": [2]}
+            for c in ("render-shapes", "diagram")
+        ]
+        path = self.cases / "10-render-shapes.json"
+        path.write_text(path.read_text() + "\n")
+        rows = run.summarize(
+            [_run("render-shapes", "stdio", "fail"), _run("diagram", "stdio", "pass"), _run("brand-new", "stdio", "pass")]
+        )
+        lines, regressions = run.compare(rows, self.baseline, run.case_hashes())
+        text = "\n".join(lines)
+        self.assertEqual(regressions, 0)
+        self.assertIn("unbaselined: 1\n  brand-new/claude/stdio: pass 1/1", text)
+        self.assertIn(
+            "case edited since the baseline, not compared: 1\n  render-shapes/claude/stdio: pass 1/1 -> fail 0/1", text
+        )
+        self.assertIn("unchanged: 1\n  diagram/claude/stdio: pass 1/1 -> pass 1/1", text)
+        # Without the current hashes the edit goes unnoticed, as before.
+        self.assertEqual(run.compare(rows, self.baseline)[1], 1)
+
+
 class CommittedBaseline(unittest.TestCase):
     def test_newest_baseline_matches_the_case_files(self):
-        # A case edit must come with a baseline rechecked under it, or
-        # every later --compare reports changes that are only the edit.
+        # A baselined case's edit must come with a baseline rechecked under
+        # it, or every later --compare reports changes that are only the
+        # edit. A case with no baseline row is fine: it waits for the next
+        # live refresh and --compare shows it as unbaselined.
         newest = sorted((HERE / "baseline").glob("*.json"))[-1]
         data = json.loads(newest.read_text())
-        self.assertEqual(data["cases_sha256"], run.cases_sha256(), f"rebuild {newest.name} with --recheck/--rechecked")
-        ids = {c["id"] for c in run.load_cases()}
-        self.assertEqual({r["case"] for r in data["rows"]}, ids)
+        # Unbaselined (new) and removed cases do not fail: a new case waits
+        # for the next refresh, a deleted one's rows drop out of it.
+        edited, _unbaselined, _removed = run.baseline_case_status(data, run.case_hashes())
+        self.assertEqual(edited, [], run.stale_baseline_message(newest.name, edited))
+        # Every baselined case has rows, and every row has a baselined case.
+        self.assertEqual({r["case"] for r in data["rows"]}, set(data["cases"]))
         text = newest.read_text()
         for private in ("/Users/", "/Volumes/", "/private/", "/home/", "@"):
             self.assertNotIn(private, text)
