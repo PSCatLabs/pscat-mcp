@@ -21,7 +21,8 @@ boundaries are, and where to extend it.
                            • validate_request: size, format, dpi, page px, pixel cap
                            • validate_generate: generate.rs plan (input size, board
                              config), then the same format/page/pixel checks
-                             (for a note: its width; the worker checks the height)
+                             (for a note: its width; the worker checks the height;
+                             for a review sheet: every sheet budget, in sheet.rs)
                            • semaphore: bounded concurrent renders + queue timeout
                            • maps worker/backend failures to stable ErrorCodes
                                │  WorkerJob (JSON)
@@ -34,6 +35,8 @@ boundaries are, and where to extend it.
                                ▼
                          worker.rs  (child process, no async runtime)
                            • Generate jobs: generate.rs writes the program here
+                             (a review sheet: sheet.rs renders every cell and
+                             composes the PNG here)
                            • pscat::Interp with Limits (steps/time/memory)
                            • reads confined to PSCat's compiled-in lib/
                            • no write roots, stdout captured, stderr silenced
@@ -41,8 +44,8 @@ boundaries are, and where to extend it.
 ```
 
 On HTTP the `/mcp` stack, outermost first, is: request id and tracing,
-authentication, the body limit (six times the larger of the source and
-`handwrite` text limits, plus 64 KiB, so an input a little over its limit
+authentication, the body limit (six times the largest of the source,
+`handwrite` text and `review_sheet` source limits, plus 64 KiB, so an input a little over its limit
 still gets a structured error), the optional capture layer (`capture.rs`,
 off unless `--capture-file` is set; it records each authenticated request
 just before rmcp sees it, without tokens), then rmcp. `render.rs` logs one
@@ -83,6 +86,13 @@ are the first thing to re-check when bumping the pin:
   object of fixed depth and never the LaTeX. This is the one `pscat_extras`
   call outside the worker. `chalk` needs no cargo feature
   (`default-features = false` only drops the window).
+* `pscat::contact_sheet` and `pscat::png::encode` — `review_sheet` (see
+  [Review sheets](#review-sheets)): the layout (`Layout`), the label and
+  caption strips (`render_text`), nearest-neighbour zoom, the hairline
+  frames and the sheet's PNG, as `pscat sheet` uses them; plus the page
+  rasters of `pscat::gfx` again (a cell is its program's last page). The
+  layout, which is arithmetic on sizes, also runs in the server, to check a
+  sheet's budgets before a worker starts; nothing else does.
 * `pscat::capabilities` — the art catalog behind `describe_art_capabilities`.
   It runs no PostScript. It lists fonts by scanning font directories, so the
   worker computes it (`JobMode::Capabilities`): the worker's environment is
@@ -178,13 +188,101 @@ a fresh interpreter, like the plugin's, so the same seed gives the same
 bytes. A text with no drawable character, or only whitespace, is refused in
 `plan`. There is no `explain` arm: the library raises no input errors.
 
-To add a kind (`review_sheet`): a `GenerateJob` variant with its three arms,
-its hidden PSCat calls in `pscat_extras`, a `PlannedPage` that says what is
-fixed, and a tool in `mcp.rs` that builds a `GenerateRequest` and calls
-`RenderService::generate`. A
-generator whose output is pages rather than a program (a contact sheet of
-several renders) would add a second output shape next to
-`GeneratedProgram`, handled by the same worker branch.
+To add a kind: a `GenerateJob` variant with its three arms, its hidden PSCat
+calls in `pscat_extras`, a `PlannedPage` that says what is fixed, and a tool
+in `mcp.rs` that builds a `GenerateRequest` and calls
+`RenderService::generate`.
+
+### Review sheets
+
+`review_sheet` (`src/sheet.rs`) is a kind whose output is an image rather
+than a program: `generate` returns `Generated::Sheet` (the PNG and a
+report of every cell) instead of `Generated::Program`, the worker returns
+that PNG as the job's one artifact, and the plan is a `PlannedPage::Sheet`
+carrying a `SheetBudget` that travels in the job (`WorkerJob.sheet`). Its
+arguments, defaults, caps (32 cells, 200-character labels, zoom 2 to 16),
+layout and rule for failed cells are the plugin's, and the PNG is byte for
+byte what `pscat sheet` writes for the same programs, pages, dpis and
+labels.
+
+**What runs where.** The programs and the labels are untrusted, so the
+worker does all of the work: draws the label and caption strips (PSCat
+lays the text out by running a program it writes), lays the sheet out
+exactly, checks it against the budget again, allocates it, renders every
+cell and encodes the PNG. The server only runs the plan, which reads the
+arguments and checks every budget:
+
+1. the cell count and the source bytes (in all, and each entry against the
+   source limit), counted from the argument lengths before anything is
+   allocated per entry or per cell;
+2. that every cell can have at least 100 ms of the sheet's time, after
+   250 ms left for drawing the strips and allocating the sheet (the worker
+   shares out what is left once that is done, so the two agree);
+3. each cell's sides after zoom (8000 pixels), then the pixels the cells
+   render, all together (before zoom);
+4. the sheet's sides (8000 pixels) and pixels, from PSCat's `Layout` with
+   each label strip at an upper bound (1.1 em a character, 1.4 em tall;
+   PSCat's widest glyphs are 1 em) and each caption at 0.75 em a character.
+
+A refusal names its budget in `error.input.code` (`cells`, `sources`,
+`source`, `deadline`, `cell_side`, `cell_pixels`, `sheet_side`,
+`sheet_pixels`), takes no slot and starts no worker. Because the plan's
+strips are upper bounds, a sheet the plan admits always fits once the worker
+has the real strips; the worker's check is the backstop, before it
+allocates the sheet or runs a cell. The cost is that a sheet near a limit,
+with labels wider than its cells, can be refused where the plugin would draw
+it.
+
+**Slots and isolation.** A sheet is one worker job in one render slot,
+under its own deadline (`PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`, which `RLIMIT_CPU`
+follows), and its cells run one after another in that process. Each cell
+runs on a fresh thread (8 MiB of stack, the main thread's; a fresh name
+interner, so a cell is byte for byte a standalone render) with a fresh
+interpreter under `worker::apply_limits`, the sandbox every render gets;
+PSCat's memory limit counts heap growth from when a cell's limits are set,
+so it is per cell. A panic is that cell's `worker_failed`, drawn blank. The
+plugin runs each cell in its own `pscat` child instead. One job keeps the
+slot accounting honest (one slot is one process, as for every other tool)
+and the rasters in the process that composes them; the trade-off is that a
+crash (a stack overflow, an abort) loses the whole sheet as
+`worker_failed`, and a single operator PSCat cannot interrupt runs into the
+sheet's deadline (`timeout`).
+
+**Time.** The worker shares the sheet deadline, less the render margin
+(10%, at least 250 ms) for composing and encoding, between the cells as it
+goes. A cell may use at most the render's step limit, the render's
+interpreter time limit, and an equal share of the time left (time left ÷
+cells left). A runaway cell stops at its share with `limit_exceeded`, and
+the cells after it keep theirs; time a quick cell does not use passes on.
+(The plugin gives each child whatever is left of the call, so its first
+runaway cell can starve the rest.) If a share ever falls under 100 ms, the
+sheet stops with `timeout` and `error.input.code` `deadline`; that and the
+kill at the deadline both count in `Counters::timed_out`.
+
+**Memory.** PSCat's memory limit counts heap growth from when a cell's
+limits are set (`Interp::set_limits` takes `memtrack::live_bytes()`, the
+whole process's live heap, as its base), so the sheet already allocated
+around a cell is in the base, not charged to the cell: a cell has exactly
+the limit it would have as a render, and gives the same result alone or on
+a large sheet (`tests/review_sheet.rs` checks this at a 64 MiB limit beside
+a 61 MB canvas). The worker takes a cell's last page by moving the canvas
+out, or by freeing it before it copies a shown page, so it holds no more
+page rasters than a render does. What the sheet adds beyond a render is
+outside every cell's limit and bounded by the pixel budgets: the canvas (4
+bytes a sheet pixel, 64 MB at the default), the strips (about 10 MB at
+most), the largest zoomed cell (no larger than the sheet), and, while the
+PNG is encoded, a demultiplied copy of the canvas and the PNG. At the
+defaults this fits the per-render figure in `docs/CLOUD_RUN.md` and is far
+inside the Linux address-space limit (`max_memory + 1 GiB`);
+`PSCAT_MCP_MAX_SHEET_PIXELS` is capped at 64,000,000 (8000 a side), which
+adds about 200 MB.
+
+**Failed cells.** A cell whose program raises an error or passes its
+limit is drawn as far as it got (its last page or the canvas so far), and
+the sheet succeeds. Its status in `structuredContent.cells[]` has the error
+code, the limit, and PSCat's report cut to 240 bytes with control
+characters removed, so 32 failed cells stay under 24 KB. Labels are not
+echoed back.
 
 ## Why a child process
 
@@ -211,6 +309,8 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | `chalkboard_math` LaTeX size | server, before execution | 4 KiB |
 | `handwrite` text size | server, before execution | 64 KiB |
 | `handwrite` note height | worker, after layout, before the page is allocated: side limit, then pixel cap | — |
+| `review_sheet` cells, sources (in all and each), cell sides and pixels, sheet sides and pixels, 100 ms a cell | server, before execution (the sheet again in the worker, exactly, before it is allocated) | 32, source limit, 8000 px, `PSCAT_MCP_MAX_PIXELS` |
+| `review_sheet` deadline | server: SIGKILL of the worker; each cell at most the render's step and time limits and an equal share of the time left | render timeout |
 | Format, `halftone` only with PNG, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
 | Device pixels of the starting page | server, before execution | 16 M |
 | Pages created by `setpagedevice` | PSCat (`set_max_page_pixels`) | 16 M |
@@ -284,7 +384,8 @@ No user database or proprietary OAuth flow is needed in this repository.
 
 * **Another transport** (REST): call `RenderService::render`/`validate`.
 * **A tool whose input is not PostScript**: a `GenerateJob` kind (see
-  [Generated programs](#generated-programs)).
+  [Generated programs](#generated-programs)); one whose output is an image
+  made from several renders follows `review_sheet`.
 * **Another backend** (a pool, a remote sandbox, a test double): implement
   `backend::RenderBackend`. Dropping the returned future must stop the job.
 * **Artifact storage**: none is configured, so output larger than

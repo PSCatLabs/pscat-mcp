@@ -1066,6 +1066,7 @@ dependencies = [
  "sha2",
  "subtle",
  "thiserror",
+ "tiny-skia",
  "tokio",
  "tokio-util",
  "tower",

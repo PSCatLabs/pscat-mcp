@@ -61,6 +61,7 @@ fn job(
         limits,
         generate: None,
         decided_height: None,
+        sheet: None,
     }
 }
 
@@ -490,6 +491,7 @@ async fn the_worker_returns_the_art_catalog() {
         limits: limits(),
         generate: None,
         decided_height: None,
+        sheet: None,
     };
     let started = Instant::now();
     let result = backend()
@@ -589,6 +591,7 @@ fn note_job(
         limits: limits(),
         generate: Some(GenerateJob::Handwrite(params)),
         decided_height,
+        sheet: None,
     }
 }
 
@@ -655,4 +658,110 @@ async fn a_generated_page_that_misses_the_plan_is_a_bad_job() {
         );
         assert!(r.artifacts.is_empty());
     }
+}
+
+/// A `review_sheet` job for `entries`, with `budget`.
+fn sheet_job(
+    entries: serde_json::Value,
+    budget: Option<pscat_mcp::sheet::SheetBudget>,
+) -> WorkerJob {
+    use pscat_mcp::generate::GenerateJob;
+    let params = serde_json::from_value(serde_json::json!({ "entries": entries }))
+        .expect("sheet parameters");
+    WorkerJob {
+        mode: JobMode::Generate,
+        source: String::new(),
+        format: OutputFormat::Png,
+        page_points: None,
+        dpi: 72.0,
+        halftone: false,
+        limits: limits(),
+        generate: Some(GenerateJob::ReviewSheet(params)),
+        decided_height: None,
+        sheet: budget,
+    }
+}
+
+fn sheet_budget(max_pixels: u64) -> pscat_mcp::sheet::SheetBudget {
+    pscat_mcp::sheet::SheetBudget {
+        max_cells: 32,
+        max_source_bytes: 1 << 20,
+        max_entry_source_bytes: 1 << 20,
+        max_cell_pixels: 16_000_000,
+        max_pixels,
+        max_side_px: 8000,
+        time_ms: 10_000,
+    }
+}
+
+/// The worker composes a sheet in one job: one PNG artifact and a report
+/// of every cell.
+#[tokio::test]
+async fn a_sheet_is_one_worker_job() {
+    let entries = serde_json::json!([
+        {"source": "0 0 10 10 rectfill showpage", "width": 20, "height": 20, "dpi": [72, 144]},
+        {"source": "nosuchop", "width": 20, "height": 20}
+    ]);
+    let r = backend()
+        .execute(
+            sheet_job(entries, Some(sheet_budget(1_000_000))),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("worker result");
+    assert!(r.failure.is_none(), "{:?}", r.failure);
+    assert_eq!(r.artifacts.len(), 1);
+    let report = r.sheet.expect("a sheet report");
+    assert_eq!(
+        (r.artifacts[0].width_px, r.artifacts[0].height_px),
+        (report.width_px, report.height_px)
+    );
+    assert_eq!(report.cells.len(), 3);
+    assert_eq!(report.failed_cells, 1);
+    assert_eq!(
+        (report.cells[1].width_px, report.cells[1].height_px),
+        (40, 40)
+    );
+    assert!(!report.cells[2].ok);
+}
+
+/// The worker checks the exact sheet against the budget before it runs a
+/// cell: a sheet over it comes back at once, although its cell would loop
+/// until the deadline.
+#[tokio::test]
+async fn the_worker_checks_the_exact_sheet_before_any_cell() {
+    let entries = serde_json::json!([
+        {"source": "{ 1 pop } loop", "width": 100, "height": 100}
+    ]);
+    let started = Instant::now();
+    let r = backend()
+        .execute(
+            sheet_job(entries.clone(), Some(sheet_budget(5_000))),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("worker result");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    match r.failure {
+        Some(WorkerFailure::Generate(f)) => {
+            assert_eq!(f.detail, "sheet_pixels", "{}", f.message);
+            assert!(
+                f.message.contains("with its labels and captions"),
+                "{}",
+                f.message
+            );
+        }
+        other => panic!("expected a sheet refusal, got {other:?}"),
+    }
+    assert_eq!(r.steps_used, 0);
+    // Without a budget the job is refused, not guessed at.
+    let r = backend()
+        .execute(sheet_job(entries, None), Duration::from_secs(30))
+        .await
+        .expect("worker result");
+    assert!(
+        matches!(r.failure, Some(WorkerFailure::BadJob { .. })),
+        "{:?}",
+        r.failure
+    );
 }

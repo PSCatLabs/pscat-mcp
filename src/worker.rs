@@ -25,8 +25,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::generate::{
-    DecidedHeight, GenerateContext, GenerateError, GenerateFailure, GenerateJob, Spent,
+    DecidedHeight, GenerateContext, GenerateError, GenerateFailure, GenerateJob, Generated, Spent,
 };
+use crate::sheet::{SheetBudget, SheetReport};
 
 /// Output format the worker can produce. These are the three formats PSCat's
 /// library supports (`Page::to_png`, `Interp::svg_pages`,
@@ -88,7 +89,8 @@ pub enum JobMode {
     /// `source` is ignored. The page the server checked is `page_points` and
     /// `dpi`, which the generated program must match; or, when the generator
     /// decides the height (`decided_height`), the width and `dpi`, with a
-    /// height within the budget.
+    /// height within the budget. A review sheet (`sheet`) is composed by the
+    /// generator itself and returned as one PNG with a `sheet` report.
     Generate,
 }
 
@@ -139,6 +141,10 @@ pub struct WorkerJob {
     /// `page_points` is `None` then; the generated program's page is used.
     #[serde(default)]
     pub decided_height: Option<DecidedHeight>,
+    /// For a review sheet: the budgets the exact sheet must fit, and the
+    /// time its cells share.
+    #[serde(default)]
+    pub sheet: Option<SheetBudget>,
 }
 
 /// One rendered artifact.
@@ -248,6 +254,9 @@ pub struct WorkerResult {
     /// PSCat's art catalog (capabilities mode only).
     #[serde(default)]
     pub capabilities: Option<serde_json::Value>,
+    /// What a review sheet holds (its one artifact is the sheet).
+    #[serde(default)]
+    pub sheet: Option<SheetReport>,
 }
 
 impl WorkerResult {
@@ -264,6 +273,7 @@ impl WorkerResult {
             steps_used: 0,
             elapsed_ms: 0,
             capabilities: None,
+            sheet: None,
         }
     }
 
@@ -496,7 +506,8 @@ fn render_job(job: &WorkerJob, g: &crate::generate::GeneratedProgram) -> WorkerJ
 
 /// For a [`JobMode::Generate`] job, the generator and the program it wrote,
 /// checked against the page the server validated. `None` for other modes.
-/// `Err` is the finished result of a job that cannot go on.
+/// `Err` is the finished result: of a job that cannot go on, or of a
+/// generator whose output is already the image (a review sheet).
 fn generate(
     job: &WorkerJob,
 ) -> Result<Option<(&GenerateJob, crate::generate::GeneratedProgram)>, Box<WorkerResult>> {
@@ -511,9 +522,11 @@ fn generate(
     let cx = GenerateContext {
         limits: &job.limits,
         decided: job.decided_height.as_ref(),
+        sheet: job.sheet.as_ref(),
     };
     let program = match gen_job.generate(&cx) {
-        Ok(program) => program,
+        Ok(Generated::Program(program)) => program,
+        Ok(Generated::Sheet(sheet)) => return Err(Box::new(sheet_result(job, *sheet))),
         Err(GenerateError::Input(f)) => {
             return Err(Box::new(WorkerResult::fail(WorkerFailure::Generate(f))));
         }
@@ -552,6 +565,31 @@ fn generate(
         })));
     }
     Ok(Some((gen_job, program)))
+}
+
+/// The result of a composed review sheet: its PNG as the one artifact.
+fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerResult {
+    if job.sheet.is_none() || job.format != OutputFormat::Png {
+        return WorkerResult::fail(WorkerFailure::BadJob {
+            message: "a review sheet is a PNG with a sheet budget".into(),
+        });
+    }
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let report = sheet.report;
+    WorkerResult {
+        artifacts: vec![Artifact {
+            page: Some(1),
+            width_px: report.width_px,
+            height_px: report.height_px,
+            byte_len: sheet.png.len(),
+            data_base64: b64.encode(&sheet.png),
+        }],
+        page_count: 1,
+        steps_used: sheet.steps,
+        elapsed_ms: sheet.elapsed_ms,
+        sheet: Some(report),
+        ..WorkerResult::empty()
+    }
 }
 
 fn encode(
@@ -674,6 +712,7 @@ mod tests {
             },
             generate: None,
             decided_height: None,
+            sheet: None,
         }
     }
 
