@@ -107,9 +107,10 @@ If `PSCAT_MCP_TOKEN` is empty there, the client sends `Bearer ` with no
 token and every call gets 401.
 
 Leave it running and watch its log: every request is one line with its
-status. A client that gets **406** is
-[issue #17](https://github.com/PSCatLabs/pscat-mcp/issues/17) (a client
-that doesn't send `Accept: text/event-stream`); note which client it was.
+status. A client that gets **406** sends an `Accept` that allows no JSON
+(for example `text/html`); a client that sends only `application/json`, `*/*`
+or no `Accept` is served ([issue #17](https://github.com/PSCatLabs/pscat-mcp/issues/17)).
+Note which client it was.
 
 The token is a throwaway for this test.
 
@@ -791,20 +792,20 @@ error). Every fixture says in its metadata how it was obtained:
 | `rmcp-client.json` | real-capture | the rmcp 3.9 client |
 | `codex-synthesized.json` | synthesized | the rmcp capture with Codex's User-Agent; Codex was not run |
 | `curl-smoke.json`, `legacy-2025-03-26.json` | synthesized | written to match `scripts/container-smoke.sh` and the legacy cases in `tests/http.rs` |
-| `accept-json-only.json` | synthesized | the report in [#17](https://github.com/PSCatLabs/pscat-mcp/issues/17) |
+| `accept-json-only.json` | synthesized | the report in [#17](https://github.com/PSCatLabs/pscat-mcp/issues/17); answered with JSON since the `Accept` fix-up |
 
 Claude Code 2.1.322 speaks the 2026-07-28 stateless protocol: no
 `initialize` and no session, a `server/discover` probe, then `tools/list`
 and `tools/call`, each with `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method`
 and `Mcp-Name` headers and the client info in `params._meta`.
 
-**Known failures.** A request can carry `"known_failure": {"issue": 17,
+**Known failures.** A request can carry `"known_failure": {"issue": N,
 "status": 406}`. Its `expect` (by default 2xx and a JSON-RPC result) is
 what it must do once fixed. The test passes while the server still returns
 that status, fails with a changed status, and **fails when the request
-starts to pass**, so whoever fixes #17 deletes `known_failure` from
-`accept-json-only.json` in the same change and the fixture then guards the
-fix.
+starts to pass**, so whoever fixes issue N deletes `known_failure` in the
+same change and the fixture then guards the fix. No fixture carries one
+now: #17 was fixed and `accept-json-only.json` is an ordinary case.
 
 ### Capture mode and recording a fixture
 

@@ -1161,3 +1161,158 @@ async fn huge_declared_length_is_refused_unread() {
     let text = status_for_huge_declared_length(&srv.base, None).await;
     assert!(text.starts_with("HTTP/1.1 401"), "{text}");
 }
+
+/// POST `body` with exactly the given `Accept` header values (none: no
+/// header) and return the status, content type and raw text.
+async fn post_accept(
+    srv: &TestServer,
+    token: Option<&str>,
+    accepts: &[&str],
+    body: &Value,
+) -> (u16, String, String) {
+    let mut req = reqwest::Client::new()
+        .post(srv.mcp())
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    for a in accepts {
+        req = req.header("Accept", *a);
+    }
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await.expect("request");
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    (status, ctype, resp.text().await.unwrap_or_default())
+}
+
+/// Issue #17: a client that lists only `application/json` is served, with a
+/// JSON body, for `initialize` and for a tool call.
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_json_only_post_gets_a_json_answer() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let init = initialize_body("2025-06-18");
+    let call = render_call(2, &solid(0, 1, 0), 24, 16);
+    for accept in ["application/json", "Application/JSON; charset=utf-8"] {
+        for (body, what) in [(&init, "initialize"), (&call, "tools/call")] {
+            let (status, ctype, text) = post_accept(&srv, Some(TOKEN), &[accept], body).await;
+            assert_eq!(status, 200, "{accept} {what}: {text}");
+            assert!(
+                ctype.contains("application/json"),
+                "{accept} {what}: {ctype}"
+            );
+            let resp: Value = serde_json::from_str(&text).expect("a JSON body");
+            assert!(resp.get("result").is_some(), "{accept} {what}: {resp}");
+            if what == "tools/call" {
+                let result = &resp["result"];
+                assert_eq!(result["structuredContent"]["ok"], true, "{resp}");
+                let (w, h, px) = decode_png(image_of(result).expect("image content"));
+                assert_eq!((w, h), (24, 16));
+                assert!(px.iter().all(|p| *p == [0, 255, 0]));
+            }
+        }
+    }
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 2);
+}
+
+/// A missing `Accept` and `*/*` / `application/*` mean "anything" (RFC 9110
+/// 12.5.1), and the answer is JSON, so they are served.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_and_wildcard_accept_are_served_as_json() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let init = initialize_body("2025-06-18");
+    let cases: [(&str, &[&str]); 6] = [
+        ("none", &[]),
+        ("*/*", &["*/*"]),
+        ("*/*;q=0.8", &["*/*;q=0.8"]),
+        ("application/*", &["application/*"]),
+        ("text/html + */*", &["text/html, */*;q=0.1"]),
+        ("two headers", &["text/html", "application/json"]),
+    ];
+    for (name, accepts) in cases {
+        let (status, ctype, text) = post_accept(&srv, Some(TOKEN), accepts, &init).await;
+        assert_eq!(status, 200, "{name}: {text}");
+        assert!(ctype.contains("application/json"), "{name}: {ctype}");
+        let resp: Value = serde_json::from_str(&text).expect("a JSON body");
+        assert!(resp.get("result").is_some(), "{name}: {resp}");
+    }
+}
+
+/// An `Accept` that does not allow JSON keeps rmcp's `406`, and the fix-up
+/// runs only after authentication, the Host check and the body limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_that_excludes_json_stays_406_and_auth_comes_first() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let init = initialize_body("2025-06-18");
+    let refused: [(&str, &[&str]); 6] = [
+        ("text/html", &["text/html"]),
+        ("sse only", &["text/event-stream"]),
+        ("json q=0", &["application/json;q=0"]),
+        (
+            "json q=0 + sse",
+            &["application/json;q=0, text/event-stream"],
+        ),
+        ("wildcard q=0", &["*/*;q=0"]),
+        ("other wildcard", &["text/*"]),
+    ];
+    for (name, accepts) in refused {
+        let (status, _, text) = post_accept(&srv, Some(TOKEN), accepts, &init).await;
+        assert_eq!(status, 406, "{name}: {text}");
+        assert!(text.contains("Not Acceptable"), "{name}: {text}");
+    }
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+
+    // No credentials: 401 for every Accept, never 406 and never a render.
+    for accepts in [
+        &["application/json"][..],
+        &[][..],
+        &["*/*"][..],
+        &["text/html"][..],
+    ] {
+        for token in [None, Some("wrong-token")] {
+            let (status, _, text) = post_accept(&srv, token, accepts, &init).await;
+            assert_eq!(status, 401, "{accepts:?} {token:?}: {text}");
+        }
+    }
+
+    // Host and Origin checks still apply to a JSON-only client.
+    let resp = reqwest::Client::new()
+        .post(srv.mcp())
+        .header("Authorization", format!("Bearer {TOKEN}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Host", "evil.example")
+        .body(init.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // The body limit still answers 413 for a JSON-only client.
+    let huge = render_call(3, &"%".repeat(2 * 1024 * 1024), 8, 8);
+    let (status, _, _) = post_accept(&srv, Some(TOKEN), &["application/json"], &huge).await;
+    assert_eq!(status, 413);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+/// GET is untouched by the `Accept` fix-up: this stateless server has no
+/// event stream to open, so rmcp answers 405 whatever `Accept` says.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_is_unchanged_by_the_accept_fixup() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    for accept in ["application/json", "*/*", "text/event-stream"] {
+        let resp = reqwest::Client::new()
+            .get(srv.mcp())
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .header("Accept", accept)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 405, "GET with {accept}");
+    }
+}

@@ -3,8 +3,9 @@
 //! * `GET /healthz` — unauthenticated liveness probe; does no rendering.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
 //!   responses, behind the [`Authenticator`] (checked before rmcp sees the
-//!   request, so an unauthenticated request never reaches a tool) and a
-//!   request-body limit.
+//!   request, so an unauthenticated request never reaches a tool), a
+//!   request-body limit, and a small `Accept` fix-up for `POST` (see
+//!   [`accept_json`]).
 //!
 //! Every response carries an `x-request-id` (generated when the client sent
 //! none), and each request is traced in a span with method, path and
@@ -184,11 +185,13 @@ pub fn router_with_capture(
         mcp_config,
     );
     // Outer to inner: authenticate (before the body is used), then read the
-    // body under the limit, then rmcp.
+    // body under the limit, then capture (which records the `Accept` the
+    // client sent), then the `Accept` fix-up, then rmcp.
     let mcp = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(auth, require_auth))
         .layer(middleware::from_fn_with_state(body_limit, limit_body))
         .layer(middleware::from_fn_with_state(capture, capture_layer))
+        .layer(middleware::from_fn(accept_json))
         .service(mcp);
 
     Router::new()
@@ -216,6 +219,92 @@ pub fn router_with_capture(
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
+}
+
+/// Which of `application/json` and `text/event-stream` a request's `Accept`
+/// header(s) mention, by name or by a wildcard.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct AcceptSeen {
+    /// Listed by name, whatever its weight (rmcp applies `q=0` itself).
+    json: bool,
+    sse: bool,
+    /// `*/*` or `application/*` with a non-zero weight, or no `Accept` at all.
+    json_by_wildcard: bool,
+}
+
+/// Whether a media-range parameter list carries a zero weight (`q=0`,
+/// `q=0.000`). A weight that does not parse counts as non-zero, as in rmcp.
+fn has_zero_weight<'a>(mut params: impl Iterator<Item = &'a str>) -> bool {
+    params.any(|p| {
+        p.split_once('=').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("q")
+                && value.trim().parse::<f32>().is_ok_and(|q| q == 0.0)
+        })
+    })
+}
+
+fn scan_accept(headers: &http::HeaderMap) -> AcceptSeen {
+    let mut seen = AcceptSeen::default();
+    let mut any_header = false;
+    for value in headers.get_all(header::ACCEPT) {
+        any_header = true;
+        let Ok(value) = value.to_str() else { continue };
+        for entry in value.split(',') {
+            let mut parts = entry.split(';');
+            let essence = parts.next().unwrap_or("").trim();
+            if essence.eq_ignore_ascii_case("application/json") {
+                seen.json = true;
+            } else if essence.eq_ignore_ascii_case("text/event-stream") {
+                seen.sse = true;
+            } else if (essence == "*/*" || essence.eq_ignore_ascii_case("application/*"))
+                && !has_zero_weight(parts)
+            {
+                seen.json_by_wildcard = true;
+            }
+        }
+    }
+    // RFC 9110 12.5.1: no `Accept` means any media type is acceptable.
+    seen.json_by_wildcard |= !any_header;
+    seen
+}
+
+/// Make `POST /mcp` accept clients that do not list `text/event-stream`.
+///
+/// rmcp 3.9 answers `406` to a POST unless `Accept` names both
+/// `application/json` and `text/event-stream` (what the MCP spec asks of a
+/// client), and does not read `*/*` or a missing header as either. This
+/// server always answers a POST with a single JSON body (`json_response`),
+/// never a stream, so the second type is a formality. A request whose
+/// `Accept` allows JSON gets the missing names appended, so rmcp's check
+/// passes:
+///
+/// * `application/json` alone (issue #17): `text/event-stream` is added.
+/// * No `Accept` header, `*/*` and `application/*` (RFC 9110: anything is
+///   acceptable): both names are added; the answer is JSON.
+/// * Anything that does not allow JSON (`text/html`, `text/event-stream`
+///   alone, `application/json;q=0`) is left alone and gets rmcp's `406`: the
+///   server could not honestly answer it.
+///
+/// `GET` and `DELETE` are untouched: a stateless server has no event stream
+/// to open (`GET` is 405 whatever `Accept` says) and `DELETE` carries no
+/// `Accept` check, so there is nothing to fix up. This
+/// runs after authentication, the body limit and capture, so none of those
+/// is bypassed, and capture records the `Accept` the client sent.
+async fn accept_json(mut req: Request, next: Next) -> Response {
+    if req.method() == http::Method::POST {
+        let seen = scan_accept(req.headers());
+        let headers = req.headers_mut();
+        if !seen.json && seen.json_by_wildcard {
+            headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
+        }
+        if !seen.sse && (seen.json || seen.json_by_wildcard) {
+            headers.append(
+                header::ACCEPT,
+                HeaderValue::from_static("text/event-stream"),
+            );
+        }
+    }
+    next.run(req).await
 }
 
 /// Most bytes of an oversized or rejected body read and thrown away before

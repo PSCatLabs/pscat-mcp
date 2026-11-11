@@ -358,17 +358,19 @@ async fn capture_mode_records_requests_and_never_a_token() {
         .await
         .unwrap();
     assert_eq!(denied.status(), 401);
-    // Only 406 is expected to show the status of a request rmcp refuses.
+    // An Accept that allows no JSON is refused by rmcp (406); the capture
+    // records the status it got.
     let refused = c
         .post(format!("{}/mcp", srv.base))
         .header("Authorization", format!("Bearer {TOKEN}"))
-        .header("Accept", "application/json")
+        .header("Accept", "text/html")
         .header("Content-Type", "application/json")
         .body(init.to_string())
         .send()
         .await
         .unwrap();
     let refused_status = refused.status().as_u16();
+    assert_eq!(refused_status, 406);
 
     let raw = std::fs::read_to_string(&path).unwrap();
     for secret in [
