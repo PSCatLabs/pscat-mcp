@@ -79,7 +79,7 @@
       }
     },
     {
-      "label": "a board's SVG runs to megabytes: over the default SVG cap, so output_too_large (see scenario 81)",
+      "label": "a board's SVG runs to megabytes: over the default SVG text limit, so a blob resource (see scenario 81)",
       "tool": "chalkboard_math",
       "args": {
         "latex": "\\frac{1}{2}",
@@ -89,16 +89,26 @@
         "dpi": 72
       },
       "result": {
-        "is_error": true,
-        "error_code": "output_too_large",
-        "forbid_content_types": [
-          "image",
-          "resource"
+        "is_error": false,
+        "content_types": [
+          "resource:image/svg+xml",
+          "text"
         ],
         "structured": {
-          "ok": false,
-          "error.input.code": "svg_bytes",
-          "error.input.limit_bytes": 131072
+          "ok": true,
+          "format": "svg",
+          "artifacts.0.returned_as": "blob",
+          "artifacts.0.bytes": {
+            "min": 40961
+          }
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "form": "blob",
+          "starts_with": [
+            "<?xml",
+            "<svg"
+          ]
         },
         "renders_executed": 1
       }

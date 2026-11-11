@@ -5,8 +5,9 @@
 //! Tool result shapes:
 //!
 //! * `render_postscript` — on success, one content block per artifact (PNG
-//!   as `image` content; SVG as an embedded text resource; PDF as an
-//!   embedded blob resource) plus a short text summary. `structuredContent`
+//!   as `image` content; SVG as an embedded text resource, or a blob
+//!   resource when all pages together are over `PSCAT_MCP_MAX_SVG_BYTES`;
+//!   PDF as an embedded blob resource) plus a short text summary. `structuredContent`
 //!   is a [`RenderToolOutput`] envelope without the artifact bytes. On
 //!   failure, `isError: true`, a text explanation, and the same envelope
 //!   with `ok: false` and `error` set; never an image.
@@ -443,6 +444,23 @@ pub struct ArtifactSummary {
     pub bytes: usize,
     /// MIME type of the artifact.
     pub mime_type: String,
+    /// How the artifact's content block carries it: `image` (PNG),
+    /// `text` (an embedded text resource: SVG up to `max_svg_bytes`) or
+    /// `blob` (an embedded base64 resource: PDF, and SVG over
+    /// `max_svg_bytes`).
+    pub returned_as: ReturnedAs,
+}
+
+/// The kind of content block an artifact is returned in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnedAs {
+    /// An MCP `image` content block.
+    Image,
+    /// An embedded text resource.
+    Text,
+    /// An embedded blob resource (base64).
+    Blob,
 }
 
 /// `structuredContent` of `render_postscript`, for success and failure
@@ -627,9 +645,9 @@ pub struct LimitsInfo {
     pub max_pages: usize,
     /// Most bytes of rendered output (all pages, before base64).
     pub max_output_bytes: usize,
-    /// Most bytes of SVG (all pages together) returned inline; at most
-    /// `max_output_bytes`. Over it, an SVG render fails with
-    /// `output_too_large` and `error.input.code` `svg_bytes`.
+    /// Most bytes of SVG (all pages together) returned as embedded text
+    /// resources; at most `max_output_bytes`. A larger SVG is returned as
+    /// embedded blob resources (base64), up to `max_output_bytes`.
     pub max_svg_bytes: usize,
     /// Most bytes of program stdout returned.
     pub max_program_output_bytes: usize,
@@ -738,8 +756,8 @@ impl PscatMcp {
                 format!(
                     "{base} Limits on this server: source up to {} bytes; at most {} pixels per \
                      page and {PSCAT_MAX_SIDE_PX} pixels a side; at most {} pages; output up to {} bytes \
-                     and, for svg, up to {} bytes (all pages together; over it the call fails \
-                     with output_too_large); {} ms per render.",
+                     (over it, output_too_large); svg up to {} bytes in all is returned as text \
+                     resources, larger as blob resources (base64); {} ms per render.",
                     limits.max_source_bytes,
                     limits.max_pixels,
                     limits.max_pages,
@@ -755,9 +773,10 @@ impl PscatMcp {
             route.attr.description = Some(
                 format!(
                     "{base} Limits on this server: latex up to {} bytes; at most {} pixels per \
-                     board and {PSCAT_MAX_SIDE_PX} pixels a side; output up to {} bytes and, for svg, \
-                     up to {} bytes (a board's SVG runs to megabytes; png is about 0.3 MB); {} ms \
-                     per board.",
+                     board and {PSCAT_MAX_SIDE_PX} pixels a side; output up to {} bytes (over it, \
+                     output_too_large); svg up to {} bytes is returned as a text resource, larger \
+                     as a blob resource (base64), and a board's SVG runs to megabytes; {} ms per \
+                     board.",
                     limits.max_latex_bytes,
                     limits.max_pixels,
                     limits.max_output_bytes,
@@ -897,7 +916,10 @@ impl PscatMcp {
         let l = self.service.limits();
         let returned_as = |f: OutputFormat| match f {
             OutputFormat::Png => "one image content block per page",
-            OutputFormat::Svg => "one embedded text resource per page",
+            OutputFormat::Svg => {
+                "one embedded text resource per page, or one embedded blob resource (base64) per \
+                 page when all pages together are over max_svg_bytes"
+            }
             OutputFormat::Pdf => "one embedded blob resource holding every page",
         };
         RendererInfo {
@@ -1030,7 +1052,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out),
+            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
             Err(err) => render_failure(err),
         }
     }
@@ -1069,7 +1091,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out),
+            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
             Err(err) => failure_with("Chalkboard failed", err),
         }
     }
@@ -1110,7 +1132,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out),
+            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
             Err(err) => failure_with("Handwrite failed", err),
         }
     }
@@ -1347,7 +1369,7 @@ impl PscatMcp {
         match principal(self.transport, &ext)
             .and_then(|owner| self.service.jobs().result(&owner, &args.job_id))
         {
-            Ok(result) => job_result(result),
+            Ok(result) => job_result(result, self.service.limits().svg_bytes()),
             Err(err) => failure_with("No render result", err),
         }
     }
@@ -1452,7 +1474,7 @@ impl ServerHandler for PscatMcp {
             // A render that failed is still a completed tool call, with
             // `isError: true` (SEP-2663: `failed` is for JSON-RPC errors).
             (_, Some(result)) => TaskPayload::Completed {
-                result: result_object(&job_result(result)),
+                result: result_object(&job_result(result, self.service.limits().svg_bytes())),
             },
             _ => TaskPayload::Working,
         };
@@ -1681,9 +1703,9 @@ fn result_object(result: &CallToolResult) -> JsonObject {
 }
 
 /// What the job's tool would have returned.
-fn job_result(result: JobResult) -> CallToolResult {
+fn job_result(result: JobResult, svg_text_max: usize) -> CallToolResult {
     match result.outcome {
-        Ok(out) => render_success((*out).clone()),
+        Ok(out) => render_success((*out).clone(), svg_text_max),
         Err(err) => failure_with(failure_lead(&result.tool), (*err).clone()),
     }
 }
@@ -1760,43 +1782,67 @@ fn render_uri(id: &uuid::Uuid, page: Option<usize>) -> String {
     }
 }
 
-fn render_success(out: RenderOutput) -> CallToolResult {
+/// The result of a successful render. SVG goes as embedded text resources
+/// when all pages together are at most `svg_text_max` bytes, and as blob
+/// resources (base64) above that, so a client saves it as a file the way
+/// it does a PDF (docs/LOCAL_TESTING.md, section 11). One result never
+/// mixes the two.
+fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
     let mime = out.format.mime_type();
     let id = uuid::Uuid::new_v4();
     let b64 = base64::engine::general_purpose::STANDARD;
+    let svg_total = out
+        .artifacts
+        .iter()
+        .fold(0usize, |n, a| n.saturating_add(a.byte_len));
+    let svg_as_text = svg_total <= svg_text_max;
     let mut blocks = Vec::with_capacity(out.artifacts.len() + 1);
     let mut summaries = Vec::with_capacity(out.artifacts.len());
     for a in &out.artifacts {
+        let uri = render_uri(&id, a.page);
+        let blob =
+            || ResourceContents::blob(a.data_base64.clone(), uri.clone()).with_mime_type(mime);
+        let (block, returned_as) = match out.format {
+            OutputFormat::Png => (
+                ContentBlock::image(a.data_base64.clone(), mime),
+                ReturnedAs::Image,
+            ),
+            OutputFormat::Svg if svg_as_text => match b64
+                .decode(&a.data_base64)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            {
+                Some(svg) => (
+                    ContentBlock::resource(
+                        ResourceContents::text(svg, uri.clone()).with_mime_type(mime),
+                    ),
+                    ReturnedAs::Text,
+                ),
+                None => (ContentBlock::resource(blob()), ReturnedAs::Blob),
+            },
+            OutputFormat::Svg | OutputFormat::Pdf => {
+                (ContentBlock::resource(blob()), ReturnedAs::Blob)
+            }
+        };
         summaries.push(ArtifactSummary {
             page: a.page,
             width_px: a.width_px,
             height_px: a.height_px,
             bytes: a.byte_len,
             mime_type: mime.to_string(),
+            returned_as,
         });
-        let uri = render_uri(&id, a.page);
-        let block = match out.format {
-            OutputFormat::Png => ContentBlock::image(a.data_base64.clone(), mime),
-            OutputFormat::Svg => match b64
-                .decode(&a.data_base64)
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-            {
-                Some(svg) => {
-                    ContentBlock::resource(ResourceContents::text(svg, uri).with_mime_type(mime))
-                }
-                None => ContentBlock::resource(
-                    ResourceContents::blob(a.data_base64.clone(), uri).with_mime_type(mime),
-                ),
-            },
-            OutputFormat::Pdf => ContentBlock::resource(
-                ResourceContents::blob(a.data_base64.clone(), uri).with_mime_type(mime),
-            ),
-        };
         blocks.push(block);
     }
     let renderer = RendererIdentity::current();
-    blocks.push(ContentBlock::text(success_text(&out, &renderer)));
+    let mut text = success_text(&out, &renderer);
+    if out.format == OutputFormat::Svg && !svg_as_text {
+        text.push_str(&format!(
+            "\nThe SVG is over {svg_text_max} bytes (PSCAT_MCP_MAX_SVG_BYTES), so each page is a \
+             blob resource (base64) rather than text."
+        ));
+    }
+    blocks.push(ContentBlock::text(text));
     let envelope = RenderToolOutput {
         ok: true,
         format: Some(out.format.name().to_string()),

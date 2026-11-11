@@ -1,0 +1,94 @@
+{
+  "id": "svg-large-blob",
+  "title": "SVG up to the text limit comes back as markup, a large SVG and a chalkboard's SVG as blob resources the client saves as .svg files",
+  "origin": "issue #63: PSCAT_MCP_MAX_SVG_BYTES (40 KiB by default) is where SVG switches from a text resource to a blob resource",
+  "max_turns": 8,
+  "prompt": "Using the pscat-render tools, make these three calls, then tell me for each one what came back and where the SVG is:\n\n1. render_postscript as an SVG (400×300 points) of this program:\n0 0 1 setrgbcolor 50 50 300 200 rectfill\n\n2. render_postscript as an SVG (400×300 points) of this program:\n0 1 13000 {dup 37 mul 400 mod exch 53 mul 300 mod 3 3 rectfill} for\n\n3. chalkboard_math with the formula x^2 + y^2 = z^2 as an SVG, width 400 and height 200.",
+  "expect": {
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "where": {
+          "format": "svg",
+          "source": {
+            "contains": "13000"
+          }
+        },
+        "which": "first",
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:image/svg+xml"
+          ],
+          "structured": {
+            "ok": true,
+            "artifacts.0.returned_as": "blob",
+            "artifacts.0.bytes": {
+              "min": 1000000
+            }
+          },
+          "text_contains": [
+            "Binary content (image/svg+xml",
+            ".svg"
+          ]
+        }
+      },
+      {
+        "tool": "render_postscript",
+        "where": {
+          "format": "svg",
+          "source": {
+            "contains": "setrgbcolor"
+          }
+        },
+        "which": "first",
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:image/svg+xml"
+          ],
+          "structured": {
+            "ok": true,
+            "artifacts.0.returned_as": "text"
+          },
+          "text_contains": [
+            "<svg"
+          ]
+        }
+      },
+      {
+        "tool": "chalkboard_math",
+        "where": {
+          "format": "svg"
+        },
+        "which": "first",
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:image/svg+xml"
+          ],
+          "structured": {
+            "ok": true,
+            "artifacts.0.returned_as": "blob"
+          },
+          "text_contains": [
+            "Binary content (image/svg+xml",
+            ".svg"
+          ]
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "file",
+          "saved"
+        ],
+        [
+          ".svg"
+        ]
+      ]
+    }
+  },
+  "notes": "Needs the default server (text limit 40 KiB, output cap 8 MiB). Program 1 is a few hundred bytes of SVG (text, the model sees the markup), program 2 about 1 MB and the 400x200 board about 5 MB (blobs). Claude Code 2.1.322 saves a blob as a .svg file and gives the model the path (docs/LOCAL_TESTING.md section 11). Replaces svg-over-cap (#64), whose 1 MB SVG used to fail with output_too_large."
+}

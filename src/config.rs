@@ -10,30 +10,31 @@ use std::time::Duration;
 
 use clap::Args;
 
-/// The default inline SVG cap, in bytes (128 KiB).
+/// The default size up to which SVG is returned as text, in bytes
+/// (40 KiB). A larger SVG is returned as a blob resource instead, up to the
+/// output limit.
 ///
 /// The server cannot see a client's limit, so this is chosen from what the
-/// clients do with a large SVG text resource (measured and documented in
-/// `docs/LOCAL_TESTING.md`, section 11, issue #64):
+/// clients do with each form (measured and documented in
+/// `docs/LOCAL_TESTING.md`, section 11, issues #64 and #63):
 ///
-/// * Claude Code 2.1.322 returns a successful text result inline only up to
-///   about 50,000 characters (and 25,000 tokens, about 47 KB of this dense
-///   SVG). Above that it saves the whole result to a file and tells the
-///   model so, at every size measured from 100 KB to 5 MB, and
-///   `MAX_MCP_OUTPUT_TOKENS` does not move the 50,000-character line. So
-///   the cap does not change what Claude Code shows the model above that
-///   size, and a cap near 48 KB would only turn a saved file into an error.
+/// * Claude Code 2.1.322 shows a text result inline only up to about
+///   50,000 characters and 25,000 tokens (a 40.5 KB SVG went inline at
+///   about 21,400 tokens; 47.5 KB needed `MAX_MCP_OUTPUT_TOKENS` raised).
+///   Above that it saves the whole result as a JSON array in a `.txt` file.
+///   A blob, SVG included, is saved as a real file (`.svg`, byte for byte)
+///   at every size measured, 40 KB to 1 MB. So up to 40 KiB the model reads
+///   the markup inline, and above it the user gets a usable `.svg` file
+///   instead of an escaped JSON file.
 /// * Claude's connector docs give about 150,000 characters for a tool
-///   result on claude.ai and Desktop (docs only, not measured). The cap
-///   keeps the result, JSON escaping included (about 8 % for SVG), below
-///   that: 128 KiB is about 142,000 characters. The earlier 256 KiB was
-///   above it.
+///   result on claude.ai and Desktop (docs only); what they do with a blob
+///   is not measured. Raise this for such a client to keep more SVG as
+///   text.
 /// * Codex passes a result's `structuredContent` to the model instead of
-///   its content blocks, so it never sees the SVG text (source reading,
-///   not measured); ChatGPT publishes no limit.
+///   its content blocks, so it sees neither form (source reading).
 ///
-/// Raise it for a client that takes more.
-pub const DEFAULT_MAX_SVG_BYTES: usize = 128 * 1024;
+/// The earlier default, 128 KiB, was a cap: over it the call failed.
+pub const DEFAULT_MAX_SVG_BYTES: usize = 40 * 1024;
 /// Hard per-side ceiling PSCat applies to every page.
 pub const PSCAT_MAX_SIDE_PX: u32 = 8000;
 /// The most pixels a review sheet can have: 8000 a side.
@@ -113,11 +114,12 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_MAX_OUTPUT_BYTES", default_value_t = 8 * 1024 * 1024)]
     pub max_output_bytes: usize,
 
-    /// Most bytes of SVG (all pages together) returned inline. SVG comes
-    /// back as text the model reads, and glyph outlines and gradients make
-    /// it large, so its cap is far below the output limit. Defaults to
-    /// 128 KiB, or the output limit if that is smaller; it may not exceed
-    /// the output limit.
+    /// Most bytes of SVG (all pages together) returned as embedded text
+    /// resources, which a client can show the model as markup. A larger
+    /// SVG is returned as blob resources (base64), which clients save as
+    /// files, up to the output limit. 0 returns every SVG as a blob.
+    /// Defaults to 40 KiB, or the output limit if that is smaller; it may
+    /// not exceed the output limit.
     #[arg(long, env = "PSCAT_MCP_MAX_SVG_BYTES")]
     pub max_svg_bytes: Option<usize>,
 
@@ -213,7 +215,7 @@ impl LimitsConfig {
         }
     }
 
-    /// Most bytes of SVG (all pages together) returned inline: the
+    /// Most bytes of SVG (all pages together) returned as text: the
     /// configured limit, or [`DEFAULT_MAX_SVG_BYTES`] held to the output
     /// limit.
     pub fn svg_bytes(&self) -> usize {
@@ -323,9 +325,6 @@ impl LimitsConfig {
         }
         if self.max_pixels == 0 || self.max_pages == 0 || self.max_output_bytes == 0 {
             return Err("max-pixels, max-pages and max-output-bytes must be positive".into());
-        }
-        if self.max_svg_bytes == Some(0) {
-            return Err("max-svg-bytes must be positive".into());
         }
         if self.svg_bytes() > self.max_output_bytes {
             return Err(format!(
@@ -681,9 +680,9 @@ mod tests {
     }
 
     #[test]
-    fn the_svg_cap_defaults_below_the_output_cap_and_never_exceeds_it() {
+    fn the_svg_text_limit_defaults_below_the_output_cap_and_never_exceeds_it() {
         let l = LimitsConfig::default();
-        assert_eq!(l.svg_bytes(), 128 * 1024);
+        assert_eq!(l.svg_bytes(), 40 * 1024);
         assert!(l.check().is_ok());
         // A small output cap pulls the default down with it.
         let small = LimitsConfig {
@@ -708,11 +707,12 @@ mod tests {
             ..LimitsConfig::default()
         };
         assert!(at.check().is_ok());
+        // Zero is allowed: every SVG is returned as a blob.
         let zero = LimitsConfig {
             max_svg_bytes: Some(0),
             ..LimitsConfig::default()
         };
-        assert!(zero.check().is_err());
+        assert!(zero.check().is_ok());
     }
 
     #[test]

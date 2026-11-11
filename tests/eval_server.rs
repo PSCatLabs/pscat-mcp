@@ -10,7 +10,8 @@
 //! dotted `structured` paths and `text_contains`, and the same matcher
 //! operators (`in`, `equals`, `equals_text`, `contains`, `not_contains`,
 //! `min`, `max`, `regex`, `absent`). The server layer adds `png` (size and
-//! pixel samples), `resource` (an SVG or PDF signature), `elapsed_ms` and
+//! pixel samples), `resource` (an SVG or PDF signature, and whether it is a
+//! text or a blob resource), `elapsed_ms` and
 //! `renders_executed`; steps that send another MCP request instead of a
 //! tool call (`request`: `resources/list`, `resources/read`, `prompts/list`,
 //! ...; with `params`), checked with `response` (dotted paths into the
@@ -719,14 +720,19 @@ fn check_resource(spec: &Value, result: &Value, problems: &mut Vec<String>) {
         problems.push(format!("resource: no {mime} block"));
         return;
     };
-    let bytes = match (res["blob"].as_str(), res["text"].as_str()) {
-        (Some(b), _) => b64(b),
-        (None, Some(t)) => t.as_bytes().to_vec(),
+    let (bytes, form) = match (res["blob"].as_str(), res["text"].as_str()) {
+        (Some(b), _) => (b64(b), "blob"),
+        (None, Some(t)) => (t.as_bytes().to_vec(), "text"),
         _ => {
             problems.push("resource: neither blob nor text".into());
             return;
         }
     };
+    if let Some(want) = spec["form"].as_str()
+        && want != form
+    {
+        problems.push(format!("{mime} is a {form} resource, want {want}"));
+    }
     let text = String::from_utf8_lossy(&bytes);
     let starts: Vec<&str> = match &spec["starts_with"] {
         Value::String(s) => vec![s.as_str()],
