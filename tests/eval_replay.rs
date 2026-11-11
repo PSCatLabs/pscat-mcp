@@ -412,6 +412,43 @@ async fn capture_mode_records_requests_and_never_a_token() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn capture_mode_is_refused_off_loopback() {
+    let mut http = http_config();
+    assert!(pscat_mcp::http::check_capture_bind(&http).is_ok());
+    http.bind = "::1".parse().unwrap();
+    assert!(pscat_mcp::http::check_capture_bind(&http).is_ok());
+    http.bind = "0.0.0.0".parse().unwrap();
+    let err = pscat_mcp::http::check_capture_bind(&http).unwrap_err();
+    assert!(err.to_string().contains("loopback bind address"), "{err}");
+
+    // End to end: the binary exits with the message and creates no file.
+    let dir = std::env::temp_dir().join(format!("pscat-capture-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("capture.jsonl");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server"))
+        .args([
+            "serve-http",
+            "--bind",
+            "0.0.0.0",
+            "--port",
+            "0",
+            "--capture-file",
+        ])
+        .arg(&path)
+        .env("PSCAT_MCP_AUTH_TOKENS", TOKEN)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must not start: {stderr}");
+    assert!(
+        stderr.contains("--capture-file") && stderr.contains("loopback"),
+        "{stderr}"
+    );
+    assert!(!path.exists(), "the capture file must not be created");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Server binary with `--capture-file`, driven by the rmcp client (the client
 /// Codex is built on): checks the CLI flag end to end, and with
 /// `PSCAT_EVAL_RECORD_DIR` set keeps the capture there for

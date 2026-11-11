@@ -656,8 +656,8 @@ or the query string, and the file is created with mode 0600. The server
 logs a warning at startup. Header names are lowercase because the server
 sees them after HTTP parsing. A test sends tokens in the header, the query
 string, a cookie and an API-key header and checks none appears in the file.
-The file contains the PostScript sources clients send, so it is for local
-debugging only; the container's root filesystem is read-only, so capture
+The file contains the PostScript sources clients send, so the server refuses
+to start with it unless the bind address is loopback; the container's root filesystem is read-only, so capture
 there needs a mounted writable path.
 
 To record a client:

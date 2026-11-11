@@ -132,6 +132,9 @@ fn validate_scenario(sc: &Scenario) -> Result<(), String> {
         }
     }
     for (k, v) in &sc.server_env {
+        if k == "PSCAT_MCP_CAPTURE_FILE" {
+            return Err("server_env must never enable capture mode".into());
+        }
         if !k.starts_with("PSCAT_MCP_") || v.is_empty() {
             return Err(format!("server_env {k:?}: only PSCAT_MCP_* with a value"));
         }

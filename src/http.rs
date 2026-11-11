@@ -8,7 +8,8 @@
 //!
 //! Every response carries an `x-request-id` (generated when the client sent
 //! none), and each request is traced in a span with method, path and
-//! request id. Query strings are never logged.
+//! request id. Query strings are never logged. (Capture mode, opt-in and
+//! loopback-only, is the one exception for request bodies: see `capture.rs`.)
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -57,6 +58,20 @@ fn is_loopback(ip: IpAddr) -> bool {
             v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
         }
     }
+}
+
+/// Capture mode records request bodies, which are users' PostScript, so it
+/// is for local debugging only: refuse it unless the bind address is
+/// loopback (the same rule as `--allow-unauthenticated`).
+pub fn check_capture_bind(http: &HttpConfig) -> anyhow::Result<()> {
+    if !is_loopback(http.bind) {
+        anyhow::bail!(
+            "refusing to start: --capture-file records request bodies (users' PostScript) and is \
+             only permitted on a loopback bind address, but the server would listen on {}",
+            http.bind
+        );
+    }
+    Ok(())
 }
 
 /// Choose the authenticator for `http`.
@@ -365,6 +380,9 @@ pub async fn serve_with_capture(
     service: Arc<RenderService>,
     capture: Option<Arc<Capture>>,
 ) -> anyhow::Result<()> {
+    if capture.is_some() {
+        check_capture_bind(&config)?;
+    }
     let auth = authenticator(&config)?;
     let mcp_ct = CancellationToken::new();
     let app = router_with_capture(

@@ -218,7 +218,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level |
-| `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so never use it in production |
+| `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 
 ## Authentication
 

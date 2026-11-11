@@ -79,6 +79,7 @@ fn main() -> std::process::ExitCode {
             let service = pscat_mcp::build_service(limits, &worker)?;
             let capture = match &capture.capture_file {
                 Some(path) => {
+                    pscat_mcp::http::check_capture_bind(&http)?;
                     let file = pscat_mcp::capture::Capture::open(path)
                         .with_context(|| format!("opening the capture file {}", path.display()))?;
                     tracing::warn!(
