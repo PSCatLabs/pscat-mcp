@@ -77,7 +77,7 @@ authentication and container packaging.
 | Format | Returned as | MIME type |
 |---|---|---|
 | `png` | one MCP `image` content block per page | `image/png` |
-| `svg` | one embedded text resource per page | `image/svg+xml` |
+| `svg` | one embedded text resource per page, at most `PSCAT_MCP_MAX_SVG_BYTES` (256 KiB) in all | `image/svg+xml` |
 | `pdf` | one embedded blob resource holding every page | `application/pdf` |
 
 Every result also has a short text summary and `structuredContent`
@@ -377,7 +377,8 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_MEMORY_BYTES` | 536870912 | PSCat heap-growth limit per render |
 | `PSCAT_MCP_MAX_PIXELS` | 16000000 | device pixels per page |
 | `PSCAT_MCP_MAX_PAGES` | 10 | pages per render |
-| `PSCAT_MCP_MAX_OUTPUT_BYTES` | 8388608 | inline output per render |
+| `PSCAT_MCP_MAX_OUTPUT_BYTES` | 8388608 | inline output per render (PNG, PDF, and SVG as well) |
+| `PSCAT_MCP_MAX_SVG_BYTES` | 262144 (256 KiB, or the output limit if that is smaller) | inline SVG per render, all pages together; over it the call fails with `output_too_large` and `error.input.code` `svg_bytes`. May not exceed `PSCAT_MCP_MAX_OUTPUT_BYTES` (the server refuses to start) |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
@@ -434,8 +435,25 @@ control is enforced by PSCat and which by the server.
 
 ## Current limitations
 
-* **No artifact storage.** Output over `PSCAT_MCP_MAX_OUTPUT_BYTES` returns
-  `output_too_large`. No links are returned.
+* **No artifact storage.** Output over `PSCAT_MCP_MAX_OUTPUT_BYTES` (PNG and
+  PDF) or `PSCAT_MCP_MAX_SVG_BYTES` (SVG) returns `output_too_large`. No
+  links are returned.
+* **SVG output is large, and capped smaller than the rest.** PSCat draws
+  text as glyph outlines (paths, not `<text>` elements) and a gradient as
+  many separate shapes, so an SVG grows quickly: an 88 KB SVG came from a
+  600x400 pt scene with a gradient sky, about 60 stars, some curves and
+  three short strings (#31), and a program that draws thousands of marks
+  is megabytes. An SVG reaches the model as text, and Claude Code turned
+  that 88 KB resource into a saved file because it passed the tool-result
+  token limit (`MAX_MCP_OUTPUT_TOKENS`, set in tokens, not bytes; the
+  default here has not been measured against a live client). The SVG cap
+  is therefore its own limit, 256 KiB by default, summed over every page
+  of one render (each page is a separate resource, but the model reads
+  them all). Over it the call fails before any SVG is returned, with
+  `output_too_large`, `error.input.code` `svg_bytes` and the limit and the
+  size reached in `error.input.limit_bytes` and `reached_bytes`. PNG and
+  PDF are held to `PSCAT_MCP_MAX_OUTPUT_BYTES` only. Raise the SVG cap
+  for a client that takes more.
 * **macOS has no address-space cap** on the worker; memory there is bounded
   by PSCat's allocator limit and the deadline.
 * **Worker network namespace.** The worker shares the host's or container's
@@ -450,9 +468,10 @@ control is enforced by PSCat and which by the server.
   is not used), which with a standard install are the compiled-in ones.
 * **Chalkboard vector output is large.** A board's SVG and PDF keep every
   chalk grain as a vector mark: the default board is about 0.3 MB as PNG,
-  2.6 MB as PDF and 7 to 10 MB as SVG, near or over the default
-  `PSCAT_MCP_MAX_OUTPUT_BYTES` (`output_too_large`). An inline SVG reaches a
-  model as text. A LaTeX formula near `PSCAT_MCP_MAX_LATEX_BYTES` can take
+  2.6 MB as PDF and 7 to 10 MB as SVG, far over the default
+  `PSCAT_MCP_MAX_SVG_BYTES` (`output_too_large`, `error.input.code`
+  `svg_bytes`) and near or over `PSCAT_MCP_MAX_OUTPUT_BYTES`. PNG is the
+  practical format. An inline SVG reaches a model as text. A LaTeX formula near `PSCAT_MCP_MAX_LATEX_BYTES` can take
   several seconds; one that does not finish in the render timeout is
   `timeout`.
 * **`handwrite` sizes the note in the worker.** The page height depends on
@@ -533,7 +552,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 |---|---|
 | `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, a generated page held to its plan (a `handwrite` note's height laid out in the worker within a pixel budget, a note over the budget refused before it is drawn, a page that misses the plan a bad job), deadline kill and no surviving process, cancel kills the worker, `halftone` in the worker job, PSCat step and memory limits, file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd, the worker's art catalog, a `review_sheet` composed in one job and its exact size checked against the budget before any cell runs |
 | `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list (one `EXPECTED_TOOLS` table), annotations and schemas, the art catalog (index, kind pages and named entries with size ceilings, argument errors, no server paths, load lines usable in a render), PNG image content with pixel checks, `halftone` (pure black-and-white pixels, tone kept, every page, refused for SVG/PDF), SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
-| `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 board (dark slate, bright chalk, same image twice), `board: false` transparent and an RGB board, SVG and PDF inline, the LaTeX size limit, an unsupported command as `postscript_error` naming it, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |
+| `tests/svg_cap.rs` | the inline SVG cap over stdio: an SVG under it returned, over it `output_too_large` with `error.input.code` `svg_bytes`, the limit and the size reached (checked against the output schema, text and `structuredContent` agreeing), every page counted together, PNG and PDF of the same program unaffected, the cap in `get_renderer_info` and the tool descriptions, its default pulled down by a small output cap, and a cap above the output cap refused at startup |
+| `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 board (dark slate, bright chalk, same image twice), `board: false` transparent and an RGB board, PDF inline and SVG over the SVG cap, the LaTeX size limit, an unsupported command as `postscript_error` naming it, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |
 | `tests/handwrite.rs` | `handwrite` over stdio: the tool's schema matches the plugin's arguments, a default 612×146 note with ink pixels in the ink colour, ink, size, width, dpi and `paper: ruled` (ruled lines and margin rule, none on plain paper), the same seed twice giving identical bytes, the text limit, a note too tall for the pixel cap or the side limit as a structured error (and a 500 000-line text refused, not killed) with the server serving the next call, the measuring pass under the step limit (and a limit hit inside a megabyte word keeping the reply small), argument errors through the envelope, and empty, whitespace-only, non-Latin and control-character text |
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
 | `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client gets a task handle (render and `handwrite`), a plain one or one on a server without `--tasks` the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only |

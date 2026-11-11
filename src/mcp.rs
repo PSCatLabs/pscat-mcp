@@ -627,6 +627,10 @@ pub struct LimitsInfo {
     pub max_pages: usize,
     /// Most bytes of rendered output (all pages, before base64).
     pub max_output_bytes: usize,
+    /// Most bytes of SVG (all pages together) returned inline; at most
+    /// `max_output_bytes`. Over it, an SVG render fails with
+    /// `output_too_large` and `error.input.code` `svg_bytes`.
+    pub max_svg_bytes: usize,
     /// Most bytes of program stdout returned.
     pub max_program_output_bytes: usize,
     /// Smallest accepted dpi.
@@ -733,10 +737,14 @@ impl PscatMcp {
             route.attr.description = Some(
                 format!(
                     "{base} Limits on this server: source up to {} bytes; at most {} pixels per \
-                     page and {PSCAT_MAX_SIDE_PX} pixels a side; at most {} pages; {} ms per render.",
+                     page and {PSCAT_MAX_SIDE_PX} pixels a side; at most {} pages; output up to {} bytes \
+                     and, for svg, up to {} bytes (all pages together; over it the call fails \
+                     with output_too_large); {} ms per render.",
                     limits.max_source_bytes,
                     limits.max_pixels,
                     limits.max_pages,
+                    limits.max_output_bytes,
+                    limits.svg_bytes(),
                     limits.render_timeout_ms
                 )
                 .into(),
@@ -747,11 +755,13 @@ impl PscatMcp {
             route.attr.description = Some(
                 format!(
                     "{base} Limits on this server: latex up to {} bytes; at most {} pixels per \
-                     board and {PSCAT_MAX_SIDE_PX} pixels a side; output up to {} bytes; {} ms \
+                     board and {PSCAT_MAX_SIDE_PX} pixels a side; output up to {} bytes and, for svg, \
+                     up to {} bytes (a board's SVG runs to megabytes; png is about 0.3 MB); {} ms \
                      per board.",
                     limits.max_latex_bytes,
                     limits.max_pixels,
                     limits.max_output_bytes,
+                    limits.svg_bytes(),
                     limits.render_timeout_ms
                 )
                 .into(),
@@ -819,7 +829,7 @@ impl PscatMcp {
                 route.attr.description = Some(
                     format!(
                         "{base} Limits on this server: a job's worker may run {} ms{}, under \
-                         the same memory, pixel, page and output limits as render_postscript; \
+                         the same memory, pixel, page, output and SVG limits as render_postscript; \
                          {} jobs run at once and more wait queued; at most {} unfinished jobs \
                          per client and {} in all; a finished job is kept {} ms.",
                         c.job_timeout_ms,
@@ -915,6 +925,7 @@ impl PscatMcp {
                 max_side_px: PSCAT_MAX_SIDE_PX,
                 max_pages: l.max_pages,
                 max_output_bytes: l.max_output_bytes,
+                max_svg_bytes: l.svg_bytes(),
                 max_program_output_bytes: l.max_program_output_bytes,
                 min_dpi: MIN_DPI,
                 max_dpi: MAX_DPI,

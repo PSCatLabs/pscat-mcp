@@ -136,6 +136,12 @@ pub struct InputDiagnostic {
     /// The command, character or environment the error names, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// For a size limit (`svg_bytes`), the limit in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<u64>,
+    /// For a size limit (`svg_bytes`), the size the output reached, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reached_bytes: Option<u64>,
 }
 
 impl RenderError {
@@ -533,6 +539,7 @@ fn interp_limits(limits: &LimitsConfig) -> InterpLimits {
         max_page_pixels: limits.max_pixels,
         max_pages: limits.max_pages,
         max_output_bytes: limits.max_output_bytes,
+        max_svg_bytes: limits.svg_bytes(),
         max_program_output_bytes: limits.max_program_output_bytes,
     }
 }
@@ -616,6 +623,7 @@ impl RenderService {
         started: Instant,
     ) -> Result<RenderOutput, RenderError> {
         let format = job.format;
+        let tool = job.generate.as_ref().map(|g| g.kind());
         let result = self.run_in_slot(permit, job, deadline).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
         if let Some(WorkerFailure::Generate(f)) = &result.failure
@@ -625,7 +633,7 @@ impl RenderService {
             tracing::warn!(wall_ms, "a review sheet ran out of its time in the worker");
         }
         if let Some(failure) = result.failure.clone() {
-            return Err(failure_to_error(failure, result, format));
+            return Err(failure_to_error(failure, result, format, tool));
         }
         if result.artifacts.is_empty() {
             return Err(RenderError::new(
@@ -774,7 +782,12 @@ impl RenderService {
         match &result.failure {
             None | Some(WorkerFailure::PostScript) => {}
             Some(other) => {
-                return Err(failure_to_error(other.clone(), result, OutputFormat::Png));
+                return Err(failure_to_error(
+                    other.clone(),
+                    result,
+                    OutputFormat::Png,
+                    None,
+                ));
             }
         }
         let syntax: SyntaxReport = result.syntax.map(Into::into).unwrap_or(SyntaxReport {
@@ -823,7 +836,7 @@ impl RenderService {
         };
         let result = self.run(job, self.limits.render_timeout()).await?;
         if let Some(failure) = result.failure.clone() {
-            return Err(failure_to_error(failure, result, OutputFormat::Png));
+            return Err(failure_to_error(failure, result, OutputFormat::Png, None));
         }
         let value = result.capabilities.ok_or_else(|| {
             RenderError::new(
@@ -958,11 +971,13 @@ fn shutting_down() -> RenderError {
 }
 
 /// The error for a worker failure; `format` is the requested format, which
-/// decides the advice for output that is too large.
+/// decides the advice for output that is too large, and `tool` the
+/// generator tool (`chalkboard_math`, ...) that made the program, if any.
 fn failure_to_error(
     failure: WorkerFailure,
     result: WorkerResult,
     format: OutputFormat,
+    tool: Option<&str>,
 ) -> RenderError {
     let program_output = Some(result.program_output).filter(|s| !s.is_empty());
     match failure {
@@ -998,6 +1013,8 @@ fn failure_to_error(
             input: Some(InputDiagnostic {
                 code: f.detail,
                 token: f.token,
+                limit_bytes: None,
+                reached_bytes: None,
             }),
         },
         WorkerFailure::TooManyPages { pages, max } => RenderError::new(
@@ -1017,6 +1034,29 @@ fn failure_to_error(
                 }
             ),
         ),
+        WorkerFailure::SvgTooLarge { bytes, max } => {
+            let advice = if tool == Some("chalkboard_math") {
+                "a chalkboard's SVG keeps every chalk grain as a vector mark and runs to \
+                 megabytes, so png is the practical format (about 0.3 MB; pdf about 2.6 MB)"
+            } else {
+                "SVG draws text as glyph outlines and a gradient as many shapes, so it grows \
+                 quickly: use png or pdf, lower the page size, or simplify the program"
+            };
+            let mut e = RenderError::new(
+                ErrorCode::OutputTooLarge,
+                format!(
+                    "the SVG is {bytes} bytes (all pages together); this server returns at most \
+                     {max} bytes of SVG inline (PSCAT_MCP_MAX_SVG_BYTES); {advice}"
+                ),
+            );
+            e.input = Some(InputDiagnostic {
+                code: "svg_bytes".into(),
+                token: None,
+                limit_bytes: Some(max as u64),
+                reached_bytes: Some(bytes as u64),
+            });
+            e
+        }
         WorkerFailure::Encode { message } => RenderError::new(
             ErrorCode::WorkerFailed,
             format!("encoding failed: {message}"),
