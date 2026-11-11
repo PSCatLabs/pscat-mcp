@@ -14,7 +14,20 @@
  },
  "model": "claude-sonnet-5-5",
  "effort": null,
- "cases_sha256": "8cdbc356c35ee239",
+ "cases": {
+  "describe-capabilities": "addd9aca2f343437",
+  "diagnose-syntax": "f66d1ffbeecc6356",
+  "diagnose-undefined": "c15661e2ed7ba9dc",
+  "diagram": "d6bff5c463bd0fcf",
+  "first-prompt": "b355b72971415886",
+  "huge-source": "56854c7747bdd7b3",
+  "infinite-loop": "61bf88f00fe20380",
+  "oversized-page": "9b111ba6b3a03dd0",
+  "render-shapes": "a2c6f8f2310889a4",
+  "render-shapes-pdf": "03ab8bcee8eee7a2",
+  "too-many-pixels": "616fdc1ea7cf9c95",
+  "unsupported-format": "f2bc36aad538d67b"
+ },
  "verdicts": "rechecked under the cases above",
  "runs_from": [
   "baseline-default",
