@@ -1,7 +1,7 @@
 {
   "id": "async-job",
-  "title": "Scenario 10: a render past the sync deadline runs as a start_render job, is polled to done and fetched; a running job is cancelled",
-  "origin": "examples/agent-scenarios.md section 10; tests/jobs.rs",
+  "title": "Scenario 11: a render past the sync deadline runs as a start_render job, is polled to done and fetched; a running job is cancelled",
+  "origin": "examples/agent-scenarios.md section 11; tests/jobs.rs",
   "server_env": {
     "PSCAT_MCP_ASYNC_JOBS": "true",
     "PSCAT_MCP_RENDER_TIMEOUT_MS": "1000",

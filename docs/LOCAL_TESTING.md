@@ -204,10 +204,12 @@ way.
 
 ## 6. What else to try
 
-[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has six
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has ten
 prompts with the expected tool call and result: render a program, draw a
 diagram, diagnose an invalid program, ask for an unsupported format,
-try to exhaust resources, and look up palette, template and procedure names. Beyond those and the prompt above:
+try to exhaust resources, look up palette, template and procedure names,
+write a chalkboard formula and a handwritten note, compare candidates on a
+review sheet, and start from a guide prompt. Beyond those and the prompt above:
 
 * **Images.** After a PNG render, does the client show the image to you, and
   can the agent describe it correctly? That tells you whether the image
@@ -221,6 +223,33 @@ try to exhaust resources, and look up palette, template and procedure names. Bey
   stops: over stdio the client should send `notifications/cancelled`; over
   HTTP the server's log shows whether the request ended early.
 * **Renderer info.** Ask which PSCat version is running.
+* **Guides.** In Claude Code, type `/` and look for the `diagram`,
+  `generative_art` and `chart` prompts (see below), or `@pscat-render:` for
+  the `pscat://guide/...` resources. Check that the server's note shows
+  before PSCat's text, and whether the agent maps a `pscat --png` command in
+  the guide to a `render_postscript` call.
+
+### Prompts and resources in each client
+
+The server offers the PSCat plugin's skills as MCP resources and prompts
+(README, "Prompts and resources"). Whether anyone sees them depends on the
+client. Checked on 2026-11-10. **Not verified in any client's UI**: no
+column below comes from using the feature in a client. The only local checks
+were read-only: `claude --version` (2.1.322) and `claude mcp --help`;
+`codex --version` (codex-cli 0.167.1) and `codex mcp --help`. Neither CLI
+has a prompt or resource subcommand.
+
+| Client | Prompts | Resources, attached by the user | Resources, read by the model | Source |
+|---|---|---|---|---|
+| Claude Code | Yes: `/` lists `/pscat-render:diagram (MCP)`; `/mcp__pscat-render__diagram` also works. Arguments are space-separated, one token each, which is why every argument here is optional. | Yes: `@` autocompletes `@pscat-render:pscat://guide/...` and attaches it. | Yes: built-in `ListMcpResourcesTool` and `ReadMcpResourceTool`, no permission prompt. | Docs: [code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp), [tools reference](https://code.claude.com/docs/en/tools-reference). In `-p` mode only the tool list refreshes on a change. |
+| Codex (CLI, IDE) | No. Its MCP client has no `prompts/list` or `prompts/get`; [openai/codex#5059](https://github.com/openai/codex/issues/5059), "MCP prompts support", is open. | No UI found. `/mcp` lists a server's resources and templates. | Yes: `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`. | Read in the openai/codex source with `gh` (`codex-rs/rmcp-client/src/rmcp_client.rs`, `codex-rs/core/src/tools/handlers/mcp_resource_spec.rs`), not run. The official docs ([learn.chatgpt.com/docs/extend/mcp](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)) don't mention prompts or resources. |
+| Claude.ai, Desktop, mobile (custom connectors) | Yes: the "+" menu, Connectors, then the server lists its prompts. | Yes, from the same menu. | Not documented. | Docs: [claude.com/docs/connectors/building](https://claude.com/docs/connectors/building) (tools, prompts and resources supported; no subscriptions). The menu path is from [modelcontextprotocol.io](https://modelcontextprotocol.io/docs/develop/connect-remote-servers), not an Anthropic page. |
+| ChatGPT (developer mode, Apps SDK) | Apparently not. | No. Resources are used only as UI templates (`_meta.ui.resourceUri`, `text/html;profile=mcp-app`). | Apparently not. | The [Apps SDK reference](https://developers.openai.com/apps-sdk/reference) covers only UI-template resources. That ChatGPT ignores other resources and prompts comes from secondary sources only: an [OpenAI community thread](https://community.openai.com/t/does-chatgpt-apps-support-reading-standard-mcp-resources/1384027) and [Zuplo's guide](https://zuplo.com/docs/mcp-gateway/connect-clients/chatgpt.md). |
+
+So prompts reach Claude Code and Claude.ai users. The model reads resources
+on its own only in Claude Code and Codex, and there only when it decides to.
+Nothing tells it to: the tool descriptions don't mention the guides, and
+the server instructions only say they exist.
 
 ## 7. What to report
 
@@ -610,6 +639,13 @@ first prompt in section 5.
   checks can use `{{server_version}}`, `{{pscat_version}}`,
   `{{pscat_revision}}` and `{{pscat_revision7}}`, which come from
   `get_renderer_info`.
+* **`mcp_prompt`** (`{"name": ..., "arguments": {...}}`) starts the case
+  from one of the server's MCP prompts, as a user who picks
+  `/mcp__pscat-render__chart` would. The runner gets the prompt's text with
+  `prompts/get` over stdio (no model involved) and sends it, then the case's
+  `prompt`, as the user's message. `91-guide-prompt-chart.json` uses it.
+  The agent still has only the `pscat-render` tools, so Claude Code's
+  `ReadMcpResourceTool` isn't available, and no case reads a resource.
 * **Checks on every run.** The agent finished (it didn't hit
   `--max-turns`), there were no permission denials, every call went to
   `pscat-render`, and the turn count is at most `max_turns`.
@@ -701,6 +737,13 @@ cases. A scenario runs on every target (stdio, http, container) unless
   * `renders_executed`: how many jobs the server handed to a worker during
     the step, counted from its `render started` log line, so it works on
     every target. Requests refused before execution assert `0`.
+* **`request`** (with `params`) sends an MCP request other than a tool
+  call instead of `tool`/`args`: `resources/list`, `resources/read`,
+  `resources/templates/list`, `prompts/list` or `prompts/get`. Its `result`
+  has `response` (dotted paths into the JSON-RPC result, with the same
+  matchers) or `protocol_error` (dotted paths into the JSON-RPC error:
+  `code`, `message`, `data.*`), plus `elapsed_ms` and `renders_executed`.
+  `65-guide-prompts-resources.json` uses it.
 * **`parallel`** (with `outcomes`) fires calls at once and compares the
   sorted list of results (`ok`, or the error code) with `outcomes`, which
   is how `server_busy` is tested without depending on which call wins the
@@ -717,9 +760,10 @@ cases. A scenario runs on every target (stdio, http, container) unless
 * Unknown keys are an error, so a typo cannot turn an assertion off.
 
 What is covered: the first prompt in section 5 (the runaway loop is
-`runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 10 of
-`agent-scenarios.md` (among them 6, the catalog tool; 7, the chalkboard; 8,
-the handwritten note; and 10, a background job, `66-async-job.json`, with
+`runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 6 of
+`agent-scenarios.md` (including 6, the catalog tool, 7, the chalkboard, and 8,
+the handwritten note), 9 (the review sheet), 10 (the guide prompts and
+resources), 11 (a background job, `66-async-job.json`, with
 `PSCAT_MCP_ASYNC_JOBS=true` for HTTP and the image), and every error code in
 its list (`cancelled` as a cancelled job's result; `tests/mcp_cancel.rs`
 covers an rmcp client's cancellation of a call, which kills the worker).

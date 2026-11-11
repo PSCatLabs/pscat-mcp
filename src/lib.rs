@@ -5,6 +5,7 @@
 //!
 //! * [`http`] / [`mcp::serve_stdio`] — transports.
 //! * [`mcp`] — tool definitions; no rendering logic.
+//! * [`guide`] — the PSCat plugin's skills as MCP resources and prompts.
 //! * [`render`] — transport-independent service: validation, limits,
 //!   concurrency, structured errors.
 //! * [`backend`] — runs a job; [`backend::SubprocessBackend`] starts one
@@ -26,6 +27,7 @@ pub mod capture;
 pub mod catalog;
 pub mod config;
 pub mod generate;
+pub mod guide;
 pub mod handwrite;
 pub mod http;
 pub mod jobs;

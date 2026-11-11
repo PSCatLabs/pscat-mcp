@@ -570,6 +570,25 @@ async fn job_tools_are_listed_only_when_jobs_are_on() {
                 .contains("start_render"),
             listed
         );
+        // The guide's note follows the router: the job tools are missing
+        // from it exactly when they are not listed.
+        let read: rmcp::model::ReadResourceRequestParams =
+            serde_json::from_value(json!({ "uri": "pscat://guide/pscat/SKILL.md" })).unwrap();
+        let doc = serde_json::to_value(client.read_resource(read).await.unwrap()).unwrap();
+        let text = doc["contents"][0]["text"].as_str().unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains("The tools are"))
+            .expect("tools line");
+        let missing = line.split("The plugin's").nth(1).unwrap_or("");
+        for name in job_tools {
+            assert_eq!(
+                missing.contains(&format!("`{name}`")),
+                !listed,
+                "{name}: {line}"
+            );
+        }
+        assert_eq!(text.contains("a `start_render` job"), listed);
         // No Tasks extension unless asked for.
         let caps = serde_json::to_value(&client.peer_info().unwrap().capabilities).unwrap();
         assert!(caps.get("extensions").is_none(), "{caps}");

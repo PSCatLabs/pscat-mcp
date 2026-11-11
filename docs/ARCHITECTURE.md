@@ -355,6 +355,91 @@ extension queued and running are `working`; done and failed are both
 `cancelled`. A task's `ttlMs` is the job deadline plus the result TTL, its
 `pollIntervalMs` 1000.
 
+## Agent guidance (prompts and resources)
+
+`src/guide.rs` serves the PSCat plugin's skills (issue #39). It runs no
+PostScript and starts no worker: everything it returns is text compiled into
+the binary.
+
+**Where the text comes from.** `guide/skills/` is a byte-for-byte copy of
+`plugin/skills/` at the PSCat commit `Cargo.lock` pins, with PSCat's
+`LICENSE-MIT` and `LICENSE-APACHE` beside it and `guide/SOURCE.json`
+recording the repository, tag, version, commit, path, licence, copyright and
+file list. `scripts/vendor-guide.py` writes all of it. It finds the checkout
+through `cargo metadata`, so it reads the same checkout the build compiles,
+and it refuses any file that PSCat's own licence inventory
+(`licenses/assets.json`, first match wins) does not list as MIT OR
+Apache-2.0. All 14 files are covered by its catch-all `code` entry, with
+copyright "Jerome Banks and the pscat contributors". `scripts/bump-pscat.sh`
+runs it after every pin move, and the **Bump PSCat** workflow commits
+`guide/` with `git add -A`, so added and removed files are kept.
+
+The files are vendored, not read from the git dependency at build time.
+Cargo's git checkout happens to hold the whole repository, `plugin/`
+included. PSCat's `include` allow-list keeps `plugin/` out of the packaged
+crate, though, so the day PSCat moves to crates.io an embed from the
+dependency would silently lose the skills. The vendored copy can't drift
+unnoticed either: `tests/guide.rs` compares it byte for byte with the
+checkout's `plugin/skills/`, and checks that `SOURCE.json` names the
+`Cargo.lock` commit and the `Cargo.toml` tag.
+
+`build.rs` lists `guide/skills/` and writes `$OUT_DIR/guide_files.rs`, one
+`include_str!` per file, so a bump that adds a file is served without a code
+change. An empty or missing `guide/skills/` fails the build.
+
+**What is served.**
+
+* `resources/list` and `resources/read`: one `text/markdown` resource per
+  file at `pscat://guide/<path under plugin/skills>`. The URIs mirror the
+  layout, so relative links such as `references/paint.md` and
+  `../SKILL.md` resolve against them. This is also the shape the SEP-2640
+  skills extension (rmcp's `enable_skills`) expects of a `SKILL.md` URI;
+  this server doesn't declare that extension. The descriptions are neutral
+  ("<title> (plugin/skills/<path> from PSCat <tag>, with a note ...)"), not
+  the skills' "Use when ..." frontmatter: Codex shows resource descriptions
+  to its model, where they would act as instructions.
+* `prompts/list` and `prompts/get`: `diagram`, `generative_art` and
+  `chart`. Each returns one user text message: a task written here (from
+  the prompt's arguments), then one guide document exactly as
+  `resources/read` serves it. All arguments are optional, because Claude Code
+  passes one whitespace-separated token per argument. Each argument is
+  checked: only declared names, at most `PSCAT_MCP_MAX_PROMPT_ARGUMENT_BYTES` (8 KiB), and `format`, `kind`, `seed`
+  and `palette` from fixed sets or shapes. One document per prompt keeps a
+  reply under 24 KB; `pscat` and `psart` together would be about 29 KB.
+* Errors are JSON-RPC errors, not tool results: an unknown URI is `-32002`
+  (resource not found, with `data.uri`; rmcp sends `-32602` instead to a
+  2026-07-28 client, which is what that version specifies); an unknown prompt, an unknown
+  argument or a bad value is `-32602` (invalid params, with `data.name` and
+  `data.argument`).
+
+**The note.** PSCat's text was written for the plugin, which runs the
+`pscat` CLI on the user's machine. The decision is to serve it verbatim,
+traceable to the PSCat revision, rather than rewrite it. Each served document
+is a Markdown blockquote written by this server, a `---` rule, then the file
+unchanged. The note says:
+
+* where the text comes from (path, tag, full commit, copyright, licence);
+* this server's tools, from the tool router as this transport configured
+  it, and which of the plugin's ten are missing (`eval_postscript`, and the
+  four render job tools where async jobs are off, as on HTTP by default),
+  with `validate_postscript` standing in for `eval_postscript`;
+* how `pscat` CLI options map to tool arguments (and `pscat handwrite`,
+  `chalk` and `sheet` to their tools, when present), and that the others
+  have no equivalent;
+* that output is inline only (no `out_path`, nothing saved), reads are
+  confined to `lib/`, and `render_postscript` lacks the plugin's `bands`,
+  `bbox` and `out_path` (taken from its input schema);
+* the render deadline;
+* one line for each of a few files (`FILE_NOTES`; a unit test checks that
+  each key is a vendored file).
+
+Because the lists come from the router and the schema, the render job tools
+(#33) are listed as available where async jobs are on (stdio, or HTTP with
+`--async-jobs`) and as missing where they are off, as `review_sheet` (#38)
+dropped out when it landed. The
+served text is the note followed by the file, so a test can check that the
+file is a byte-exact suffix.
+
 ## Why a child process
 
 The library runs **inside a child process**, not in the server, because:

@@ -26,6 +26,10 @@ The server exposes seven tools:
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
+It also offers the PSCat plugin's skills as `text/markdown` resources
+(`pscat://guide/...`) and three prompts (`diagram`, `generative_art`,
+`chart`); see scenario 10.
+
 Every failure is `isError: true` with a text explanation and
 `structuredContent.error = {code, message, postscript?, program_output?, input?}`
 (`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error,
@@ -520,9 +524,48 @@ This case is covered by `tests/review_sheet.rs` and
 `evals/agent/cases/90-review-sheet.json` (unbaselined). It has not been run
 through an agent against the container image.
 
+## 10. Start from a guide prompt
+
+**Prompt**
+
+In Claude Code, pick the server's `chart` prompt with one argument, then
+type the data:
+
+> `/mcp__pscat-render__chart bar`
+>
+> The data: quarterly sign-ups, Q1 8, Q2 15, Q3 12, Q4 19. Label the four
+> bars Q1 to Q4 and give the chart a title. Show me the rendered image.
+
+`prompts/get` (`{"name": "chart", "arguments": {"kind": "bar"}}`) returns one
+user message. It starts with the task ("Make a paper-ready bar chart with
+PSCat's lib/dataviz.ps, and render it with this server's render_postscript
+tool..."). Then comes `pscat://guide/psviz/SKILL.md` as `resources/read`
+serves it: the server's note, a rule, and PSCat's `psviz` skill unchanged.
+
+**Expected tool calls**
+
+```json
+{ "name": "render_postscript", "arguments": { "source": "%!PS\n(lib/dataviz.ps) run\n... [8 15 12 19] 0.22 { pop dvcolor } barchart ...\nshowpage" } }
+```
+
+**Expected result**
+
+- A PNG bar chart with four bars and the labels; `ok: true`.
+- The agent works from `dataviz.ps` calls in the guide (`setdvframe`,
+  `barchart`, `dvaxes`), not from the `pscat --png` command line, which the
+  note says this server doesn't have.
+- `resources/read` of an unknown `pscat://guide/...` URI is JSON-RPC error
+  `-32002` (`-32602` at protocol 2026-07-28); `prompts/get` of an unknown prompt, or `kind: "radar"`, is
+  `-32602`.
+
+This case is covered by `tests/guide.rs`, `tests/http.rs` and
+`evals/server/scenarios/65-guide-prompts-resources.json`; the agent case is
+`evals/agent/cases/91-guide-prompt-chart.json` (unbaselined). It has not
+been run through an agent.
+
 ---
 
-## 10. Run a long render as a background job
+## 11. Run a long render as a background job
 
 Async jobs are on over stdio; over HTTP only with `PSCAT_MCP_ASYNC_JOBS=true`
 (one instance). Without them the four job tools are not listed.
@@ -589,4 +632,5 @@ been run through an agent.
 | 7 | Chalkboard | `chalkboard_math` | PNG 1600×800 board with yellow chalk; an unsupported command is `postscript_error` naming it |
 | 8 | Handwritten note | `handwrite` | PNG 612×146 on ruled paper in green ink; a note too tall for the limits is `invalid_dimensions` or `too_many_pixels` |
 | 9 | Review sheet | `review_sheet` | PNG 363×396, two rows of three cells (128 px, 32 px, 32 px at 4x); a failing cell drawn with its error; budgets refused before execution |
-| 10 | Background job | `start_render`, `render_status`, `render_result` | job `queued` then `done`; PNG 200×100 green from `render_result`; `job_not_finished` before, `unknown_job` for another client |
+| 10 | Guide prompt | `prompts/get` `chart`, then `render_postscript` | Bar chart from `lib/dataviz.ps` renders; unknown URI `-32002`, unknown prompt `-32602` |
+| 11 | Background job | `start_render`, `render_status`, `render_result` | job `queued` then `done`; PNG 200×100 green from `render_result`; `job_not_finished` before, `unknown_job` for another client |
