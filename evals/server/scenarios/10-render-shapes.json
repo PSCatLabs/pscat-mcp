@@ -24,10 +24,12 @@
           "artifacts.0.page": 1,
           "artifacts.0.width_px": 400,
           "artifacts.0.height_px": 300,
+          "artifacts.0.width_pt": 400,
+          "artifacts.0.height_pt": 300,
           "artifacts.0.mime_type": "image/png"
         },
         "text_contains": [
-          "Rendered 1 page as PNG (400x300 px"
+          "Rendered 1 page as PNG (400x300 pt = 400x300 px"
         ],
         "png": {
           "width": 400,

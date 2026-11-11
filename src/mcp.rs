@@ -195,7 +195,8 @@ pub struct ChalkboardArgs {
     #[schemars(range(min = 1, max = 8000))]
     pub height: Option<u32>,
     /// Resolution in dots per inch, 9 to 1200. Default 144 (the default
-    /// board is 1600x800 pixels).
+    /// board is 800x400 points, 1600x800 pixels). The result reports the
+    /// board in points and in pixels.
     pub dpi: Option<f64>,
     /// Output format: "png" (the default), "svg" or "pdf".
     #[schemars(extend("enum" = ["png", "svg", "pdf"], "default" = "png"))]
@@ -440,6 +441,15 @@ pub struct ArtifactSummary {
     pub width_px: u32,
     /// Height in device pixels.
     pub height_px: u32,
+    /// Width in points (1/72 inch) of the page as drawn, after any default
+    /// size and any `setpagedevice`: `width_px * 72 / dpi`, rounded to 0.01
+    /// (a fractional page size comes back as its rounded pixels converted
+    /// back).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_pt: Option<f64>,
+    /// Height in points of the page as drawn; see `width_pt`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_pt: Option<f64>,
     /// Size of the artifact in bytes (before base64).
     pub bytes: usize,
     /// MIME type of the artifact.
@@ -1031,8 +1041,8 @@ impl PscatMcp {
         title = "Render PostScript",
         description = "Runs a PostScript program in the PSCat interpreter and returns the pages it \
                        produced as PNG images (default), SVG documents or a PDF document, with a \
-                       short text summary and the program's stdout. The program runs in a \
-                       sandbox: reading files is refused except for PSCat's built-in lib/ \
+                       short text summary (the size of each page in points and in pixels) and \
+                       the program's stdout. The program runs in a sandbox: reading files is refused except for PSCat's built-in lib/ \
                        (for example `(lib/artkit.ps) run`), and nothing can be written. A \
                        PostScript error returns the error name, offending command and line \
                        instead of an image.",
@@ -1071,8 +1081,9 @@ impl PscatMcp {
                        TeX subset is PSCat mathkit's (fractions, roots, sums, integrals, Greek \
                        letters, matrices, cases, accents); a command outside it fails with \
                        postscript_error naming it, and a bad board setting with invalid_request. \
-                       The default board is 800x400 points at 144 dpi (1600x800 pixels). SVG \
-                       and PDF keep every chalk grain as a vector mark: the default board is \
+                       The default board is 800x400 points at 144 dpi (1600x800 pixels); the \
+                       result gives the board's size in points (`width_pt`, `height_pt`) and in \
+                       pixels. SVG and PDF keep every chalk grain as a vector mark: the default board is \
                        about 0.3 MB as PNG, 2.6 MB as PDF and 7 to 10 MB as SVG. The same \
                        arguments give the same image. The input is LaTeX only, never PostScript.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
@@ -1831,6 +1842,8 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
             page: a.page,
             width_px: a.width_px,
             height_px: a.height_px,
+            width_pt: a.width_pt,
+            height_pt: a.height_pt,
             bytes: a.byte_len,
             mime_type: mime.to_string(),
             returned_as,
@@ -1867,12 +1880,15 @@ fn success_text(out: &RenderOutput, renderer: &RendererIdentity) -> String {
     let dims = out
         .artifacts
         .iter()
-        .map(|a| format!("{}x{}", a.width_px, a.height_px))
+        .map(|a| match (a.width_pt, a.height_pt) {
+            (Some(w), Some(h)) => format!("{w}x{h} pt = {}x{} px", a.width_px, a.height_px),
+            _ => format!("{}x{} px", a.width_px, a.height_px),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let pages = if out.page_count == 1 { "page" } else { "pages" };
     let mut text = format!(
-        "Rendered {} {pages} as {} ({dims} px, {total} bytes) with PSCat {} in {} ms.",
+        "Rendered {} {pages} as {} ({dims}, {total} bytes) with PSCat {} in {} ms.",
         out.page_count,
         out.format.name().to_uppercase(),
         renderer.version,
