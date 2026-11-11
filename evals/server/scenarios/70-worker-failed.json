@@ -1,0 +1,61 @@
+{
+  "id": "worker-failed",
+  "title": "worker_failed when the worker cannot start; tools that run no program still answer",
+  "origin": "error code list in examples/agent-scenarios.md",
+  "server_env": {
+    "PSCAT_MCP_WORKER_EXE": "/nonexistent/pscat-worker"
+  },
+  "steps": [
+    {
+      "label": "render",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "worker_failed",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "worker_failed",
+          "error.message": {
+            "contains": "could not start the render worker"
+          }
+        }
+      }
+    },
+    {
+      "label": "validate",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "worker_failed",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "worker_failed"
+        }
+      }
+    },
+    {
+      "label": "get_renderer_info needs no worker",
+      "tool": "get_renderer_info",
+      "args": {},
+      "result": {
+        "structured": {
+          "renderer.engine": "pscat"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "runaway-time",
+  "title": "Scenario 5a variant: PSCat's own time limit stops the loop before the kill (limit_exceeded, limit time)",
+  "origin": "examples/agent-scenarios.md section 5a",
+  "server_env": {
+    "PSCAT_MCP_RENDER_TIMEOUT_MS": "4000",
+    "PSCAT_MCP_INTERP_TIME_LIMIT_MS": "500"
+  },
+  "steps": [
+    {
+      "label": "{ 1 pop } loop",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n{ 1 pop } loop\n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "limit_exceeded",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "limit_exceeded",
+          "error.message": "the program was stopped at the time limit",
+          "error.postscript.limit": "time"
+        },
+        "elapsed_ms": {
+          "min": 400,
+          "max": 3900
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "the server still renders",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    }
+  ]
+}

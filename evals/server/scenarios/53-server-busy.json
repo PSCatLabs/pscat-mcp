@@ -1,0 +1,67 @@
+{
+  "id": "server-busy",
+  "title": "Concurrency: with one render slot, a second and third concurrent render fail with server_busy while the first runs",
+  "origin": "error code list in examples/agent-scenarios.md; tests/http.rs",
+  "server_env": {
+    "PSCAT_MCP_RENDER_TIMEOUT_MS": "1500",
+    "PSCAT_MCP_INTERP_TIME_LIMIT_MS": "0",
+    "PSCAT_MCP_MAX_STEPS": "0",
+    "PSCAT_MCP_MAX_CONCURRENT_RENDERS": "1",
+    "PSCAT_MCP_QUEUE_TIMEOUT_MS": "300"
+  },
+  "steps": [
+    {
+      "label": "three concurrent loops",
+      "parallel": [
+        {
+          "tool": "render_postscript",
+          "args": {
+            "source": "%!PS\n{ 1 pop } loop\n"
+          }
+        },
+        {
+          "tool": "render_postscript",
+          "args": {
+            "source": "%!PS\n{ 1 pop } loop\n"
+          }
+        },
+        {
+          "tool": "render_postscript",
+          "args": {
+            "source": "%!PS\n{ 1 pop } loop\n"
+          }
+        }
+      ],
+      "outcomes": [
+        "timeout",
+        "server_busy",
+        "server_busy"
+      ],
+      "result": {
+        "renders_executed": 1,
+        "elapsed_ms": {
+          "max": 10000
+        }
+      }
+    },
+    {
+      "label": "the slot is free again",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    }
+  ]
+}

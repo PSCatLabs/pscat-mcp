@@ -1,0 +1,70 @@
+{
+  "id": "unsupported-format",
+  "title": "Scenario 4: JPEG is refused before any worker starts",
+  "origin": "examples/agent-scenarios.md section 4",
+  "steps": [
+    {
+      "label": "jpeg",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0 0 1 setrgbcolor 0 0 100 100 rectfill showpage",
+        "format": "jpeg"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "unsupported_format",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "unsupported_format",
+          "error.message": "format \"jpeg\" is not supported; PSCat renders png, svg or pdf"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an unknown name is refused the same way",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "format": "gif"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "unsupported_format",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "unsupported_format"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "png still works",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true
+        },
+        "renders_executed": 1
+      }
+    }
+  ]
+}

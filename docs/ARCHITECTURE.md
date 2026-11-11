@@ -36,6 +36,13 @@ boundaries are, and where to extend it.
                            • PNG / SVG / PDF encoding, page + byte caps
 ```
 
+On HTTP the `/mcp` stack, outermost first, is: request id and tracing,
+authentication, the body limit, the optional capture layer (`capture.rs`,
+off unless `--capture-file` is set; it records each authenticated request
+just before rmcp sees it, without tokens), then rmcp. `render.rs` logs one
+`render started` line per job it hands to a worker; the server-layer evals
+count those lines to assert how many renders a scenario executed.
+
 Every layer below `mcp.rs` is transport independent. A REST API would be a
 second caller of `RenderService` and reuse all validation, limits and error
 codes.
@@ -142,7 +149,9 @@ Known gaps:
   default; set `PSCAT_MCP_ALLOWED_HOSTS` for a deployment) and `Origin`
   validation.
 * **Logging**: PostScript source is never logged, only its byte length;
-  tokens are never logged.
+  tokens are never logged. The one exception is the opt-in capture mode
+  (`--capture-file`), which records request bodies and tokens never, and is
+  refused unless the bind address is loopback.
 * **Statelessness**: Streamable HTTP runs without sessions
   (`legacy_session_mode = false`, JSON responses), so any instance can serve
   any request and nothing is stored between requests.

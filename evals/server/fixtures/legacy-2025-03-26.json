@@ -1,0 +1,91 @@
+{
+  "id": "legacy-2025-03-26",
+  "client": {
+    "name": "legacy-client",
+    "version": null
+  },
+  "obtained": "synthesized",
+  "captured_on": "2026-11-10",
+  "how": "hand-written: a client on MCP 2025-03-26 that sends no MCP-Protocol-Version header (the header was introduced in 2025-06-18); the same cases tests/http.rs checks with raw requests",
+  "requests": [
+    {
+      "name": "initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-03-26",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "legacy-test",
+            "version": "1.0"
+          }
+        }
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "name": "tools/list",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+      }
+    },
+    {
+      "name": "tools/call get_renderer_info",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+          "name": "get_renderer_info",
+          "arguments": {}
+        }
+      }
+    }
+  ]
+}

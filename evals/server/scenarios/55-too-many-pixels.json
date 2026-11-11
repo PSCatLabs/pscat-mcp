@@ -1,0 +1,76 @@
+{
+  "id": "too-many-pixels",
+  "title": "Scenario 5b variant: within the side limit but over the pixel budget (too_many_pixels)",
+  "origin": "examples/agent-scenarios.md section 5b",
+  "steps": [
+    {
+      "label": "5000x5000",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0 0 moveto 5000 5000 lineto stroke showpage",
+        "width": 5000,
+        "height": 5000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pixels",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "too_many_pixels",
+          "error.message": "page is 5000x5000 = 25000000 pixels; the limit is 16000000 pixels (lower the size or dpi)"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "the default Letter page at 600 dpi",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "dpi": 600
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pixels",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "too_many_pixels",
+          "error.message": {
+            "contains": "5100x6600 = 33660000 pixels"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "5000x5000 at 18 dpi fits",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0 0 moveto 5000 5000 lineto stroke showpage",
+        "width": 5000,
+        "height": 5000,
+        "dpi": 18
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 1250,
+          "height": 1250
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    }
+  ]
+}

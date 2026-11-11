@@ -8,7 +8,11 @@ expected to make, and the result that counts as a pass.
 `scripts/agent-eval.sh` runs these cases with Claude Code (and optionally
 Codex) and checks the transcripts; see "Automated agent evals" in
 [`docs/LOCAL_TESTING.md`](../docs/LOCAL_TESTING.md#9-automated-agent-evals).
-The case files are in [`evals/agent/cases/`](../evals/agent/cases/).
+The case files are in [`evals/agent/cases/`](../evals/agent/cases/). The
+deterministic part of every case here (results, error codes, sizes, pixels)
+is also checked without a model by the server-layer scenarios in
+[`evals/server/scenarios/`](../evals/server/scenarios/), which run in CI; see
+[Server-layer evals](../docs/LOCAL_TESTING.md#10-server-layer-evals).
 
 The server exposes four tools:
 

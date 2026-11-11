@@ -1,0 +1,66 @@
+{
+  "id": "accept-json-only",
+  "client": {
+    "name": "json-only-client",
+    "version": null
+  },
+  "obtained": "synthesized",
+  "captured_on": "2026-11-10",
+  "how": "hand-written from the report in PSCatLabs/pscat-mcp#17: an HTTP client or hand-written integration that sends Accept: application/json and nothing else. Which real clients do this is not known yet (#17 collects reports)",
+  "note": "KNOWN FAILURE: today every request here gets HTTP 406. Each request's expect (the default: 2xx and a JSON-RPC result) is what it must do once #17 is fixed. The replay test fails when it starts passing, to remind whoever fixes #17 to delete known_failure from this file.",
+  "requests": [
+    {
+      "name": "initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "json-only-client",
+            "version": "1.0"
+          }
+        }
+      },
+      "known_failure": {
+        "issue": 17,
+        "status": 406,
+        "summary": "rmcp refuses a POST whose Accept lists only application/json; this server only ever answers JSON"
+      }
+    },
+    {
+      "name": "tools/list",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-06-18"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+      },
+      "known_failure": {
+        "issue": 17,
+        "status": 406,
+        "summary": "rmcp refuses a POST whose Accept lists only application/json; this server only ever answers JSON"
+      }
+    }
+  ]
+}

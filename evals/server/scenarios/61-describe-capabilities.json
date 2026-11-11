@@ -1,0 +1,104 @@
+{
+  "id": "describe-capabilities",
+  "title": "Scenario 6: the catalog lists templates and palettes, gives one template's full entry, and a render uses its load line",
+  "origin": "examples/agent-scenarios.md section 6",
+  "steps": [
+    {
+      "label": "index of every kind",
+      "tool": "describe_art_capabilities",
+      "args": {},
+      "result": {
+        "content_types": [
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "view": "index",
+          "index.3.kind": "template",
+          "index.3.names.0": "pgcard",
+          "index.3.names.4": "pgposter",
+          "index.2.kind": "palette",
+          "font_packs.installed": [],
+          "renderer.engine": "pscat"
+        }
+      }
+    },
+    {
+      "label": "templates with a description each",
+      "tool": "describe_art_capabilities",
+      "args": {
+        "kind": "template"
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "kind": "template",
+          "summaries.0.name": "pgcard",
+          "summaries.0.description": {
+            "contains": "Greeting card"
+          }
+        }
+      }
+    },
+    {
+      "label": "one full entry; a made-up name is not_found and the call still succeeds",
+      "tool": "describe_art_capabilities",
+      "args": {
+        "names": [
+          "pgcard",
+          "no_such_name_xyz"
+        ]
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "entries.0.name": "pgcard",
+          "entries.0.kind": "template",
+          "entries.0.load": "(lib/artkit.ps) run (lib/pagekit.ps) run",
+          "entries.0.parameters.0.name": "Title",
+          "not_found": [
+            "no_such_name_xyz"
+          ]
+        }
+      }
+    },
+    {
+      "label": "an unknown kind is invalid_request",
+      "tool": "describe_art_capabilities",
+      "args": {
+        "kind": "bogus"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "structured": {
+          "error.message": {
+            "contains": "is not one of font, type3_face, palette"
+          }
+        }
+      }
+    },
+    {
+      "label": "a render from the entry's load line draws the card",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(lib/artkit.ps) run (lib/pagekit.ps) run\n20 20 360 240 << /Title (Hello) /Body (A card) /Signoff (Me) /Palette /dusk >> pgcard\nshowpage\n",
+        "width": 400,
+        "height": 280
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "structured": {
+          "ok": true
+        },
+        "png": {
+          "width": 400,
+          "height": 280
+        },
+        "renders_executed": 1
+      }
+    }
+  ]
+}

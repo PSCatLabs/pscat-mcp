@@ -1,0 +1,151 @@
+{
+  "id": "rmcp-client",
+  "client": {
+    "name": "rmcp",
+    "version": "3.9.0"
+  },
+  "obtained": "real-capture",
+  "how": "rmcp 3.9.0 client (the Rust MCP SDK; Codex's binary contains rmcp-client source paths, so it probably uses it) against serve-http --capture-file: initialize, tools/list, two tools/call; cargo test --test eval_replay record_rmcp_client_traffic -- --ignored",
+  "captured_on": "2026-11-10",
+  "requests": [
+    {
+      "name": "initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "rmcp",
+            "version": "3.9.0"
+          },
+          "protocolVersion": "2026-07-28"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      },
+      "observed": {
+        "status": 202,
+        "content_type": null
+      }
+    },
+    {
+      "name": "tools/list",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/call get_renderer_info",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "progressToken": 1
+          },
+          "arguments": {},
+          "name": "get_renderer_info"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/call render_postscript",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "text/event-stream, application/json",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+          "_meta": {
+            "progressToken": 2
+          },
+          "arguments": {
+            "height": 50,
+            "source": "%!PS\n0 0 1 setrgbcolor 0 0 100 50 rectfill\nshowpage\n",
+            "width": 100
+          },
+          "name": "render_postscript"
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    }
+  ]
+}

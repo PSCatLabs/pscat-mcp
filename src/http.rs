@@ -8,7 +8,8 @@
 //!
 //! Every response carries an `x-request-id` (generated when the client sent
 //! none), and each request is traced in a span with method, path and
-//! request id. Query strings are never logged.
+//! request id. Query strings are never logged. (Capture mode, opt-in and
+//! loopback-only, is the one exception for request bodies: see `capture.rs`.)
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
 use crate::auth::{AuthError, Authenticator, BearerTokenAuth, NoAuth};
+use crate::capture::{Capture, capture_layer};
 use crate::config::HttpConfig;
 use crate::mcp::PscatMcp;
 use crate::render::RenderService;
@@ -56,6 +58,20 @@ fn is_loopback(ip: IpAddr) -> bool {
             v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
         }
     }
+}
+
+/// Capture mode records request bodies, which are users' PostScript, so it
+/// is for local debugging only: refuse it unless the bind address is
+/// loopback (the same rule as `--allow-unauthenticated`).
+pub fn check_capture_bind(http: &HttpConfig) -> anyhow::Result<()> {
+    if !is_loopback(http.bind) {
+        anyhow::bail!(
+            "refusing to start: --capture-file records request bodies (users' PostScript) and is \
+             only permitted on a loopback bind address, but the server would listen on {}",
+            http.bind
+        );
+    }
+    Ok(())
 }
 
 /// Choose the authenticator for `http`.
@@ -144,6 +160,18 @@ pub fn router(
     auth: Arc<dyn Authenticator>,
     mcp_config: StreamableHttpServerConfig,
 ) -> Router {
+    router_with_capture(service, auth, mcp_config, None)
+}
+
+/// [`router`] with capture mode (see [`crate::capture`]): when `capture` is
+/// set, each request that passed authentication and the body limit is
+/// recorded just before rmcp handles it.
+pub fn router_with_capture(
+    service: Arc<RenderService>,
+    auth: Arc<dyn Authenticator>,
+    mcp_config: StreamableHttpServerConfig,
+    capture: Option<Arc<Capture>>,
+) -> Router {
     let body_limit = mcp_body_limit(service.limits().max_source_bytes);
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
     let mcp = StreamableHttpService::new(
@@ -156,6 +184,7 @@ pub fn router(
     let mcp = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(auth, require_auth))
         .layer(middleware::from_fn_with_state(body_limit, limit_body))
+        .layer(middleware::from_fn_with_state(capture, capture_layer))
         .service(mcp);
 
     Router::new()
@@ -342,12 +371,25 @@ async fn shutdown_signal() {
 /// turn every running render into an error. Whatever is still running when
 /// the grace period ends is cancelled and the function returns.
 pub async fn serve(config: HttpConfig, service: Arc<RenderService>) -> anyhow::Result<()> {
+    serve_with_capture(config, service, None).await
+}
+
+/// [`serve`] with capture mode on when `capture` is set.
+pub async fn serve_with_capture(
+    config: HttpConfig,
+    service: Arc<RenderService>,
+    capture: Option<Arc<Capture>>,
+) -> anyhow::Result<()> {
+    if capture.is_some() {
+        check_capture_bind(&config)?;
+    }
     let auth = authenticator(&config)?;
     let mcp_ct = CancellationToken::new();
-    let app = router(
+    let app = router_with_capture(
         service,
         auth.clone(),
         mcp_server_config(&config, mcp_ct.clone()),
+        capture,
     );
 
     let listener = tokio::net::TcpListener::bind(config.addr())
