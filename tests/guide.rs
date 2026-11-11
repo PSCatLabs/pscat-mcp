@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pscat_mcp::guide;
+use rmcp::RoleClient;
 use rmcp::model::{
     CallToolRequestParams, ErrorCode, GetPromptRequestParams, ReadResourceRequestParams,
     ResourceContents,
 };
 use rmcp::service::{RunningService, ServiceError};
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
+
+mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -39,16 +40,7 @@ fn vendored(path: &str) -> String {
 }
 
 async fn start() -> Client {
-    let cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server")).configure(|c| {
-        c.arg("serve-stdio")
-            .env("PSCAT_MCP_LOG_FORMAT", "pretty")
-            .env("RUST_LOG", "warn");
-    });
-    let transport = TokioChildProcess::new(cmd).expect("spawn server");
-    tokio::time::timeout(CALL_TIMEOUT, ().serve(transport))
-        .await
-        .expect("initialize timed out")
-        .expect("initialize")
+    common::start_stdio(env!("CARGO_BIN_EXE_pscat-mcp-server"), &[]).await
 }
 
 fn mcp_code(e: ServiceError) -> i32 {
