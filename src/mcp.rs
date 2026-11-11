@@ -12,6 +12,8 @@
 //!   with `ok: false` and `error` set; never an image.
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
+//! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
+//!   [`CatalogSlice`] fields at the top level) plus the same slice as text.
 //! * `get_renderer_info` — a [`RendererInfo`] object.
 
 use std::sync::Arc;
@@ -31,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::build_info::{RendererIdentity, SERVER_VERSION};
+use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::render::{
     DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest, RenderService,
@@ -140,6 +143,45 @@ pub struct ValidateToolOutput {
     pub renderer: RendererIdentity,
 }
 
+/// Arguments of `describe_art_capabilities`. With none, the reply is an
+/// index of every kind with its names.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct CapabilitiesArgs {
+    /// List one kind: its names with a one-line description each, a page at a
+    /// time (see `offset` and `limit`).
+    #[schemars(extend("enum" = ["font", "type3_face", "palette", "template", "procedure", "operator", "dial"]))]
+    pub kind: Option<String>,
+    /// Exact names (up to 20) to return in full: description, parameters,
+    /// library file, `run` lines to load it, example and availability. With
+    /// `kind`, only entries of that kind. Unknown names are listed under
+    /// `not_found`; names that do not fit the reply under `omitted`.
+    #[schemars(length(min = 1, max = 20))]
+    pub names: Option<Vec<String>>,
+    /// First entry of a `kind` listing, default 0.
+    #[schemars(range(min = 0))]
+    pub offset: Option<u32>,
+    /// Entries in a `kind` listing, 1 to 100, default 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u32>,
+}
+
+/// `structuredContent` of `describe_art_capabilities`. When the catalog was
+/// read, `ok` is true and the [`CatalogSlice`] fields are present. Otherwise
+/// `ok` is false and `error` is set.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CapabilitiesToolOutput {
+    /// True when the catalog was read.
+    pub ok: bool,
+    /// The part of the catalog that was asked for.
+    #[serde(flatten)]
+    pub catalog: Option<CatalogSlice>,
+    /// Why the catalog could not be read, when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RenderError>,
+    /// The renderer that handled the request.
+    pub renderer: RendererIdentity,
+}
+
 /// One output format.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FormatInfo {
@@ -200,6 +242,17 @@ pub struct PscatMcp {
     tool_router: ToolRouter<Self>,
 }
 
+impl From<CapabilitiesArgs> for CatalogQuery {
+    fn from(a: CapabilitiesArgs) -> Self {
+        CatalogQuery {
+            kind: a.kind,
+            names: a.names,
+            offset: a.offset,
+            limit: a.limit,
+        }
+    }
+}
+
 impl PscatMcp {
     /// A handler over `service`.
     pub fn new(service: Arc<RenderService>) -> Self {
@@ -228,6 +281,15 @@ impl PscatMcp {
     /// The underlying service.
     pub fn service(&self) -> &Arc<RenderService> {
         &self.service
+    }
+
+    /// The view of the art catalog `query` asks for. Arguments are checked
+    /// before any worker starts; the catalog itself is kept after the first
+    /// fetch.
+    async fn capabilities_slice(&self, query: &CatalogQuery) -> Result<CatalogSlice, RenderError> {
+        query.check()?;
+        let catalog = self.service.capabilities().await?;
+        crate::catalog::slice(&catalog, query)
     }
 
     fn renderer_info(&self) -> RendererInfo {
@@ -275,7 +337,7 @@ impl PscatMcp {
     }
 }
 
-/// All three tools only read their arguments and run the program in a
+/// Every tool only reads its arguments (if any) and runs the program (if any) in a
 /// sandboxed worker that cannot write files or reach the network, so they
 /// are annotated read-only, non-destructive, idempotent (the same input
 /// renders the same output) and closed-world.
@@ -368,6 +430,55 @@ impl PscatMcp {
     }
 
     #[tool(
+        name = "describe_art_capabilities",
+        title = "List art capabilities",
+        description = "Lists the creative capabilities of the linked PSCat build: fonts, Type 3 \
+                       faces, mood palettes, page templates, artkit and style-pack procedures, \
+                       native operators and config dials. With no arguments it returns an index \
+                       of every kind with its names. `kind` returns that kind's names with a \
+                       one-line description each, 100 at a time (`offset`, `limit`). `names` \
+                       (up to 20) returns full entries: parameters, defining library file, `run` \
+                       lines to load it, example, availability; unknown names are listed under \
+                       `not_found`. A reply is under 24 KB. Runs no PostScript and does not \
+                       report server file paths.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<CapabilitiesToolOutput>(),
+        annotations(
+            title = "List art capabilities",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn describe_art_capabilities(
+        &self,
+        Parameters(args): Parameters<CapabilitiesArgs>,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        let query = CatalogQuery::from(args);
+        let outcome = tokio::select! {
+            r = self.capabilities_slice(&query) => r,
+            () = ct.cancelled() => Err(cancelled()),
+        };
+        match outcome {
+            Ok(slice) => {
+                let text = slice.text();
+                let envelope = CapabilitiesToolOutput {
+                    ok: true,
+                    catalog: Some(slice),
+                    error: None,
+                    renderer: RendererIdentity::current(),
+                };
+                with_structured(
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    &envelope,
+                )
+            }
+            Err(err) => capabilities_failure(err),
+        }
+    }
+
+    #[tool(
         name = "get_renderer_info",
         title = "PSCat renderer info",
         description = "Reports the PSCat renderer version, this server's version, the supported \
@@ -411,8 +522,9 @@ impl ServerHandler for PscatMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
-                "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, and \
-                 validates programs without rendering. Programs run in a sandbox with no file \
+                "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
+                 validates programs without rendering, and lists the fonts, palettes, page \
+                 templates and procedures the interpreter has. Programs run in a sandbox with no file \
                  writes, no network, and file reads limited to PSCat's built-in lib/.",
             )
     }
@@ -606,11 +718,28 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
         postscript: None,
         program_output: None,
     };
+    // A new tool that takes arguments needs an arm here, or its argument
+    // errors come back as rmcp's bare text result, without the envelope.
     match tool {
         "render_postscript" => render_failure(err),
         "validate_postscript" => validate_failure(err),
+        "describe_art_capabilities" => capabilities_failure(err),
         _ => result,
     }
+}
+
+fn capabilities_failure(err: RenderError) -> CallToolResult {
+    let text = error_text("Capabilities could not be listed", &err);
+    let envelope = CapabilitiesToolOutput {
+        ok: false,
+        catalog: None,
+        error: Some(err),
+        renderer: RendererIdentity::current(),
+    };
+    with_structured(
+        CallToolResult::error(vec![ContentBlock::text(text)]),
+        &envelope,
+    )
 }
 
 fn error_text(lead: &str, err: &RenderError) -> String {

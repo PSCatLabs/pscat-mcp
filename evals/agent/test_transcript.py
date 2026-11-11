@@ -123,6 +123,75 @@ class FirstPromptFixture(unittest.TestCase):
         self.assertIn("agent finished", names)
 
 
+class DescribeCapabilities(unittest.TestCase):
+    """Synthetic transcripts for the `describe-capabilities` case. Claude Code
+    hands the model a tool's structuredContent as the JSON text of the result
+    (see the recorded fixture), so each result here is that JSON text and the
+    checks read the structure recovered from it."""
+
+    @staticmethod
+    def call(args, payload, is_error=False):
+        c = tx.ToolCall("1", "mcp__pscat-render__describe_art_capabilities", SERVER, "describe_art_capabilities", args)
+        text = json.dumps(payload)
+        c.result = {
+            "is_error": is_error,
+            "text": text,
+            "content_types": ["text"],
+            "structured": tx._structured_from_text(text),
+        }
+        return c
+
+    def run_case(self, calls, answer):
+        t = tx.Transcript(agent="claude", calls=calls, answer=answer, completed=True, stop="success", num_turns=4)
+        return {c.name: c.ok for c in tx.evaluate_case(case("describe-capabilities"), t, SERVER, CTX, "stdio")}
+
+    ANSWER = "Palettes include acid and brass. Procedure hatch: load it with (lib/artkit.ps) run, then call it."
+    INDEX = {"ok": True, "view": "index", "pscat_version": "0.7.0-rc.4", "index": [{"kind": "palette", "count": 2, "names": ["acid", "brass"]}]}
+    KIND = {"ok": True, "view": "kind", "kind": "palette", "total": 22, "offset": 0, "summaries": [{"name": "acid", "description": "d"}]}
+    ENTRY = {
+        "ok": True,
+        "view": "names",
+        "entries": [
+            {
+                "name": "hatch",
+                "kind": "procedure",
+                "description": "d",
+                "parameters": [],
+                "source": "lib/artkit.ps",
+                "load": "(lib/artkit.ps) run",
+                "example": "x",
+                "availability": "library",
+            }
+        ],
+        "not_found": [],
+        "omitted": [],
+    }
+
+    def test_index_then_named_entry_passes(self):
+        results = self.run_case([self.call({}, self.INDEX), self.call({"names": ["hatch"]}, self.ENTRY)], self.ANSWER)
+        self.assertTrue(all(results.values()), results)
+
+    def test_kind_listing_also_counts_as_the_palette_call(self):
+        calls = [self.call({"kind": "palette"}, self.KIND), self.call({"names": ["hatch"]}, self.ENTRY)]
+        results = self.run_case(calls, self.ANSWER)
+        self.assertTrue(all(results.values()), results)
+
+    def test_missing_entry_lookup_or_made_up_names_fail(self):
+        index = self.call({}, self.INDEX)
+        results = self.run_case([index], self.ANSWER)
+        self.assertFalse(results["full entry for named procedure: called"])
+        entry = self.call({"names": ["hatch"]}, self.ENTRY)
+        results = self.run_case([index, entry], "Palettes: foo, bar. Use (lib/artkit.ps) run.")
+        self.assertFalse(all(results.values()))
+        missing = dict(self.ENTRY, entries=[], not_found=["hatchh"])
+        nf = self.call({"names": ["hatchh"]}, missing)
+        results = self.run_case([index, nf], self.ANSWER)
+        self.assertFalse(results["full entry for named procedure (any)"])
+        failed = self.call({"names": ["hatch"]}, {"ok": False, "error": {"code": "worker_failed"}}, is_error=True)
+        results = self.run_case([index, failed], self.ANSWER)
+        self.assertFalse(results["full entry for named procedure (any)"])
+
+
 class Matchers(unittest.TestCase):
     def m(self, spec, value=tx._MISSING):
         return tx.match_value(spec, value)[0]

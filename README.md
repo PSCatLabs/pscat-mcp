@@ -54,6 +54,7 @@ authentication and container packaging.
 |---|---|---|
 | `render_postscript` | Runs a program and returns its pages. Args: `source` (required), `format` `png`\|`svg`\|`pdf` (default `png`), `width`/`height` in points (default US Letter 612×792), `dpi` 9–1200 (default 72). | read-only, non-destructive, idempotent, closed-world |
 | `validate_postscript` | Tokenizer pass, then executes the program in the same sandbox and discards the output. Returns the PostScript error (name, offending command, line), lint findings (blank page, stack leak, unbalanced `gsave`), page count and stdout. | same |
+| `describe_art_capabilities` | Lists the creative capabilities of the linked PSCat build: fonts, Type 3 faces, mood palettes, page templates, artkit and style-pack procedures, native operators, config dials. The whole catalog is about 280 KB, so a reply is one bounded view (under 24 KB, in both `content` and `structuredContent`, which carry the same information; some clients, Claude Code among them, give the model only the `structuredContent` JSON). No arguments: an index of every kind with its names, and installed font packs. `kind` (`font`, `type3_face`, `palette`, `template`, `procedure`, `operator`, `dial`): that kind's names with a one-line description each, 100 at a time (`offset`, `limit` 1–100). `names` (up to 20, optionally narrowed by `kind`): full entries with parameters, defining library file, `run` lines that load it, example and availability; unknown names are listed under `not_found`, and names that do not fit the reply under `omitted`. Runs no PostScript. The catalog is read once in a worker process, so it matches what renders can reach, and kept for the life of the server; later calls take no render slot. Server file paths are not reported. | same |
 | `get_renderer_info` | PSCat version, formats, limits in force, capability notes. Runs nothing. | same |
 
 ### Output formats
@@ -270,9 +271,11 @@ control is enforced by PSCat and which by the server.
   kernel sandbox (gVisor, which Cloud Run provides, or seccomp).
 * **Survival after a server kill.** If the server is SIGKILLed itself, a
   running worker lives until its CPU or time limit, a few seconds.
-* **Fonts.** Only the fonts compiled into PSCat are available (base-35
+* **Fonts.** The fonts compiled into PSCat are available (base-35
   equivalents, Liberation, TeX Gyre). Downloadable font packs are not
-  loaded.
+  supported or tested. `describe_art_capabilities` reports the faces PSCat's
+  font scan finds in the worker's environment (an empty one, so `PSCAT_HOME`
+  is not used), which with a standard install are the compiled-in ones.
 * **`validate_postscript` executes the program.** PSCat has no separate
   static checker beyond its tokenizer, so validation runs the program under
   the same limits.
@@ -312,8 +315,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 
 | Suite | Covers |
 |---|---|
-| `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, deadline kill and no surviving process, cancel kills the worker, PSCat step and memory limits, file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd |
-| `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list, annotations and schemas, PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
+| `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, deadline kill and no surviving process, cancel kills the worker, PSCat step and memory limits, file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd, the worker's art catalog |
+| `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list (one `EXPECTED_TOOLS` table), annotations and schemas, the art catalog (index, kind pages and named entries with size ceilings, argument errors, no server paths, load lines usable in a render), PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render), client disconnect kills the worker and frees the slot |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Exact assertions on `isError` and the error code, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |

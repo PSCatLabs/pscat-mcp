@@ -52,12 +52,30 @@ codes.
 PSCat is used as a **Rust library** (`pscat` crate, git dependency pinned
 to an exact commit, `default-features = false` so no window system is
 linked). The supported API (`Interp`, `Page`, `PsError`, `Limits`) does all
-rendering. Two `#[doc(hidden)]` PSCat modules are also used and are the
-first thing to re-check when bumping the pin:
+rendering. Three `#[doc(hidden)]` PSCat modules are also used. All of them are
+called from `src/pscat_extras.rs` and nowhere else (a PSCat bump that breaks
+one is fixed in that file; upstream tracking issue
+[PSCatLabs/pscat#1098](https://github.com/PSCatLabs/pscat/issues/1098)). They
+are the first thing to re-check when bumping the pin:
 
-* `pscat::lexer` — tokenizer pass for `validate_postscript`.
+* `pscat::lexer` — tokenizer pass for `validate_postscript`
+  (PSCatLabs/pscat#1096).
 * `pscat::gfx::PageSizeSource` — so a non-72-dpi default page still lets a
-  program choose its size with `setpagedevice`, like `Interp::new()`.
+  program choose its size with `setpagedevice`, like `Interp::new()`
+  (PSCatLabs/pscat#1097).
+* `pscat::capabilities` — the art catalog behind `describe_art_capabilities`.
+  It runs no PostScript. It lists fonts by scanning font directories, so the
+  worker computes it (`JobMode::Capabilities`): the worker's environment is
+  cleared and its working directory is `/`, which is what renders see, and the
+  scan runs under the same deadline and rlimits as a render. It takes a
+  render slot. `RenderService` keeps the parsed catalog after the first
+  successful fetch (the worker's environment is fixed, so it is too; a failed
+  fetch is not kept), so later calls start no worker. The font-pack status
+  contains directories, which `pscat_extras` removes. The catalog is about
+  280 KB, so `src/catalog.rs` filters it in the server into three bounded
+  views (index, one kind's names with truncated descriptions, full entries
+  for up to 20 names within a byte budget), each under 24 KB as structured
+  content and as text.
 
 The library runs **inside a child process**, not in the server, because:
 
