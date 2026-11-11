@@ -330,14 +330,24 @@ impl SheetParams {
         if self.entries.is_empty() {
             return Err(invalid("entries must be a non-empty list".into()));
         }
-        // Counted before anything is allocated per entry or per cell.
+        // Counted before anything is allocated per entry or per cell. An
+        // entry counts at least one cell (an empty list is refused when it
+        // is read), so the entries are bounded by the cell cap too; and the
+        // top-level list is read even when no entry uses it, so it is held
+        // to the cap on its own.
         let default_len = list_len(self.dpi.as_ref()).unwrap_or(1);
-        let mut n_cells = 0usize;
-        let mut source_bytes = 0usize;
-        for e in &self.entries {
-            n_cells = n_cells.saturating_add(list_len(e.dpi.as_ref()).unwrap_or(default_len));
-            source_bytes = source_bytes.saturating_add(e.source.len());
+        let mut n_cells = default_len;
+        if default_len <= budget.max_cells {
+            n_cells = 0;
+            for e in &self.entries {
+                let n = list_len(e.dpi.as_ref()).unwrap_or(default_len).max(1);
+                n_cells = n_cells.saturating_add(n);
+            }
         }
+        let source_bytes = self
+            .entries
+            .iter()
+            .fold(0usize, |n, e| n.saturating_add(e.source.len()));
         if n_cells > budget.max_cells {
             return Err(fail(
                 GenerateErrorCode::InvalidRequest,
@@ -1029,6 +1039,14 @@ mod tests {
             detail(json!({"entries": [{"source": "", "dpi": huge}]})).0,
             "cells"
         );
+        // so is a top-level list no entry uses
+        assert_eq!(
+            detail(json!({"entries": [{"source": "", "dpi": [9]}], "dpi": huge})).0,
+            "cells"
+        );
+        // and entries with empty lists count a cell each
+        let empty: Vec<Value> = vec![json!({"source": "", "dpi": []}); 5];
+        assert_eq!(detail(json!({"entries": empty})).0, "cells");
         assert_eq!(
             detail(json!({"entries": [{"source": src(10)}, {"source": src(11)}]})),
             ("sources".into(), GenerateErrorCode::SourceTooLarge)

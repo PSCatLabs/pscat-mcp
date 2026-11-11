@@ -457,6 +457,10 @@ pub struct SheetToolOutput {
     /// Time the cells' programs ran, all together, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// Time the whole sheet took, worker start and encoding included, in
+    /// milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
     /// The failure, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -1272,7 +1276,7 @@ fn sheet_success(out: RenderOutput) -> CallToolResult {
         report.height_px,
         png.byte_len,
         renderer.version,
-        out.elapsed_ms
+        out.wall_ms
     );
     for c in &report.cells {
         let zoom = if c.zoom > 1 {
@@ -1310,6 +1314,7 @@ fn sheet_success(out: RenderOutput) -> CallToolResult {
         cells: Some(report.cells),
         steps_used: Some(out.steps_used),
         elapsed_ms: Some(out.elapsed_ms),
+        wall_ms: Some(out.wall_ms),
         error: None,
         renderer,
     };
@@ -1329,6 +1334,7 @@ fn sheet_failure(err: RenderError) -> CallToolResult {
         cells: None,
         steps_used: None,
         elapsed_ms: None,
+        wall_ms: None,
         error: Some(err),
         renderer: RendererIdentity::current(),
     };

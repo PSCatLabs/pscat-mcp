@@ -167,6 +167,52 @@ fn xy(s: &Value, i: usize) -> (u32, u32) {
     )
 }
 
+/// `schema` with a `$ref` into `root`'s `$defs` followed, and `anyOf` with
+/// a `null` branch (an `Option`) unwrapped.
+fn resolve<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        let name = r.rsplit('/').next().unwrap();
+        return resolve(root, &root["$defs"][name]);
+    }
+    if let Some(any) = schema.get("anyOf").and_then(Value::as_array)
+        && let Some(other) = any.iter().find(|s| s.get("type") != Some(&json!("null")))
+    {
+        return resolve(root, other);
+    }
+    schema
+}
+
+/// Every key of `value`, recursively through objects and arrays, is
+/// declared by `schema`, and every string with an `enum` is one of it.
+fn assert_conforms(root: &Value, schema: &Value, value: &Value, at: &str) {
+    let schema = resolve(root, schema);
+    if let Some(e) = schema.get("enum").and_then(Value::as_array) {
+        assert!(e.contains(value), "{at}: {value} not in {e:?}");
+    }
+    match value {
+        Value::Object(o) => {
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{at}: no properties in {schema}"));
+            for (k, v) in o {
+                let sub = props
+                    .get(k)
+                    .unwrap_or_else(|| panic!("{at}.{k} is not in the output schema"));
+                assert_conforms(root, sub, v, &format!("{at}.{k}"));
+            }
+            for req in schema["required"].as_array().into_iter().flatten() {
+                assert!(o.contains_key(req.as_str().unwrap()), "{at}: {req} missing");
+            }
+        }
+        Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                assert_conforms(root, &schema["items"], v, &format!("{at}[{i}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
 const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 const WHITE: [u8; 4] = [255, 255, 255, 255];
@@ -474,6 +520,12 @@ async fn a_failing_cell_is_drawn_as_far_as_it_got() {
     assert_eq!(png.at(x + 90, y + 10), WHITE);
     let (x, y) = xy(&s, 0);
     assert_eq!(png.at(x + 90, y + 10), BLUE);
+    // The whole envelope, the failed cell's error code included, is what
+    // the declared output schema says.
+    let tools = client.list_all_tools().await.expect("list_tools");
+    let t = tools.iter().find(|t| t.name == "review_sheet").unwrap();
+    let schema = Value::Object((**t.output_schema.as_ref().unwrap()).clone());
+    assert_conforms(&schema, &schema, &s, "structuredContent");
     let text = text_of(&r);
     assert!(text.contains("2 cells (1 failed)"), "{text}");
     assert!(
@@ -582,9 +634,11 @@ async fn every_budget_is_refused_before_execution() {
         ("PSCAT_MCP_MAX_SOURCE_BYTES", "60"),
         ("PSCAT_MCP_MAX_SHEET_CELL_PIXELS", "50000"),
         ("PSCAT_MCP_MAX_SHEET_PIXELS", "60000"),
-        ("PSCAT_MCP_MAX_SHEET_TIMEOUT_MS", "600"),
     ])
     .await;
+    let tools = client.list_all_tools().await.expect("list_tools");
+    let t = tools.iter().find(|t| t.name == "review_sheet").unwrap();
+    let schema = Value::Object((**t.output_schema.as_ref().unwrap()).clone());
     let entry = |w: u32, h: u32, dpi: Value| json!({"source": "showpage", "width": w, "height": h, "dpi": dpi});
     for (args, code, input, needle) in [
         (
@@ -604,13 +658,6 @@ async fn every_budget_is_refused_before_execution() {
             "source_too_large",
             "source",
             "entries[0].source is 61 bytes",
-        ),
-        (
-            // 600 ms less a 250 ms margin: 350 ms for 4 cells of 100 ms.
-            json!({"entries": [entry(10, 10, json!([72, 72, 72, 72]))]}),
-            "invalid_request",
-            "deadline",
-            "4 cells cannot each have 100 ms",
         ),
         (
             json!({"entries": [entry(8000, 10, json!([73]))]}),
@@ -640,6 +687,7 @@ async fn every_budget_is_refused_before_execution() {
         let started = Instant::now();
         let r = call(&client, args.clone()).await;
         let s = assert_fails(&r, code);
+        assert_conforms(&schema, &schema, &s, "structuredContent");
         assert_eq!(s["error"]["input"]["code"], input, "{args}: {s}");
         let m = s["error"]["message"].as_str().unwrap();
         assert!(m.contains(needle), "{args}: {m}");
@@ -652,6 +700,21 @@ async fn every_budget_is_refused_before_execution() {
     )
     .await;
     assert_ok(&r);
+    client.cancel().await.ok();
+
+    // A deadline too short for every cell to have its 100 ms: 600 ms less a
+    // 250 ms margin is 350 ms, for 4 cells. (On a server of its own: one
+    // that short is not asked to draw anything.)
+    let client = start(&[("PSCAT_MCP_MAX_SHEET_TIMEOUT_MS", "600")]).await;
+    let r = call(
+        &client,
+        json!({"entries": [entry(10, 10, json!([72, 72, 72, 72]))]}),
+    )
+    .await;
+    let s = assert_fails(&r, "invalid_request");
+    assert_eq!(s["error"]["input"]["code"], "deadline", "{s}");
+    let m = s["error"]["message"].as_str().unwrap();
+    assert!(m.contains("4 cells cannot each have 100 ms"), "{m}");
     client.cancel().await.ok();
 }
 
