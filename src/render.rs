@@ -123,7 +123,7 @@ pub struct RenderError {
     /// What was wrong with a generator tool's input (`chalkboard_math`'s
     /// LaTeX or board config), when the generator named it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<InputDiagnostic>,
+    pub input: Option<Box<InputDiagnostic>>,
 }
 
 /// The input error a generator reported.
@@ -1010,12 +1010,12 @@ fn failure_to_error(
             message: f.message,
             postscript: None,
             program_output,
-            input: Some(InputDiagnostic {
+            input: Some(Box::new(InputDiagnostic {
                 code: f.detail,
                 token: f.token,
                 limit_bytes: None,
                 reached_bytes: None,
-            }),
+            })),
         },
         WorkerFailure::TooManyPages { pages, max } => RenderError::new(
             ErrorCode::TooManyPages,
@@ -1049,12 +1049,12 @@ fn failure_to_error(
                      {max} bytes of SVG inline (PSCAT_MCP_MAX_SVG_BYTES); {advice}"
                 ),
             );
-            e.input = Some(InputDiagnostic {
+            e.input = Some(Box::new(InputDiagnostic {
                 code: "svg_bytes".into(),
                 token: None,
                 limit_bytes: Some(max as u64),
                 reached_bytes: Some(bytes as u64),
-            });
+            }));
             e
         }
         WorkerFailure::Encode { message } => RenderError::new(

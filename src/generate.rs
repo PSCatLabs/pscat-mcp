@@ -486,12 +486,12 @@ impl GenerateJob {
 impl From<GenerateFailure> for RenderError {
     fn from(f: GenerateFailure) -> Self {
         RenderError {
-            input: Some(InputDiagnostic {
+            input: Some(Box::new(InputDiagnostic {
                 code: f.detail,
                 token: f.token,
                 limit_bytes: None,
                 reached_bytes: None,
-            }),
+            })),
             ..RenderError::new(f.code.into(), f.message)
         }
     }
