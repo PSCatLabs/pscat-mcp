@@ -13,6 +13,7 @@ use tokio::sync::Semaphore;
 
 use crate::backend::{BackendError, RenderBackend};
 use crate::config::{LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
+use crate::generate::GenerateJob;
 use crate::worker::{
     Artifact, InterpLimits, JobMode, LintNote, OutputFormat, PsDiagnostic, SyntaxScan,
     WorkerFailure, WorkerJob, WorkerResult,
@@ -36,6 +37,16 @@ pub struct RenderRequest {
     pub dpi: Option<f64>,
     /// Screen the raster like a mono laser printer (PNG only).
     pub halftone: bool,
+}
+
+/// A request for a generated program (see [`crate::generate`]), as any
+/// transport receives it.
+#[derive(Debug, Clone)]
+pub struct GenerateRequest {
+    /// What to generate.
+    pub job: GenerateJob,
+    /// Requested format name; `None` means PNG.
+    pub format: Option<String>,
 }
 
 /// A request that passed validation. Only these reach the backend.
@@ -92,6 +103,22 @@ pub struct RenderError {
     /// Program stdout before the failure, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program_output: Option<String>,
+    /// What was wrong with a generator tool's input (`chalkboard_math`'s
+    /// LaTeX or board config), when the generator named it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputDiagnostic>,
+}
+
+/// The input error a generator reported.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct InputDiagnostic {
+    /// The generator's stable code: for `chalkboard_math`,
+    /// `unsupported_command`, `unsupported_character`,
+    /// `unsupported_environment`, `missing_argument`, `config`, `empty`, ...
+    pub code: String,
+    /// The command, character or environment the error names, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 impl RenderError {
@@ -101,6 +128,7 @@ impl RenderError {
             message: message.into(),
             postscript: None,
             program_output: None,
+            input: None,
         }
     }
 }
@@ -330,15 +358,7 @@ pub fn validate_request(
             ),
         ));
     }
-    let format = match req.format.as_deref() {
-        None | Some("") => OutputFormat::Png,
-        Some(name) => OutputFormat::parse(name).ok_or_else(|| {
-            RenderError::new(
-                ErrorCode::UnsupportedFormat,
-                format!("format {name:?} is not supported; PSCat renders png, svg or pdf"),
-            )
-        })?,
-    };
+    let format = parse_format(req.format.as_deref())?;
     if req.halftone && format != OutputFormat::Png {
         return Err(RenderError::new(
             ErrorCode::InvalidRequest,
@@ -349,12 +369,6 @@ pub fn validate_request(
         ));
     }
     let dpi = req.dpi.unwrap_or(72.0);
-    if !dpi.is_finite() || !(MIN_DPI..=MAX_DPI).contains(&dpi) {
-        return Err(RenderError::new(
-            ErrorCode::InvalidDimensions,
-            format!("dpi must be between {MIN_DPI} and {MAX_DPI}, got {dpi}"),
-        ));
-    }
     let page_points = match (req.width, req.height) {
         (None, None) => None,
         (w, h) => Some((
@@ -362,7 +376,72 @@ pub fn validate_request(
             h.unwrap_or(DEFAULT_PAGE_POINTS.1),
         )),
     };
-    let (wp, hp) = page_points.unwrap_or(DEFAULT_PAGE_POINTS);
+    let page_px = check_page(page_points.unwrap_or(DEFAULT_PAGE_POINTS), dpi, limits)?;
+    Ok(ValidatedRequest {
+        page_px,
+        job: WorkerJob {
+            mode,
+            source: req.source.clone(),
+            format,
+            page_points,
+            dpi,
+            halftone: req.halftone,
+            limits: interp_limits(limits),
+            generate: None,
+        },
+    })
+}
+
+/// Check a generate request against the limits without generating or
+/// executing anything: the generator's own checks ([`GenerateJob::plan`]),
+/// then the format and the planned page, like a render.
+pub fn validate_generate(
+    req: &GenerateRequest,
+    limits: &LimitsConfig,
+) -> Result<ValidatedRequest, RenderError> {
+    let plan = req.job.plan(limits)?;
+    let format = parse_format(req.format.as_deref())?;
+    let page_px = check_page(plan.page_points, plan.dpi, limits)?;
+    Ok(ValidatedRequest {
+        page_px,
+        job: WorkerJob {
+            mode: JobMode::Generate,
+            source: String::new(),
+            format,
+            page_points: Some(plan.page_points),
+            dpi: plan.dpi,
+            halftone: false,
+            limits: interp_limits(limits),
+            generate: Some(req.job.clone()),
+        },
+    })
+}
+
+fn parse_format(name: Option<&str>) -> Result<OutputFormat, RenderError> {
+    match name {
+        None | Some("") => Ok(OutputFormat::Png),
+        Some(name) => OutputFormat::parse(name).ok_or_else(|| {
+            RenderError::new(
+                ErrorCode::UnsupportedFormat,
+                format!("format {name:?} is not supported; PSCat renders png, svg or pdf"),
+            )
+        }),
+    }
+}
+
+/// Check a page of `(wp, hp)` points at `dpi` against the dpi range, PSCat's
+/// side limit and the pixel limit; returns its device pixels.
+fn check_page(
+    (wp, hp): (u32, u32),
+    dpi: f64,
+    limits: &LimitsConfig,
+) -> Result<(u32, u32), RenderError> {
+    if !dpi.is_finite() || !(MIN_DPI..=MAX_DPI).contains(&dpi) {
+        return Err(RenderError::new(
+            ErrorCode::InvalidDimensions,
+            format!("dpi must be between {MIN_DPI} and {MAX_DPI}, got {dpi}"),
+        ));
+    }
     if wp == 0 || hp == 0 {
         return Err(RenderError::new(
             ErrorCode::InvalidDimensions,
@@ -388,18 +467,7 @@ pub fn validate_request(
             ),
         ));
     }
-    Ok(ValidatedRequest {
-        page_px: (wx, hx),
-        job: WorkerJob {
-            mode,
-            source: req.source.clone(),
-            format,
-            page_points,
-            dpi,
-            halftone: req.halftone,
-            limits: interp_limits(limits),
-        },
-    })
+    Ok((wx, hx))
 }
 
 fn interp_limits(limits: &LimitsConfig) -> InterpLimits {
@@ -447,12 +515,24 @@ impl RenderService {
     /// Render a program.
     pub async fn render(&self, req: RenderRequest) -> Result<RenderOutput, RenderError> {
         let validated = self.check(&req, JobMode::Render)?;
-        let format = validated.job.format;
+        self.render_job(validated.job).await
+    }
+
+    /// Generate a program from non-PostScript input and render it. The
+    /// input is checked here ([`validate_generate`]); the generator and the
+    /// program run in the worker, like a render.
+    pub async fn generate(&self, req: GenerateRequest) -> Result<RenderOutput, RenderError> {
+        let validated = self.rejected(validate_generate(&req, &self.limits))?;
+        self.render_job(validated.job).await
+    }
+
+    async fn render_job(&self, job: WorkerJob) -> Result<RenderOutput, RenderError> {
+        let format = job.format;
         let started = Instant::now();
-        let result = self.run(validated.job).await?;
+        let result = self.run(job).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
         if let Some(failure) = result.failure.clone() {
-            return Err(failure_to_error(failure, result));
+            return Err(failure_to_error(failure, result, format));
         }
         if result.artifacts.is_empty() {
             return Err(RenderError::new(
@@ -482,7 +562,9 @@ impl RenderService {
         let result = self.run(validated.job).await?;
         match &result.failure {
             None | Some(WorkerFailure::PostScript) => {}
-            Some(other) => return Err(failure_to_error(other.clone(), result)),
+            Some(other) => {
+                return Err(failure_to_error(other.clone(), result, OutputFormat::Png));
+            }
         }
         let syntax: SyntaxReport = result.syntax.map(Into::into).unwrap_or(SyntaxReport {
             ok: false,
@@ -524,10 +606,11 @@ impl RenderService {
             dpi: 72.0,
             halftone: false,
             limits: interp_limits(&self.limits),
+            generate: None,
         };
         let result = self.run(job).await?;
         if let Some(failure) = result.failure.clone() {
-            return Err(failure_to_error(failure, result));
+            return Err(failure_to_error(failure, result, OutputFormat::Png));
         }
         let value = result.capabilities.ok_or_else(|| {
             RenderError::new(
@@ -544,7 +627,15 @@ impl RenderService {
     }
 
     fn check(&self, req: &RenderRequest, mode: JobMode) -> Result<ValidatedRequest, RenderError> {
-        validate_request(req, mode, &self.limits).inspect_err(|e| {
+        self.rejected(validate_request(req, mode, &self.limits))
+    }
+
+    /// Count and log a request rejected before execution.
+    fn rejected(
+        &self,
+        checked: Result<ValidatedRequest, RenderError>,
+    ) -> Result<ValidatedRequest, RenderError> {
+        checked.inspect_err(|e| {
             self.counters.rejected.fetch_add(1, Ordering::Relaxed);
             tracing::info!(code = ?e.code, "request rejected before execution");
         })
@@ -564,10 +655,13 @@ impl RenderService {
         })?
         .map_err(|_| RenderError::new(ErrorCode::ServerBusy, "the server is shutting down"))?;
         self.counters.executed.fetch_add(1, Ordering::Relaxed);
-        let source_len = job.source.len();
+        let (source_len, generator) = match &job.generate {
+            Some(g) => (g.input_len(), g.kind()),
+            None => (job.source.len(), ""),
+        };
         // One line per job handed to a worker; the server-layer evals count
         // these to assert how many renders a scenario executed.
-        tracing::info!(source_bytes = source_len, "render started");
+        tracing::info!(source_bytes = source_len, generator, "render started");
         let outcome = self
             .backend
             .execute(job, self.limits.render_timeout())
@@ -604,7 +698,13 @@ impl RenderService {
     }
 }
 
-fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError {
+/// The error for a worker failure; `format` is the requested format, which
+/// decides the advice for output that is too large.
+fn failure_to_error(
+    failure: WorkerFailure,
+    result: WorkerResult,
+    format: OutputFormat,
+) -> RenderError {
     let program_output = Some(result.program_output).filter(|s| !s.is_empty());
     match failure {
         WorkerFailure::PostScript => {
@@ -628,8 +728,19 @@ fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError
                 message,
                 postscript: Some(Box::new(diag)),
                 program_output,
+                input: None,
             }
         }
+        WorkerFailure::Generate(f) => RenderError {
+            code: f.code.into(),
+            message: f.message,
+            postscript: None,
+            program_output,
+            input: Some(InputDiagnostic {
+                code: f.detail,
+                token: f.token,
+            }),
+        },
         WorkerFailure::TooManyPages { pages, max } => RenderError::new(
             ErrorCode::TooManyPages,
             format!("the program produced {pages} pages; at most {max} are returned"),
@@ -637,8 +748,14 @@ fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError
         WorkerFailure::OutputTooLarge { bytes, max } => RenderError::new(
             ErrorCode::OutputTooLarge,
             format!(
-                "the rendered output is over {max} bytes (reached {bytes}); lower the page size or dpi, \
-                 or use svg for vector artwork. No artifact storage is configured, so output is only returned inline"
+                "the rendered output is over {max} bytes (reached {bytes}); {}. No artifact storage \
+                 is configured, so output is only returned inline",
+                match format {
+                    OutputFormat::Png =>
+                        "lower the page size or dpi, or use svg for vector artwork",
+                    OutputFormat::Svg | OutputFormat::Pdf =>
+                        "lower the page size or the amount of artwork, or use png",
+                }
             ),
         ),
         WorkerFailure::Encode { message } => RenderError::new(

@@ -19,6 +19,8 @@ boundaries are, and where to extend it.
                                ▼
                          render.rs  RenderService
                            • validate_request: size, format, dpi, page px, pixel cap
+                           • validate_generate: generate.rs plan (input size, board
+                             config), then the same format/page/pixel checks
                            • semaphore: bounded concurrent renders + queue timeout
                            • maps worker/backend failures to stable ErrorCodes
                                │  WorkerJob (JSON)
@@ -30,6 +32,7 @@ boundaries are, and where to extend it.
                                │  stdin: job   stdout: WorkerResult (JSON)
                                ▼
                          worker.rs  (child process, no async runtime)
+                           • Generate jobs: generate.rs writes the program here
                            • pscat::Interp with Limits (steps/time/memory)
                            • reads confined to PSCat's compiled-in lib/
                            • no write roots, stdout captured, stderr silenced
@@ -69,6 +72,14 @@ are the first thing to re-check when bumping the pin:
   in the worker job (`WorkerJob.halftone`, PNG only: the request check refuses
   it for SVG and PDF) and the worker screens each page and encodes it, so the
   server process never touches the raster.
+* `pscat::chalk`, `Gfx::set_transparent_background`, `pscat::pdf::scan_document_info`
+  and `Gfx::set_pdf_info` — `chalkboard_math` (see [Generated
+  programs](#generated-programs)). The board config is resolved
+  (`ChalkBoard::from_args`) in the server as well, before any worker starts,
+  to refuse a bad config and to size the board; it reads a bounded JSON
+  object of fixed depth and never the LaTeX. This is the one `pscat_extras`
+  call outside the worker. `chalk` needs no cargo feature
+  (`default-features = false` only drops the window).
 * `pscat::capabilities` — the art catalog behind `describe_art_capabilities`.
   It runs no PostScript. It lists fonts by scanning font directories, so the
   worker computes it (`JobMode::Capabilities`): the worker's environment is
@@ -82,6 +93,50 @@ are the first thing to re-check when bumping the pin:
   views (index, one kind's names with truncated descriptions, full entries
   for up to 20 names within a byte budget), each under 24 KB as structured
   content and as text.
+
+## Generated programs
+
+Some tools take input that is not PostScript and have PSCat write the
+program: `chalkboard_math` turns LaTeX into a chalkboard program
+(`pscat::chalk::driver`). That input is as untrusted as a program. A
+pathological formula could take unbounded time, or recurse deeply, in the
+generator itself, and in the server that would hang a Tokio thread or, with a
+stack overflow, abort the process for every user. So generation is a worker
+job like a render: `JobMode::Generate`, with the job's `generate` field
+holding a `GenerateJob` (`src/generate.rs`), one variant per kind, on the
+wire `{"kind": "chalkboard_math", "params": {...}}`.
+
+Each kind has three hooks:
+
+| Hook | Runs in | Does |
+|---|---|---|
+| `plan` | server, before a slot is taken | checks what needs no parsing of the untrusted input (its byte size; for a board, the board config) and returns the page in points and the dpi. `validate_generate` then applies the render's format, dpi, side and pixel checks to that page. A failure is a rejection like any other: no slot, no worker, counted in `rejected`. |
+| `generate` | worker | writes the program and its page. The worker refuses a page that is not the one the server checked (`worker_failed`), then runs the program through the ordinary render path: PNG, SVG or PDF encoding, the page and byte caps, and every interpreter and OS limit. |
+| `explain` | worker | maps a PostScript error from the generated program to the input error it stands for (mathkit raises `undefined` naming `mk-unsupported-command:\foo`). Limit errors are never explained. |
+
+A generator failure travels back as `WorkerFailure::Generate`, with an
+`ErrorCode` (`invalid_request` for input that is wrong before anything runs,
+`postscript_error` for input the program could not draw), the generator's
+own code and token (`error.input` in the envelope) and a one-line message.
+The tool's envelope and content blocks are `render_postscript`'s.
+
+For `chalkboard_math` the mapping is: a config error, or LaTeX that is
+empty once comments and wrappers go, is `invalid_request`; a TeX error
+(unsupported command, character or environment, a missing argument, an
+unclosed `\(`) is `postscript_error` with PSCat's message, never the
+PostScript report; any other error is the program's own `postscript_error`
+or `limit_exceeded`. Deeply nested LaTeX ends in PSCat's
+`execstackoverflow` (`postscript_error`), a long one in `timeout`; either
+way only the worker is involved (`tests/chalkboard.rs`).
+
+To add a kind (`handwrite`, `review_sheet`): a `GenerateJob` variant with its
+three arms, its hidden PSCat calls in `pscat_extras`, and a tool in `mcp.rs`
+that builds a `GenerateRequest` and calls `RenderService::generate`. A
+generator whose output is pages rather than a program (a contact sheet of
+several renders) would add a second output shape next to
+`GeneratedProgram`, handled by the same worker branch.
+
+## Why a child process
 
 The library runs **inside a child process**, not in the server, because:
 
@@ -103,6 +158,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Control | Enforced by | Default |
 |---|---|---|
 | Source size | server, before execution | 256 KiB |
+| `chalkboard_math` LaTeX size | server, before execution | 4 KiB |
 | Format, `halftone` only with PNG, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
 | Device pixels of the starting page | server, before execution | 16 M |
 | Pages created by `setpagedevice` | PSCat (`set_max_page_pixels`) | 16 M |
@@ -175,6 +231,8 @@ No user database or proprietary OAuth flow is needed in this repository.
 ## Extension points
 
 * **Another transport** (REST): call `RenderService::render`/`validate`.
+* **A tool whose input is not PostScript**: a `GenerateJob` kind (see
+  [Generated programs](#generated-programs)).
 * **Another backend** (a pool, a remote sandbox, a test double): implement
   `backend::RenderBackend`. Dropping the returned future must stop the job.
 * **Artifact storage**: none is configured, so output larger than

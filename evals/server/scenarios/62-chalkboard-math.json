@@ -1,0 +1,292 @@
+{
+  "id": "chalkboard-math",
+  "title": "Scenario 7: a LaTeX formula on a chalkboard; SVG and PDF inline; TeX, config and limit errors",
+  "origin": "examples/agent-scenarios.md section 7; tests/chalkboard.rs",
+  "steps": [
+    {
+      "label": "the default board: 1600x800, a dark slate",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "e^{i\\pi} + 1 = 0"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "page_count": 1,
+          "artifacts.0.width_px": 1600,
+          "artifacts.0.height_px": 800,
+          "artifacts.0.mime_type": "image/png",
+          "renderer.engine": "pscat"
+        },
+        "png": {
+          "width": 1600,
+          "height": 800,
+          "pixels": [
+            {
+              "x": 10,
+              "y": 10,
+              "rgb": [
+                68,
+                70,
+                74
+              ],
+              "tolerance": 25
+            },
+            {
+              "x": 1590,
+              "y": 20,
+              "rgb": [
+                68,
+                70,
+                74
+              ],
+              "tolerance": 25
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "yellow chalk on a greenboard, smaller",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "a^2 + b^2 = c^2",
+        "color": "yellow",
+        "board": "greenboard",
+        "width": 300,
+        "height": 150,
+        "dpi": 72
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true
+        },
+        "png": {
+          "width": 300,
+          "height": 150
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "svg inline for a small board",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "\\frac{1}{2}",
+        "format": "svg",
+        "width": 300,
+        "height": 150,
+        "dpi": 72
+      },
+      "result": {
+        "content_types": [
+          "resource:image/svg+xml",
+          "text"
+        ],
+        "forbid_content_types": [
+          "image"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "svg"
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "contains": [
+            "<svg"
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "pdf inline",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "\\frac{1}{2}",
+        "format": "pdf",
+        "width": 300,
+        "height": 150,
+        "dpi": 72
+      },
+      "result": {
+        "content_types": [
+          "resource:application/pdf",
+          "text"
+        ],
+        "forbid_content_types": [
+          "image"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "pdf",
+          "artifacts.0.page": {
+            "absent": true
+          }
+        },
+        "resource": {
+          "mime": "application/pdf",
+          "starts_with": "%PDF-",
+          "min_bytes": 500
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "an unsupported TeX command is postscript_error naming it",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "\\nosuchcommand{x} + 1"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "postscript_error",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "postscript_error",
+          "error.message": {
+            "contains": "\\nosuchcommand"
+          },
+          "error.input.code": "unsupported_command",
+          "error.input.token": "\\nosuchcommand",
+          "error.postscript": {
+            "absent": true
+          }
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "a bad chalk colour is invalid_request before a worker starts",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x",
+        "color": "red"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "color must be one of"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "ghosting without a board",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x",
+        "board": false,
+        "ghosting": 0.5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "ghosting needs a board"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "latex over the 4096-byte limit",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "source_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "source_too_large",
+          "error.message": {
+            "contains": "the limit is 4096 bytes"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "a board over the pixel limit",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x",
+        "width": 4000,
+        "height": 4000
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pixels",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "too_many_pixels"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an argument of the wrong type",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x",
+        "size": "big"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "invalid arguments:"
+          }
+        },
+        "renders_executed": 0
+      }
+    }
+  ]
+}

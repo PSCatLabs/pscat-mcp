@@ -36,6 +36,8 @@ apart:
 * `get_renderer_info` exists only on this server. It reports
   `server_version`, the limits in force, and a `renderer` block with the
   PSCat version and git revision.
+* Both servers have `chalkboard_math`. Here SVG and PDF come back inline
+  and there is no `out_path`.
 
 ## 3. stdio
 
@@ -51,7 +53,7 @@ server is registered only for the directory you ran the command in
 (`local` scope), and a session started elsewhere won't see it.
 
 Start a new `claude` session (servers are loaded at startup) and run
-`/mcp`. `pscat-render` should be connected with four tools.
+`/mcp`. `pscat-render` should be connected with five tools.
 
 To see the server's logs, start the session with `claude --debug`. Logs
 are on stderr, so they never mix with MCP messages. Set a level with
@@ -508,7 +510,7 @@ claude -p --output-format stream-json --verbose --model claude-sonnet-5-5 --max-
   permission mode and the default model don't apply. Auth is unaffected:
   the login lives in the keychain, not in settings.
 * `--tools=` removes the built-in tools (Bash, Read, ToolSearch and the
-  rest), so the server's three tools are loaded directly instead of being
+  rest), so the server's tools are loaded directly instead of being
   deferred behind ToolSearch.
 * `--allowedTools 'mcp__pscat-render__*'` lets every tool of the server run
   in `-p` mode. Without it, each call is refused ("you haven't granted it
