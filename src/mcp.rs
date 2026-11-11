@@ -272,6 +272,12 @@ impl PscatMcp {
                 .into(),
             );
         }
+        for route in tool_router.map.values_mut() {
+            strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
+            if let Some(schema) = route.attr.output_schema.as_mut() {
+                strip_uint_formats(Arc::make_mut(schema));
+            }
+        }
         PscatMcp {
             service,
             tool_router,
@@ -335,6 +341,40 @@ impl PscatMcp {
             ],
         }
     }
+}
+
+/// Removes the `format` keyword schemars gives unsigned integers (`uint`,
+/// `uint8` to `uint64`) from a tool schema, recursively. Those formats are
+/// not JSON Schema or OpenAPI formats, so clients that validate schemas
+/// (Claude Code) warn `unknown format "uint32" ignored` for each one. The
+/// `minimum: 0` schemars emits next to them stays, so the schema still
+/// says the value is a non-negative integer.
+pub(crate) fn strip_uint_formats(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    if schema
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_uint_format)
+    {
+        schema.remove("format");
+    }
+    for value in schema.values_mut() {
+        strip_uint_formats_in(value);
+    }
+}
+
+fn strip_uint_formats_in(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => strip_uint_formats(map),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_uint_formats_in),
+        _ => {}
+    }
+}
+
+fn is_uint_format(format: &str) -> bool {
+    matches!(
+        format,
+        "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
+    )
 }
 
 /// Every tool only reads its arguments (if any) and runs the program (if any) in a
