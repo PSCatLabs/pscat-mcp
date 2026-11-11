@@ -1,0 +1,57 @@
+{
+  "id": "unsupported-format",
+  "title": "Scenario 4: ask for JPEG (unsupported_format, or decline and offer PNG)",
+  "origin": "examples/agent-scenarios.md section 4",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, render `0 0 1 setrgbcolor 0 0 100 100 rectfill showpage` as a JPEG.",
+  "expect_any_of": [
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "format": "jpeg"
+          },
+          "result": {
+            "is_error": true,
+            "error_code": "unsupported_format"
+          }
+        }
+      ],
+      "answer": {
+        "any": [
+          [
+            "png"
+          ]
+        ]
+      }
+    },
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "format": {
+              "in": [
+                "jpeg",
+                "jpg"
+              ]
+            }
+          },
+          "forbid": true
+        }
+      ],
+      "answer": {
+        "all": [
+          "png"
+        ],
+        "any": [
+          [
+            "jpeg",
+            "jpg"
+          ]
+        ]
+      }
+    }
+  ]
+}

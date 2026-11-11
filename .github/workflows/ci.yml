@@ -61,3 +61,14 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --all-targets
+
+  # The agent evals themselves (evals/agent/run.py) run real agents and are
+  # local only. This job runs their offline unit tests: the billing guard and
+  # the transcript checks against recorded fixtures. No model, no credential.
+  agent-eval-offline:
+    name: agent eval offline tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 --version
+      - run: python3 -I -m unittest discover -s evals/agent -t evals/agent -v

@@ -1,0 +1,181 @@
+{
+  "id": "first-prompt",
+  "title": "LOCAL_TESTING first prompt: all three tools, PNG/SVG/PDF, validate, loop",
+  "origin": "docs/LOCAL_TESTING.md section 5",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "max_turns": 14,
+  "timeout_s": 420,
+  "prompt": "Use only the pscat-render MCP server for this (not the pscat plugin's tools).\n\n1. Call get_renderer_info and tell me the pscat-mcp server version and the PSCat version and revision.\n2. Render this program as a PNG at 300×200 points and describe the image you got back:\n\n%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n\n3. Render the same program as SVG, then as PDF, and tell me what kind of content block each came back as.\n4. Validate this program exactly as written (the typo is deliberate; don't correct it) and tell me the error name, the offending command and the line:\n\n%!PS\n100 100 moveto\n200 200 liento\nstroke showpage\n\n5. Render this program and tell me the error code and roughly how long it took:\n\n%!PS\n{ 1 pop } loop\n\nFinish with a table: step, exact tool name you called, error code (if any), result.\n",
+  "expect": {
+    "tools_required": [
+      "get_renderer_info",
+      "render_postscript",
+      "validate_postscript"
+    ],
+    "calls": [
+      {
+        "label": "PNG render",
+        "tool": "render_postscript",
+        "where": {
+          "format": {
+            "in": [
+              "png",
+              null
+            ]
+          },
+          "source": {
+            "contains": "rectfill"
+          }
+        },
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n"
+          },
+          "width": 300,
+          "height": 200
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ],
+          "structured": {
+            "ok": true,
+            "artifacts.0.width_px": 300,
+            "artifacts.0.height_px": 200
+          }
+        }
+      },
+      {
+        "label": "SVG render",
+        "tool": "render_postscript",
+        "where": {
+          "format": "svg"
+        },
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n"
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:image/svg+xml"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "svg"
+          }
+        }
+      },
+      {
+        "label": "PDF render",
+        "tool": "render_postscript",
+        "where": {
+          "format": "pdf"
+        },
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n"
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "resource:application/pdf"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "pdf"
+          }
+        }
+      },
+      {
+        "label": "validate keeps the typo",
+        "tool": "validate_postscript",
+        "args": {
+          "source": {
+            "equals_text": "%!PS\n100 100 moveto\n200 200 liento\nstroke showpage\n"
+          }
+        },
+        "result": {
+          "is_error": false,
+          "text_contains": [
+            "liento"
+          ],
+          "structured": {
+            "valid": false,
+            "execution_error.name": "undefined"
+          }
+        }
+      },
+      {
+        "label": "loop render",
+        "tool": "render_postscript",
+        "where": {
+          "source": {
+            "contains": "loop"
+          }
+        },
+        "max_count": 1,
+        "result": {
+          "is_error": true,
+          "error_code": {
+            "in": [
+              "limit_exceeded",
+              "timeout"
+            ]
+          }
+        }
+      }
+    ],
+    "answer": {
+      "all": [
+        "{{server_version}}",
+        "{{pscat_version}}",
+        "{{pscat_revision7}}",
+        "liento",
+        "undefined"
+      ],
+      "any": [
+        [
+          "blue",
+          "navy"
+        ],
+        [
+          "circle",
+          "disc",
+          "disk"
+        ],
+        [
+          "red",
+          "orange",
+          "coral"
+        ],
+        [
+          "pscat-render"
+        ],
+        [
+          "image/svg+xml",
+          "svg resource",
+          "embedded resource",
+          "resource"
+        ],
+        [
+          "application/pdf"
+        ],
+        [
+          "line 3",
+          "line: 3"
+        ],
+        [
+          "limit_exceeded",
+          "timeout"
+        ]
+      ]
+    }
+  }
+}

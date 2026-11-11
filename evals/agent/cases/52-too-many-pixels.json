@@ -1,0 +1,87 @@
+{
+  "id": "too-many-pixels",
+  "title": "Scenario 5b variant: 5000x5000 is within the side limit but over the pixel budget; lowering dpi to fit also passes",
+  "origin": "examples/agent-scenarios.md section 5b (variant)",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, render `0 0 moveto 5000 5000 lineto stroke showpage` on a 5000×5000 point page.",
+  "expect_any_of": [
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "width": 5000,
+            "height": 5000
+          },
+          "result": {
+            "is_error": true,
+            "error_code": "too_many_pixels"
+          }
+        }
+      ],
+      "answer": {
+        "any": [
+          [
+            "16000000",
+            "16,000,000",
+            "16 million",
+            "16 megapixel",
+            "pixel"
+          ]
+        ]
+      }
+    },
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "width": 5000
+          },
+          "forbid": true
+        }
+      ],
+      "tools_required": [
+        "get_renderer_info"
+      ],
+      "answer": {
+        "any": [
+          [
+            "16000000",
+            "16,000,000",
+            "16 million",
+            "pixel"
+          ]
+        ]
+      }
+    },
+    {
+      "calls": [
+        {
+          "label": "renders at a lowered dpi that fits the limits",
+          "tool": "render_postscript",
+          "where": {
+            "width": 5000,
+            "height": 5000
+          },
+          "args": {
+            "dpi": {
+              "max": 57
+            }
+          },
+          "result": {
+            "is_error": false,
+            "content_types": [
+              "image"
+            ]
+          }
+        }
+      ],
+      "answer": {
+        "all": [
+          "dpi"
+        ]
+      }
+    }
+  ]
+}

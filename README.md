@@ -290,6 +290,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all              # unit + integration; all use the real PSCat worker
 scripts/container-smoke.sh    # needs Docker
+scripts/agent-eval.sh --test  # offline unit tests of the agent evals
 ```
 
 GitHub Actions runs these on every pull request and push to `main`:
@@ -297,7 +298,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 * `.github/workflows/ci.yml`:
   * fmt and clippy;
   * the test suite on Linux and macOS;
-  * a `cargo check` with the minimum Rust version in `Cargo.toml`.
+  * a `cargo check` with the minimum Rust version in `Cargo.toml`;
+  * the agent evals' offline unit tests (no model).
 * `.github/workflows/container.yml`: the amd64 image plus the smoke test.
 
 | Suite | Covers |
@@ -306,6 +308,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list, annotations and schemas, PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render), client disconnect kills the worker and frees the slot |
+| `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 
 ## License
 
