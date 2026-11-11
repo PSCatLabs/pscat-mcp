@@ -173,6 +173,9 @@ and fix any reported error before rendering.
   leaving the string on the stack), suggests `show`, and may re-validate the
   corrected program: `{"ok": true, "valid": true, "lint": [], "page_count": 1, …}`,
   text `Valid: the program ran without error and produced 1 page(s).`
+  The agent eval checks the `validate_postscript` call and that the answer
+  names `shw` and `show`; a short answer such as "`shw` should be `show`"
+  passes.
 
 Variant (syntax error): `%!PS\n72 72 moveto 100 100 lineto stroke\n{ 1 2 add\nshowpage\n`
 yields `syntax: {"ok": false, "tokens": 12, "error": "unterminated procedure: 1 '{' without a matching '}'"}`
@@ -317,6 +320,10 @@ HTTP).
   a tool result. Either is a pass as long as no render runs.
 - The agent suggests simplifying the program (procedures and loops instead
   of unrolled drawing commands) rather than retrying.
+- In practice an agent rarely sends a 285 KB argument at all. In the #44
+  baseline, Claude rendered a 10-line shortened copy and said plainly that
+  it had. The agent eval accepts that too, as long as the answer says the
+  copy is shortened; it fails a shortened render passed off as the file.
 
 ---
 

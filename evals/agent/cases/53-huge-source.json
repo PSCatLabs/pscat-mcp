@@ -1,6 +1,6 @@
 {
   "id": "huge-source",
-  "title": "Scenario 5c: a source over 256 KiB (source_too_large); tens of thousands of tokens",
+  "title": "Scenario 5c: a source over 256 KiB (source_too_large), or a disclosed shortened copy; tens of thousands of tokens",
   "origin": "examples/agent-scenarios.md section 5c",
   "tags": [
     "expensive"
@@ -51,6 +51,22 @@
           ]
         ]
       }
+    },
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "result": {
+            "is_error": false
+          }
+        }
+      ],
+      "answer": {
+        "regex": [
+          "shorten|shorter|not the (exact|full|original)|condens|truncat|fewer (lines|repeats|copies)|didn't (send|pass|render) the (whole|full|entire)"
+        ]
+      }
     }
-  ]
+  ],
+  "notes": "The third alternative (#44 triage): the agent renders a shortened copy and says so. Emitting 285 KB as one tool argument is not a realistic agent action, and the answer must not pass the copy off as the original."
 }

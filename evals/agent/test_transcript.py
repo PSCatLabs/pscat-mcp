@@ -192,6 +192,53 @@ class DescribeCapabilities(unittest.TestCase):
         self.assertFalse(results["full entry for named procedure (any)"])
 
 
+class TriagedCases(unittest.TestCase):
+    """Case changes from the #44 triage, on synthetic transcripts."""
+
+    @staticmethod
+    def render(source, ok=True, code=None):
+        c = tx.ToolCall("1", "mcp__pscat-render__render_postscript", SERVER, "render_postscript", {"source": source})
+        structured = {"ok": ok} if ok else {"ok": False, "error": {"code": code, "message": "m"}}
+        c.result = {
+            "is_error": not ok,
+            "text": json.dumps(structured),
+            "content_types": ["image"] if ok else ["text"],
+            "structured": structured,
+        }
+        return c
+
+    def passes(self, case_id, calls, answer):
+        t = tx.Transcript(agent="claude", calls=calls, answer=answer, completed=True, stop="success", num_turns=2)
+        return all(c.ok for c in tx.evaluate_case(case(case_id), t, SERVER, CTX, "stdio"))
+
+    def test_diagram_without_showpage_passes(self):
+        # render_postscript returns the current page of a program that
+        # never calls showpage, so the final source need not contain it.
+        src = "/Helvetica findfont 12 scalefont setfont 10 10 moveto (Box) show"
+        self.assertTrue(self.passes("diagram", [self.render(src)], "Here it is."))
+        self.assertFalse(self.passes("diagram", [self.render("0 0 moveto (x) show")], "Here it is."))
+
+    def test_diagnose_undefined_needs_the_fix_not_the_error_name(self):
+        src = "%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) shw\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n"
+        report = {"ok": True, "valid": False, "execution_error": {"name": "undefined", "report": "OffendingCommand: shw; Line: 4"}}
+        c = tx.ToolCall("1", "mcp__pscat-render__validate_postscript", SERVER, "validate_postscript", {"source": src})
+        c.result = {"is_error": False, "text": json.dumps(report), "content_types": ["text"], "structured": report}
+        self.assertTrue(self.passes("diagnose-undefined", [c], "Changing `shw` to `show` fixes it."))
+        self.assertFalse(self.passes("diagnose-undefined", [c], "Line 4 has an undefined name."))
+        # `showpage` contains "show"; it is not the fix.
+        self.assertFalse(self.passes("diagnose-undefined", [c], "Line 4 calls `shw`; the page ends with showpage."))
+        self.assertFalse(self.passes("diagnose-undefined", [self.render(src)], "`shw` should be `show`."))
+
+    def test_huge_source_shortened_copy_must_be_disclosed(self):
+        short = "%!PS\n" + "0 0 moveto 1 1 lineto stroke\n" * 10 + "showpage\n"
+        told = "I rendered a shortened copy with 10 repeats, not the exact file."
+        silent = "The render succeeded: one blank-looking page with a tiny diagonal line."
+        self.assertTrue(self.passes("huge-source", [self.render(short)], told))
+        self.assertFalse(self.passes("huge-source", [self.render(short)], silent))
+        rejected = self.render("x", ok=False, code="source_too_large")
+        self.assertTrue(self.passes("huge-source", [rejected], "Too big; use a loop instead."))
+
+
 class Matchers(unittest.TestCase):
     def m(self, spec, value=tx._MISSING):
         return tx.match_value(spec, value)[0]
@@ -318,6 +365,154 @@ class Recheck(unittest.TestCase):
                 status = run.main(["--recheck", d])
         self.assertEqual(status, 1)  # the recorded one-line loop step fails
         self.assertIn("FAIL loop render", out.getvalue())
+
+    def test_recheck_writes_a_baseline_source_and_keeps_live_only_results(self):
+        import contextlib
+        import io
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "transcripts").mkdir()
+            for n in (1, 2):
+                shutil.copy(FIXTURE, d / "transcripts" / f"first-prompt__claude__http__{n}.jsonl")
+            header = {k: CTX[k] for k in ("server_version", "pscat_version", "pscat_revision")}
+            header.update(clients={}, model="claude-sonnet-5-5", server_sha256="abc", stopped=None)
+            post = {"name": run.POST_CHECK, "ok": False, "detail": "0 POST /mcp for 5 call(s)"}
+            runs = [
+                {"case": "first-prompt", "agent": "claude", "transport": "http", "status": "fail",
+                 "transcript": "transcripts/first-prompt__claude__http__1.jsonl", "checks": [post],
+                 "duration_s": 30.0, "usage": {"five_hour": [0.2, 0.21]}},
+                {"case": "first-prompt", "agent": "claude", "transport": "http", "status": "error",
+                 "transcript": "transcripts/first-prompt__claude__http__2.jsonl", "error": "timed out"},
+            ]
+            runs.reverse()  # live order: __2 ran first
+            (d / "summary.json").write_text(json.dumps({"header": header, "runs": runs}))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run.main(["--recheck", str(d)])
+            data = json.loads((d / "recheck.json").read_text())
+            self.assertEqual(data["header"]["cases_sha256"], run.cases_sha256())
+            second, first = data["runs"]
+            self.assertIn(run.POST_CHECK, [c["name"] for c in first["checks"] if not c["ok"]])
+            self.assertEqual(first["usage"], {"five_hour": [0.2, 0.21]})
+            self.assertEqual(second["status"], "error")
+            # Live order is kept even where file names sort differently.
+            self.assertEqual([r["transcript"] for r in data["runs"]], [r["transcript"] for r in runs])
+            rec = run.make_baseline([d], d / "base.json", rechecked=True)
+            self.assertEqual(rec["verdicts"], "rechecked under the cases above")
+            self.assertEqual(rec["cases_sha256"], run.cases_sha256())
+            self.assertEqual(rec["runs_from"], [d.name])
+            self.assertEqual(rec["duration_s"], 30.0)
+
+
+def _run(case_id, transport, status, turns=3, five=(0.1, 0.11)):
+    return {
+        "case": case_id,
+        "agent": "claude",
+        "transport": transport,
+        "status": status,
+        "num_turns": turns,
+        "calls": ["mcp__pscat-render__render_postscript"],
+        "duration_s": 10.0,
+        "usage": {"status": "allowed", "five_hour": list(five), "seven_day": [0.3, 0.3]},
+    }
+
+
+class Baseline(unittest.TestCase):
+    HEADER = {
+        "server_version": "0.1.0",
+        "pscat_version": "0.7.0-rc.4",
+        "pscat_revision": "df39114f1223",
+        "server_sha256": "abc",
+        "repo_commit": "0a6e4ec",
+        "clients": {"claude": "2.1.322 (Claude Code)"},
+        "model": "claude-sonnet-5-5",
+        "effort": None,
+        "stopped": None,
+    }
+
+    def write_run(self, d, runs, **header):
+        d.mkdir()
+        (d / "summary.json").write_text(json.dumps({"header": {**self.HEADER, **header}, "runs": runs, "rows": []}))
+        return d
+
+    def test_usage_of_rate_limit_events(self):
+        events = [
+            {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.07}, "seven_day": {"utilization": 0.35}}},
+            {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.08}}},
+        ]
+        self.assertEqual(run.usage_of(events), {"status": "allowed", "five_hour": [0.07, 0.08], "seven_day": [0.35, 0.35]})
+        span = run.usage_span([_run("a", "stdio", "pass", five=(0.1, 0.12)), _run("a", "http", "pass", five=(0.12, 0.2))])
+        self.assertEqual(span["five_hour"], [0.1, 0.2])
+        self.assertIn("five_hour 10% -> 20%", run.format_usage(span))
+
+    def test_baseline_merges_runs_and_compare_flags_changes(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(
+                d / "a",
+                [_run("x", "stdio", "pass"), _run("x", "stdio", "fail"), _run("y", "stdio", "pass"), _run("z", "http", "fail")],
+            )
+            b = self.write_run(d / "b", [_run("w", "stdio", "pass", turns=5)])
+            rec = run.make_baseline([a, b], d / "out" / "base.json")
+            saved = json.loads((d / "out" / "base.json").read_text())
+        self.assertEqual(rec, saved)
+        self.assertEqual(rec["sessions"], 5)
+        self.assertEqual(rec["turns"], 17)
+        self.assertEqual(rec["server"]["commit"], "0a6e4ec")
+        rows = {(r["case"], r["transport"]): r for r in rec["rows"]}
+        self.assertEqual(rows[("x", "stdio")]["verdict"], "flaky")
+        self.assertEqual((rows[("x", "stdio")]["pass"], rows[("x", "stdio")]["runs"]), (1, 2))
+        now = run.summarize(
+            [_run("x", "stdio", "pass"), _run("y", "stdio", "fail"), _run("z", "http", "fail"), _run("new", "stdio", "pass")]
+        )
+        lines, regressions = run.compare(now, rec)
+        text = "\n".join(lines)
+        self.assertEqual(regressions, 1)
+        self.assertIn("regressions: 1\n  y/claude/stdio: pass 1/1 -> fail 0/1", text)
+        self.assertIn("improvements: 1\n  x/claude/stdio: flaky 1/2 -> pass 1/1", text)
+        self.assertIn("new/claude/stdio: pass 1/1 (not in the baseline)", text)
+
+    def test_baseline_refuses_mismatched_or_stopped_runs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(d / "a", [_run("x", "stdio", "pass")])
+            b = self.write_run(d / "b", [_run("y", "stdio", "pass")], model="claude-opus-5-5")
+            c = self.write_run(d / "c", [_run("y", "stdio", "pass")], stopped="RateLimited")
+            with self.assertRaises(SystemExit):
+                run.make_baseline([a, b], d / "o.json")
+            with self.assertRaises(SystemExit):
+                run.make_baseline([c], d / "o.json")
+
+    def test_session_cap_refuses_before_any_agent_starts(self):
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            status = run.main(["--repeat", "50", "--max-sessions", "120", "--server", "/nonexistent"])
+        self.assertEqual(status, 2)
+        self.assertIn("more than --max-sessions 120", err.getvalue())
+
+
+class CommittedBaseline(unittest.TestCase):
+    def test_newest_baseline_matches_the_case_files(self):
+        # A case edit must come with a baseline rechecked under it, or
+        # every later --compare reports changes that are only the edit.
+        newest = sorted((HERE / "baseline").glob("*.json"))[-1]
+        data = json.loads(newest.read_text())
+        self.assertEqual(data["cases_sha256"], run.cases_sha256(), f"rebuild {newest.name} with --recheck/--rechecked")
+        ids = {c["id"] for c in run.load_cases()}
+        self.assertEqual({r["case"] for r in data["rows"]}, ids)
+        text = newest.read_text()
+        for private in ("/Users/", "/Volumes/", "/private/", "/home/", "@"):
+            self.assertNotIn(private, text)
 
 
 class HttpLog(unittest.TestCase):
