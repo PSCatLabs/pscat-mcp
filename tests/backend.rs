@@ -538,10 +538,17 @@ async fn the_worker_halftones_png_pages_when_asked() {
         let (plain_png, screened_png) = (decode(&a.data_base64), decode(&b.data_base64));
         assert_ne!(plain_png, screened_png);
         let phys = |png: &[u8]| {
-            let at = png.windows(4).position(|w| w == b"pHYs").expect("pHYs chunk");
+            let at = png
+                .windows(4)
+                .position(|w| w == b"pHYs")
+                .expect("pHYs chunk");
             png[at + 4..at + 13].to_vec()
         };
-        assert_eq!(phys(&plain_png), phys(&screened_png), "same resolution record");
+        assert_eq!(
+            phys(&plain_png),
+            phys(&screened_png),
+            "same resolution record"
+        );
         let mut reader = png::Decoder::new(std::io::Cursor::new(decode(&b.data_base64)))
             .read_info()
             .expect("png header");
