@@ -567,7 +567,7 @@ Async jobs are on over stdio; over HTTP only with `PSCAT_MCP_ASYNC_JOBS=true`
   waiting to be fetched fill the memory budget, `results_budget_exceeded`.
 
 This case is covered by `tests/jobs.rs` and
-`evals/server/scenarios/65-async-job.json`; the agent case is
+`evals/server/scenarios/66-async-job.json`; the agent case is
 `evals/agent/cases/95-async-job.json` (stdio only, unbaselined). It has not
 been run through an agent.
 

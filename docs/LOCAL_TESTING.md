@@ -719,7 +719,7 @@ cases. A scenario runs on every target (stdio, http, container) unless
 What is covered: the first prompt in section 5 (the runaway loop is
 `runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 10 of
 `agent-scenarios.md` (among them 6, the catalog tool; 7, the chalkboard; 8,
-the handwritten note; and 10, a background job, `65-async-job.json`, with
+the handwritten note; and 10, a background job, `66-async-job.json`, with
 `PSCAT_MCP_ASYNC_JOBS=true` for HTTP and the image), and every error code in
 its list (`cancelled` as a cancelled job's result; `tests/mcp_cancel.rs`
 covers an rmcp client's cancellation of a call, which kills the worker).
