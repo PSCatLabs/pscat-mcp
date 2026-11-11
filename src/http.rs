@@ -151,7 +151,7 @@ pub fn router(
         Arc::new(LocalSessionManager::default()),
         mcp_config,
     );
-    // Outer to inner: authenticate (before the body is read), then read the
+    // Outer to inner: authenticate (before the body is used), then read the
     // body under the limit, then rmcp.
     let mcp = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(auth, require_auth))
@@ -185,8 +185,8 @@ pub fn router(
         )
 }
 
-/// Most bytes of an oversized body read and thrown away before answering
-/// `413`, and the longest that may take. Answering while the client is still
+/// Most bytes of an oversized or rejected body read and thrown away before
+/// answering `413` or `401`, and the longest that may take. Answering while the client is still
 /// uploading makes the server close a connection with unread data, which the
 /// client can see as a TCP reset instead of the `413` (issue #20). Bodies
 /// declared larger than this are refused without reading.
@@ -261,6 +261,11 @@ async fn healthz() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// Authenticate from the headers alone. An accepted request goes on with its
+/// body untouched. A rejected one never reaches the body limit, rmcp or a
+/// render; unless it declares more than [`DRAIN_MAX_BYTES`], its body is read
+/// and discarded first (at most [`DRAIN_MAX_TIME`]) so that a client still
+/// uploading gets the `401` rather than a connection reset (issue #30).
 async fn require_auth(
     State(auth): State<Arc<dyn Authenticator>>,
     req: Request,
@@ -275,6 +280,14 @@ async fn require_auth(
         }
         Err(err) => {
             tracing::warn!(reason = err.code(), "rejected unauthenticated request");
+            let declared = parts
+                .headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            if declared.is_none_or(|n| n <= DRAIN_MAX_BYTES) {
+                drain(body, 0).await;
+            }
             unauthorized(auth.as_ref(), &err)
         }
     }

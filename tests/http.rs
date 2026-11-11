@@ -835,21 +835,43 @@ async fn oversized_bodies_get_a_clean_413_every_time() {
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
 }
 
-/// A declared length beyond the drain cap is refused without reading.
+/// A client without a valid token gets the 401, not a connection reset,
+/// even when its body is larger than the socket buffers and the body limit:
+/// the server reads and discards a rejected body up to the drain cap
+/// (issue #30).
 #[tokio::test(flavor = "multi_thread")]
-async fn huge_declared_length_is_refused_unread() {
+async fn rejected_large_bodies_get_a_clean_401_every_time() {
+    // Body limit 1024 * 6 + 64 KiB, about 71 KB; the body is 2 MB.
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    let big = format!("% {}\nshowpage", "x".repeat(2 * 1024 * 1024));
+    let body = render_call(1, &big, 10, 10);
+    for i in 0..10 {
+        let (status, _, _) = post(&srv.mcp(), None, None, &body).await;
+        assert_eq!(status, 401, "no token, request {i}");
+        let (status, _, _) = post(&srv.mcp(), Some("wrong-token"), None, &body).await;
+        assert_eq!(status, 401, "wrong token, request {i}");
+    }
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+/// Send only the headers of a POST /mcp declaring a 1 GB body and return the
+/// status line, which must arrive without the body being sent.
+async fn status_for_huge_declared_length(base: &str, token: Option<&str>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let srv = start(real_service(LimitsConfig::default())).await;
-    let addr = srv.base.trim_start_matches("http://");
+    let addr = base.trim_start_matches("http://");
     let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     let head = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {TOKEN}\r\n\
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\n{auth}\
          Content-Type: application/json\r\nAccept: {ACCEPT}\r\n\
          Content-Length: 1000000000\r\n\r\n"
     );
     s.write_all(head.as_bytes()).await.expect("headers");
-    // No body is sent: the answer must not wait for one. Read until the
-    // status line is complete (or EOF).
+    // Read until the status line is complete (or EOF).
     let mut response = Vec::new();
     let read_status_line = async {
         let mut chunk = [0u8; 256];
@@ -863,6 +885,16 @@ async fn huge_declared_length_is_refused_unread() {
     tokio::time::timeout(Duration::from_secs(5), read_status_line)
         .await
         .expect("answered without the body");
-    let text = String::from_utf8_lossy(&response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+/// A declared length beyond the drain cap is refused without reading, with
+/// or without a valid token.
+#[tokio::test(flavor = "multi_thread")]
+async fn huge_declared_length_is_refused_unread() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let text = status_for_huge_declared_length(&srv.base, Some(TOKEN)).await;
     assert!(text.starts_with("HTTP/1.1 413"), "{text}");
+    let text = status_for_huge_declared_length(&srv.base, None).await;
+    assert!(text.starts_with("HTTP/1.1 401"), "{text}");
 }

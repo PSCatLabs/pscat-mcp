@@ -222,8 +222,11 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 
 The HTTP server will not start without at least one bearer token, unless
 `PSCAT_MCP_ALLOW_UNAUTHENTICATED=true` is set **and** the bind address is
-loopback. Authentication runs before the request body is read and before
-rmcp sees the request, so an unauthenticated request cannot reach a render.
+loopback. Authentication uses only the request headers and runs before rmcp
+sees the request, so an unauthenticated request cannot reach a render. A
+rejected request's body is read and discarded (up to 8 MiB and 5 s, as for
+an oversized one), so a client still uploading gets the `401` rather than a
+connection reset.
 Tokens are stored as SHA-256 digests, compared in constant time, and never
 logged. Mount tokens as a file (`PSCAT_MCP_AUTH_TOKEN_FILE`) rather than
 passing them on the command line.
