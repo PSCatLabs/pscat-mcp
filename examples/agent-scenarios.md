@@ -44,7 +44,7 @@ Every failure is `isError: true` with a text explanation and
 `worker_failed`.
 
 Values below assume the default limits (256 KiB source, 20 s timeout,
-16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output, 256 KiB of SVG). Every result
+16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output, 128 KiB of SVG). Every result
 quoted was observed against the `pscat-mcp:smoke` container image (PSCat
 0.7.0-rc.4); timings and byte counts will vary.
 
@@ -412,7 +412,7 @@ agent against the container image.
 - `board: false` gives chalk alone on a transparent page; `format: "svg"`
   or `"pdf"` comes back inline as an embedded resource, but the default
   board's SVG (7 to 10 MB, depending on the formula) is far over the
-  default SVG limit of 256 KiB (`output_too_large`, `error.input.code`
+  default SVG limit of 128 KiB (`output_too_large`, `error.input.code`
   `svg_bytes`, with advice to use PNG); PNG, or PDF (about 2.6 MB), fits.
 - A command outside the subset, for example `\nosuchcommand{x}`, fails
   with `postscript_error`, a message naming the command, and

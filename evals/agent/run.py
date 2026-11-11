@@ -48,6 +48,10 @@ DEFAULT_TIMEOUT_S = 300
 DEFAULT_MAX_SESSIONS = 120
 VERDICT_RANK = {"error": 0, "fail": 0, "flaky": 1, "pass": 2}
 REDACTED = "<redacted-token>"
+# The only variables --claude-env passes to the Claude Code child, beside the
+# guard's allowlist: tuning knobs for what the client does with a tool result
+# (issue #64). Each takes a positive integer.
+CLIENT_ENV_ALLOWED = ("MAX_MCP_OUTPUT_TOKENS",)
 
 
 # --------------------------------------------------------------------------
@@ -303,7 +307,21 @@ def stdio_config(binary: Path) -> dict:
     return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": str(binary), "args": ["serve-stdio"]}}}
 
 
-def forget_claude_project(workdir: Path) -> None:
+def parse_client_env(items: list[str] | None) -> dict[str, str]:
+    """`NAME=VALUE` items of --claude-env: only CLIENT_ENV_ALLOWED names,
+    only positive integers. Anything else is refused before a session starts."""
+    out: dict[str, str] = {}
+    for item in items or []:
+        name, sep, value = item.partition("=")
+        if not sep or name not in CLIENT_ENV_ALLOWED:
+            raise SystemExit(f"--claude-env: {item!r} is not NAME=VALUE with NAME one of {', '.join(CLIENT_ENV_ALLOWED)}")
+        if not value.isascii() or not value.isdigit() or int(value) == 0:
+            raise SystemExit(f"--claude-env: {name} must be a positive integer, not {value!r}")
+        out[name] = value
+    return out
+
+
+def forget_claude_project(workdir: Path, save_to: Path | None = None) -> None:
     """Claude Code keeps per-directory state (large tool results such as a
     PDF blob, an auto-memory folder) under <config>/projects/<slug of cwd>
     even with --no-session-persistence. Each run's cwd is a fresh temp dir,
@@ -312,6 +330,10 @@ def forget_claude_project(workdir: Path) -> None:
     slug = re.sub(r"[^A-Za-z0-9]", "-", str(workdir.resolve()))
     target = config / "projects" / slug
     if "pscat-eval-cwd-" in slug and target.parent == config / "projects" and target.is_dir():
+        if save_to is not None:
+            # --save-claude-state: keep what the client wrote (a tool result
+            # saved as a file) for the archive, before the folder goes.
+            shutil.copytree(target, save_to, dirs_exist_ok=True)
         shutil.rmtree(target, ignore_errors=True)
 
 
@@ -670,8 +692,10 @@ def print_table(rows: list[dict], header: dict) -> str:
         f"server: pscat-mcp {header['server_version']}, PSCat {header['pscat_version']} ({header['pscat_revision'][:12]})",
         "clients: " + ", ".join(f"{k} {v}" for k, v in header["clients"].items()),
         f"model: {header['model']}" + (f", effort {header['effort']}" if header.get("effort") else ""),
-        "",
     ]
+    if header.get("claude_env"):
+        lines.append("claude env: " + ", ".join(f"{k}={v}" for k, v in header["claude_env"].items()))
+    lines.append("")
     cols = ("case", "agent", "transport", "verdict", "passed", "turns")
     table = [cols] + [
         (
@@ -703,6 +727,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cases", type=int, help="stop after this many cases")
     p.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model (default {DEFAULT_MODEL})")
     p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), help="Claude effort level (default: the CLI's)")
+    p.add_argument(
+        "--claude-env",
+        action="append",
+        metavar="NAME=VALUE",
+        help=f"pass this variable to the Claude Code child (repeatable; only {', '.join(CLIENT_ENV_ALLOWED)}, a positive integer)",
+    )
+    p.add_argument(
+        "--save-claude-state",
+        type=Path,
+        metavar="DIR",
+        help="copy the folder Claude Code keeps per run (a tool result it saved as a file) to DIR/<run name> before it is deleted; keep DIR outside the repository",
+    )
     p.add_argument("--codex-model", help="Codex model (default: Codex's)")
     p.add_argument("--server", type=Path, default=REPO / "target" / "release" / "pscat-mcp-server")
     p.add_argument("--include-expensive", action="store_true", help="also run cases tagged expensive")
@@ -810,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         "clients": clients,
         "model": args.model,
         "effort": args.effort,
+        "claude_env": parse_client_env(args.claude_env),
         "auth": auth,
     }
     print(f"{len(plan)} run(s): {len(cases)} case(s) x {agents} x {transports} x {args.repeat}")
@@ -991,7 +1028,7 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
             config = secret_dir / f"mcp-{transport}.json"
             write_private_json(config, http.mcp_config() if transport == "http" else stdio_config(binary))
             argv = claude_argv(claude, args.model, max_turns, config, args.effort)
-            env = guard.child_env(os.environ)
+            env = guard.child_env(os.environ, parse_client_env(args.claude_env))
             sg = guard.StreamGuard(SERVER_NAME, args.model)
             lines, rc, timed_out = run_child(
                 argv, prompt, env, workdir, timeout_s, sg.feed, out_path, err_path, http.token if http else None
@@ -1020,7 +1057,7 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
             record["usage"] = usage_of(sg.rate_limits)
         return record
     finally:
-        forget_claude_project(workdir)
+        forget_claude_project(workdir, args.save_claude_state / name if args.save_claude_state else None)
         shutil.rmtree(workdir, ignore_errors=True)
     if http and transport == "http":
         ctx["http_posts"] = http.post_count() - posts_before

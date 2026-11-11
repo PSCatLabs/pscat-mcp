@@ -59,7 +59,7 @@ fn has_artifact(r: &CallToolResult) -> bool {
 
 /// The svg size of one render of `source`, with no cap in the way.
 async fn svg_bytes(source: &str) -> usize {
-    let client = start(&[]).await;
+    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
     let r = render(&client, source, "svg").await;
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     let n = r.structured_content.as_ref().unwrap()["artifacts"]
@@ -170,20 +170,20 @@ async fn the_cap_counts_every_page_together() {
 }
 
 #[tokio::test]
-async fn the_default_is_256_kib_and_the_cap_is_in_the_descriptions_and_renderer_info() {
+async fn the_default_is_128_kib_and_the_cap_is_in_the_descriptions_and_renderer_info() {
     let client = start(&[]).await;
     let info = client
         .call_tool(CallToolRequestParams::new("get_renderer_info"))
         .await
         .unwrap();
     let limits = &info.structured_content.unwrap()["limits"];
-    assert_eq!(limits["max_svg_bytes"], 256 * 1024);
+    assert_eq!(limits["max_svg_bytes"], 128 * 1024);
     assert_eq!(limits["max_output_bytes"], 8 * 1024 * 1024);
     let tools = client.list_all_tools().await.unwrap();
     for name in ["render_postscript", "chalkboard_math"] {
         let d = tools.iter().find(|t| t.name == name).unwrap();
         let d = d.description.as_deref().unwrap();
-        assert!(d.contains("svg, up to 262144 bytes"), "{name}: {d}");
+        assert!(d.contains("svg, up to 131072 bytes"), "{name}: {d}");
     }
     client.cancel().await.ok();
     // A small output cap pulls the default down with it.

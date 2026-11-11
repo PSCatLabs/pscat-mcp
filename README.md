@@ -77,7 +77,7 @@ authentication and container packaging.
 | Format | Returned as | MIME type |
 |---|---|---|
 | `png` | one MCP `image` content block per page | `image/png` |
-| `svg` | one embedded text resource per page, at most `PSCAT_MCP_MAX_SVG_BYTES` (256 KiB) in all | `image/svg+xml` |
+| `svg` | one embedded text resource per page, at most `PSCAT_MCP_MAX_SVG_BYTES` (128 KiB) in all | `image/svg+xml` |
 | `pdf` | one embedded blob resource holding every page | `application/pdf` |
 
 Every result also has a short text summary and `structuredContent`
@@ -379,7 +379,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_PIXELS` | 16000000 | device pixels per page |
 | `PSCAT_MCP_MAX_PAGES` | 10 | pages per render |
 | `PSCAT_MCP_MAX_OUTPUT_BYTES` | 8388608 | inline output per render (PNG, PDF, and SVG as well) |
-| `PSCAT_MCP_MAX_SVG_BYTES` | 262144 (256 KiB, or the output limit if that is smaller) | inline SVG per render, all pages together; over it the call fails with `output_too_large` and `error.input.code` `svg_bytes`. May not exceed `PSCAT_MCP_MAX_OUTPUT_BYTES` (the server refuses to start) |
+| `PSCAT_MCP_MAX_SVG_BYTES` | 131072 (128 KiB, or the output limit if that is smaller) | inline SVG per render, all pages together; over it the call fails with `output_too_large` and `error.input.code` `svg_bytes`. May not exceed `PSCAT_MCP_MAX_OUTPUT_BYTES` (the server refuses to start) |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
@@ -445,11 +445,15 @@ control is enforced by PSCat and which by the server.
   600x400 pt scene with a gradient sky, about 60 stars, some curves and
   three short strings (#31), and a program that draws thousands of marks
   is megabytes. An SVG reaches the model as text, and Claude Code turned
-  that 88 KB resource into a saved file because it passed the tool-result
-  token limit (`MAX_MCP_OUTPUT_TOKENS`, set in tokens, not bytes; the
-  default here has not been measured against a live client). The SVG cap
-  is therefore its own limit, 256 KiB by default, summed over every page
-  of one render (each page is a separate resource, but the model reads
+  that 88 KB resource into a saved file because it passed its tool-result
+  limit. Measured (#64): Claude Code returns a text result inline only up
+  to about 50,000 characters and saves anything larger to a file, whatever
+  `MAX_MCP_OUTPUT_TOKENS` says; a PDF blob is always saved to a file. The
+  details per client, measured or from documentation, are in
+  [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md), section 11. The SVG
+  cap is its own limit, 128 KiB by default (under the roughly 150,000
+  characters the Claude connector docs give for claude.ai), summed over
+  every page of one render (each page is a separate resource, but the model reads
   them all). Over it the call fails before any SVG is returned, with
   `output_too_large`, `error.input.code` `svg_bytes` and the limit and the
   size reached in `error.input.limit_bytes` and `reached_bytes`. PNG and

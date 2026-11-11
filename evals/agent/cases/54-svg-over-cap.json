@@ -1,0 +1,37 @@
+{
+  "id": "svg-over-cap",
+  "title": "SVG over the inline cap (output_too_large, svg_bytes); the answer points to PNG or PDF",
+  "origin": "issue #64: PSCAT_MCP_MAX_SVG_BYTES (128 KiB by default); a 1 MB SVG is refused with advice",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, render this PostScript as an SVG (400\u00d7300 points) and tell me what came back:\n\n0 1 13000 {dup 37 mul 400 mod exch 53 mul 300 mod 3 3 rectfill} for",
+  "expect": {
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "where": {
+          "format": "svg"
+        },
+        "which": "first",
+        "result": {
+          "is_error": true,
+          "error_code": "output_too_large",
+          "text_contains": [
+            "svg_bytes",
+            "PSCAT_MCP_MAX_SVG_BYTES"
+          ]
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "png"
+        ],
+        [
+          "pdf"
+        ]
+      ]
+    }
+  },
+  "notes": "Needs the default server (cap 128 KiB). The program emits about 1 MB of SVG. A later PNG or PDF call is fine; the first SVG call must be refused. Claude Code shows the model the error text, not structuredContent, for an error result, so the check reads the text."
+}

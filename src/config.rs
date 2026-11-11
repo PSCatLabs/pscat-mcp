@@ -10,12 +10,30 @@ use std::time::Duration;
 
 use clap::Args;
 
-/// The default inline SVG cap, in bytes. SVG is returned as text the model
-/// reads: Claude Code turned an 88 KB SVG resource into a saved file
-/// because it passed the tool-result token limit (PSCatLabs/pscat-mcp#31).
-/// 256 KiB is a few times that, and the server cannot see the client's
-/// own limit; raise it for a client that takes more.
-pub const DEFAULT_MAX_SVG_BYTES: usize = 256 * 1024;
+/// The default inline SVG cap, in bytes (128 KiB).
+///
+/// The server cannot see a client's limit, so this is chosen from what the
+/// clients do with a large SVG text resource (measured and documented in
+/// `docs/LOCAL_TESTING.md`, section 11, issue #64):
+///
+/// * Claude Code 2.1.322 returns a successful text result inline only up to
+///   about 50,000 characters (and 25,000 tokens, about 47 KB of this dense
+///   SVG). Above that it saves the whole result to a file and tells the
+///   model so, at every size measured from 100 KB to 5 MB, and
+///   `MAX_MCP_OUTPUT_TOKENS` does not move the 50,000-character line. So
+///   the cap does not change what Claude Code shows the model above that
+///   size, and a cap near 48 KB would only turn a saved file into an error.
+/// * Claude's connector docs give about 150,000 characters for a tool
+///   result on claude.ai and Desktop (docs only, not measured). The cap
+///   keeps the result, JSON escaping included (about 8 % for SVG), below
+///   that: 128 KiB is about 142,000 characters. The earlier 256 KiB was
+///   above it.
+/// * Codex passes a result's `structuredContent` to the model instead of
+///   its content blocks, so it never sees the SVG text (source reading,
+///   not measured); ChatGPT publishes no limit.
+///
+/// Raise it for a client that takes more.
+pub const DEFAULT_MAX_SVG_BYTES: usize = 128 * 1024;
 /// Hard per-side ceiling PSCat applies to every page.
 pub const PSCAT_MAX_SIDE_PX: u32 = 8000;
 /// The most pixels a review sheet can have: 8000 a side.
@@ -98,7 +116,7 @@ pub struct LimitsConfig {
     /// Most bytes of SVG (all pages together) returned inline. SVG comes
     /// back as text the model reads, and glyph outlines and gradients make
     /// it large, so its cap is far below the output limit. Defaults to
-    /// 256 KiB, or the output limit if that is smaller; it may not exceed
+    /// 128 KiB, or the output limit if that is smaller; it may not exceed
     /// the output limit.
     #[arg(long, env = "PSCAT_MCP_MAX_SVG_BYTES")]
     pub max_svg_bytes: Option<usize>,
@@ -665,7 +683,7 @@ mod tests {
     #[test]
     fn the_svg_cap_defaults_below_the_output_cap_and_never_exceeds_it() {
         let l = LimitsConfig::default();
-        assert_eq!(l.svg_bytes(), 256 * 1024);
+        assert_eq!(l.svg_bytes(), 128 * 1024);
         assert!(l.check().is_ok());
         // A small output cap pulls the default down with it.
         let small = LimitsConfig {
