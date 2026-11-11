@@ -20,10 +20,11 @@ use pscat_mcp::http::{mcp_server_config, router};
 use pscat_mcp::mcp::{PscatMcp, Transport};
 use pscat_mcp::render::RenderService;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ClientCapabilities,
-    ClientConfig, GetTaskParams, Implementation, ResourceContents, TaskPayload, TaskStatus,
+    CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams,
+    ClientCapabilities, ClientConfig, ClientRequest, GetTaskParams, Implementation,
+    ResourceContents, TaskPayload, TaskStatus,
 };
-use rmcp::service::RunningService;
+use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{RoleClient, ServiceExt};
@@ -773,10 +774,40 @@ async fn job_tools_are_listed_only_when_jobs_are_on() {
 
 // ------------------------------------------------------- the Tasks extension
 
-fn tasks_on() -> JobsConfig {
+/// The Tasks extension on, with calls becoming tasks after `after_ms`.
+fn tasks_after(after_ms: u64) -> JobsConfig {
     JobsConfig {
         tasks: true,
+        task_after_ms: after_ms,
         ..jobs()
+    }
+}
+
+/// A threshold far below `SLOW_RED`'s 2 s and the 1 s sync deadline: a slow
+/// call always becomes a task.
+const SHORT_THRESHOLD_MS: u64 = 200;
+/// A threshold no quick call reaches under load (below `relaxed()`'s sync
+/// deadline).
+const LONG_THRESHOLD_MS: u64 = 15_000;
+
+fn tasks_on() -> JobsConfig {
+    tasks_after(SHORT_THRESHOLD_MS)
+}
+
+/// Poll `tasks/get` until the task is terminal.
+async fn poll_task(client: &Client, id: &str) -> rmcp::model::DetailedTask {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = client
+            .peer()
+            .get_task(GetTaskParams::new(id.to_string()))
+            .await
+            .unwrap();
+        if got.task.status().is_terminal() {
+            return got.task;
+        }
+        assert!(Instant::now() < deadline, "the task never finished");
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -795,7 +826,7 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
     assert!(caps["resources"].is_object(), "{caps}");
     assert!(caps["tools"].is_object(), "{caps}");
 
-    // A program past the sync deadline completes as a task.
+    // A program past the task threshold completes as a task.
     let response = tasks
         .call_tool_once(params(
             "render_postscript",
@@ -810,17 +841,7 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
     assert_eq!(created.task.status, TaskStatus::Working);
     assert!(uuid::Uuid::parse_str(&id).is_ok());
     assert_eq!(created.task.poll_interval_ms, Some(1000));
-    let finished = loop {
-        let got = tasks
-            .peer()
-            .get_task(GetTaskParams::new(id.clone()))
-            .await
-            .unwrap();
-        if got.task.status().is_terminal() {
-            break got.task;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let finished = poll_task(&tasks, &id).await;
     let TaskPayload::Completed { result } = finished.payload else {
         panic!("expected completed, got {finished:?}")
     };
@@ -833,34 +854,6 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
     // The same job is visible to the explicit tools.
     let status = call(&tasks, "render_status", json!({ "job_id": id })).await;
     assert_eq!(state(&status), "done", "{status}");
-
-    // A failed render is a completed task whose result has isError.
-    let response = tasks
-        .call_tool_once(params("render_postscript", json!({ "source": "1 0 div" })))
-        .await
-        .unwrap();
-    let CallToolResponse::Task(created) = response else {
-        panic!("expected a task")
-    };
-    let finished = loop {
-        let got = tasks
-            .peer()
-            .get_task(GetTaskParams::new(created.task.task_id.clone()))
-            .await
-            .unwrap();
-        if got.task.status().is_terminal() {
-            break got.task;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    let TaskPayload::Completed { result } = finished.payload else {
-        panic!("expected completed, got {finished:?}")
-    };
-    assert_eq!(result["isError"], true);
-    assert_eq!(
-        result["structuredContent"]["error"]["code"],
-        "postscript_error"
-    );
 
     // Refused before a job exists: a synchronous error, not a task.
     let response = tasks
@@ -880,7 +873,15 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
         .call_tool_once(params("get_renderer_info", json!({})))
         .await
         .unwrap();
-    assert!(matches!(response, CallToolResponse::Complete(_)));
+    let CallToolResponse::Complete(info) = response else {
+        panic!("expected a complete result")
+    };
+    let info = serde_json::to_value(&info).unwrap();
+    assert_eq!(
+        structured(&info)["jobs"]["task_after_ms"],
+        SHORT_THRESHOLD_MS,
+        "{info}"
+    );
 
     // A client without the extension gets today's synchronous result.
     let plain = connect(svc.clone(), false).await;
@@ -895,10 +896,11 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
     plain.cancel().await.ok();
 }
 
+/// With a threshold of 0, every eligible call is a task at once (the
+/// behaviour before #57), a failed render included.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
-    let tag = tag();
-    let svc = service(unlimited(), tasks_on(), &tag);
+async fn with_a_zero_threshold_every_eligible_call_is_a_task() {
+    let svc = service(relaxed(), tasks_after(0), &tag());
     let client = connect(svc.clone(), true).await;
 
     let response = client
@@ -908,10 +910,146 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
     let CallToolResponse::Task(created) = response else {
         panic!("expected a task")
     };
+    let finished = poll_task(&client, &created.task.task_id).await;
+    let TaskPayload::Completed { result } = finished.payload else {
+        panic!("expected completed, got {finished:?}")
+    };
+    assert_ne!(result["isError"], true, "{result:?}");
+    assert_eq!(result["structuredContent"]["artifacts"][0]["width_px"], 612);
+
+    // A failed render is a completed task whose result has isError.
+    let response = client
+        .call_tool_once(params("render_postscript", json!({ "source": "1 0 div" })))
+        .await
+        .unwrap();
+    let CallToolResponse::Task(created) = response else {
+        panic!("expected a task")
+    };
+    let finished = poll_task(&client, &created.task.task_id).await;
+    let TaskPayload::Completed { result } = finished.payload else {
+        panic!("expected completed, got {finished:?}")
+    };
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "postscript_error"
+    );
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 2);
+    client.cancel().await.ok();
+}
+
+/// A quick call from a Tasks client returns its result directly and never
+/// touches the job store: here the client's one job and the server's one
+/// running-job permit are taken, and the budget holds one largest result,
+/// all held by that job. A call that went through the store would be
+/// refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quick_call_from_a_tasks_client_skips_the_job_caps_and_budget() {
+    let tag = tag();
+    let limits = LimitsConfig {
+        max_steps: 0,
+        ..relaxed()
+    };
+    let largest = JobsConfig::max_result_bytes(&limits);
+    let svc = service(
+        limits,
+        JobsConfig {
+            max_jobs_per_principal: 1,
+            max_jobs: 1,
+            job_results_budget_bytes: largest,
+            ..tasks_after(LONG_THRESHOLD_MS)
+        },
+        &tag,
+    );
+    let client = connect(svc.clone(), true).await;
+    let forever = start_job(&client, FOREVER).await;
+    wait_for(
+        "the job's worker starts",
+        Duration::from_secs(10),
+        async || processes_with(&tag) == 1,
+    )
+    .await;
+    let charged = svc.jobs().charged_bytes();
+    assert_eq!(charged, largest);
+    // A job can't be started: the cap.
+    let r = call(
+        &client,
+        "start_render",
+        json!({ "source": QUICK_BLUE, "width": 20, "height": 10 }),
+    )
+    .await;
+    assert_eq!(error_code(&r), "server_busy", "{r}");
+
+    for (tool, args) in [
+        (
+            "render_postscript",
+            json!({ "source": QUICK_BLUE, "width": 20, "height": 10 }),
+        ),
+        ("handwrite", json!({ "text": "hi" })),
+    ] {
+        let response = client.call_tool_once(params(tool, args)).await.unwrap();
+        let CallToolResponse::Complete(r) = response else {
+            panic!("{tool}: expected a direct result, got {response:?}")
+        };
+        let r = serde_json::to_value(&r).unwrap();
+        assert_ne!(r["isError"], true, "{tool}: {r}");
+        assert_eq!(structured(&r)["ok"], true, "{tool}: {r}");
+        if tool == "render_postscript" {
+            assert!(png_of(&r).2.iter().all(|p| *p == [0, 0, 255, 255]));
+        }
+    }
+    // A quick failure is direct too, with the tool's usual envelope.
+    let response = client
+        .call_tool_once(params("render_postscript", json!({ "source": "1 0 div" })))
+        .await
+        .unwrap();
+    let CallToolResponse::Complete(r) = response else {
+        panic!("expected a direct result, got {response:?}")
+    };
+    let r = serde_json::to_value(&r).unwrap();
+    assert_eq!(error_code(&r), "postscript_error", "{r}");
+
+    // The store saw none of it.
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 1);
+    assert_eq!(svc.jobs().unfinished(), 1);
+    assert_eq!(svc.jobs().charged_bytes(), charged);
+    call(&client, "cancel_render", json!({ "job_id": forever })).await;
+    wait_for("the worker is gone", Duration::from_secs(5), async || {
+        processes_with(&tag) == 0
+    })
+    .await;
+    client.cancel().await.ok();
+}
+
+/// A slow call becomes a task with the worker it started: one worker, one
+/// execution, and it outlives the 1 s sync deadline under the job's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_call_becomes_a_task_and_keeps_its_worker() {
+    let tag = tag();
+    let svc = service(limits(), tasks_on(), &tag);
+    let client = connect(svc.clone(), true).await;
+    let response = client
+        .call_tool_once(params(
+            "render_postscript",
+            json!({ "source": SLOW_RED, "width": 20, "height": 10 }),
+        ))
+        .await
+        .unwrap();
+    let CallToolResponse::Task(created) = response else {
+        panic!("expected a task, got {response:?}")
+    };
+    let id = created.task.task_id.clone();
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 1);
+    // It is a job now: running from the start, and charged.
+    let status = svc.jobs().status("local", &id).unwrap();
+    assert_eq!(status.state, pscat_mcp::jobs::JobState::Running);
+    assert!(svc.jobs().charged_bytes() > 0);
+    let mut most = 0;
     let finished = loop {
+        most = most.max(processes_with(&tag));
         let got = client
             .peer()
-            .get_task(GetTaskParams::new(created.task.task_id.clone()))
+            .get_task(GetTaskParams::new(id.clone()))
             .await
             .unwrap();
         if got.task.status().is_terminal() {
@@ -919,11 +1057,35 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
+    assert!(most <= 1, "{most} workers");
     let TaskPayload::Completed { result } = finished.payload else {
         panic!("expected completed, got {finished:?}")
     };
-    assert_ne!(result["isError"], true, "{result:?}");
-    assert_eq!(result["structuredContent"]["artifacts"][0]["width_px"], 612);
+    let result = Value::Object(result);
+    assert_ne!(result["isError"], true, "{result}");
+    assert!(png_of(&result).2.iter().all(|p| *p == [255, 0, 0, 255]));
+    assert_eq!(svc.counters.executed.load(Ordering::SeqCst), 1);
+    assert_eq!(svc.counters.timed_out.load(Ordering::SeqCst), 0);
+    // Finished: it holds only its result; its slot and permit are free.
+    assert_eq!(svc.jobs().unfinished(), 0);
+    assert!(svc.jobs().charged_bytes() < JobsConfig::max_result_bytes(&limits()));
+    let r = call(
+        &client,
+        "start_render",
+        json!({ "source": QUICK_BLUE, "width": 20, "height": 10 }),
+    )
+    .await;
+    let quick = structured(&r)["job_id"].as_str().unwrap().to_string();
+    let (_, last) = poll_until_finished(&client, &quick).await;
+    assert_eq!(state(&last), "done", "{last}");
+    client.cancel().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_promoted_task_kills_its_worker() {
+    let tag = tag();
+    let svc = service(unlimited(), tasks_on(), &tag);
+    let client = connect(svc.clone(), true).await;
 
     // review_sheet is not task-eligible: it answers synchronously.
     let response = client
@@ -943,7 +1105,7 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
         panic!("expected a task")
     };
     let id = created.task.task_id.clone();
-    wait_for("the worker starts", Duration::from_secs(10), async || {
+    wait_for("the worker runs", Duration::from_secs(10), async || {
         processes_with(&tag) == 1
     })
     .await;
@@ -956,6 +1118,12 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
         processes_with(&tag) == 0
     })
     .await;
+    wait_for(
+        "the task is cancelled",
+        Duration::from_secs(5),
+        async || svc.jobs().unfinished() == 0,
+    )
+    .await;
     let got = client
         .peer()
         .get_task(GetTaskParams::new(id.clone()))
@@ -963,6 +1131,7 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
         .unwrap();
     assert_eq!(got.task.status(), TaskStatus::Cancelled);
     assert_eq!(svc.counters.jobs_cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(svc.counters.executed.load(Ordering::SeqCst), 2);
     // An unknown task is rmcp's usual invalid-params error.
     let err = client
         .peer()
@@ -970,6 +1139,103 @@ async fn a_generator_runs_as_a_task_and_tasks_cancel_kills_the_worker() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("unknown task"), "{err}");
+    client.cancel().await.ok();
+}
+
+/// Before it becomes a task, a call is cancelled like a synchronous one:
+/// `notifications/cancelled` kills its worker, and no job is made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_cancelled_before_the_threshold_kills_its_worker() {
+    let tag = tag();
+    let limits = LimitsConfig {
+        max_steps: 0,
+        ..relaxed()
+    };
+    let svc = service(limits, tasks_after(LONG_THRESHOLD_MS), &tag);
+    let client = connect(svc.clone(), true).await;
+    let handle = client
+        .peer()
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params(
+                "render_postscript",
+                json!({ "source": FOREVER, "width": 20, "height": 20 }),
+            ))),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .expect("send");
+    wait_for("the worker starts", Duration::from_secs(10), async || {
+        processes_with(&tag) == 1
+    })
+    .await;
+    handle
+        .cancel(Some("test".into()))
+        .await
+        .expect("send notifications/cancelled");
+    wait_for("the worker is gone", Duration::from_secs(5), async || {
+        processes_with(&tag) == 0
+    })
+    .await;
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 0);
+    assert_eq!(svc.jobs().charged_bytes(), 0);
+    client.cancel().await.ok();
+}
+
+/// A call past the threshold that cannot become a task (no running-job
+/// permit, its client's job cap) carries on synchronously and is stopped at
+/// the sync deadline, as a synchronous call is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_call_that_cannot_become_a_task_meets_the_sync_deadline() {
+    let tag = tag();
+    let svc = service(
+        unlimited(),
+        JobsConfig {
+            max_jobs_per_principal: 1,
+            ..tasks_on()
+        },
+        &tag,
+    );
+    let client = connect(svc.clone(), true).await;
+    let forever = start_job(&client, FOREVER).await;
+    wait_for(
+        "the job's worker starts",
+        Duration::from_secs(10),
+        async || processes_with(&tag) == 1,
+    )
+    .await;
+    let response = client
+        .call_tool_once(params(
+            "render_postscript",
+            json!({ "source": FOREVER, "width": 20, "height": 10 }),
+        ))
+        .await
+        .unwrap();
+    let CallToolResponse::Complete(r) = response else {
+        panic!("expected a direct result, got {response:?}")
+    };
+    let r = serde_json::to_value(&r).unwrap();
+    assert_eq!(error_code(&r), "timeout", "{r}");
+    assert!(
+        structured(&r)["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(&format!("{SYNC_TIMEOUT_MS} ms"))),
+        "{r}"
+    );
+    // Its worker is gone; the job's still runs.
+    wait_for(
+        "the call's worker is gone",
+        Duration::from_secs(5),
+        async || processes_with(&tag) == 1,
+    )
+    .await;
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 1);
+    assert_eq!(svc.counters.timed_out.load(Ordering::SeqCst), 1);
+    assert_eq!(svc.jobs().unfinished(), 1);
+    call(&client, "cancel_render", json!({ "job_id": forever })).await;
+    wait_for("the worker is gone", Duration::from_secs(5), async || {
+        processes_with(&tag) == 0
+    })
+    .await;
     client.cancel().await.ok();
 }
 

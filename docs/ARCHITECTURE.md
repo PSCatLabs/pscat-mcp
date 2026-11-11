@@ -304,9 +304,12 @@ and a store in the handler would lose a job between `start_render` and
   `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
   whose request declares `io.modelcontextprotocol/tasks` (rmcp's
   `RequestContext::client_capabilities`: the request's `_meta`, or the
-  session's `initialize` over stdio) starts a job and answers
-  `CreateTaskResult`; `get_task`, `cancel_task` and `update_task` on the
-  `ServerHandler` read the same store. rmcp's protocol layer (dispatch,
+  session's `initialize` over stdio) goes to
+  `RenderService::call_or_task`, which runs it synchronously first and
+  makes it a job, answered with `CreateTaskResult`, only if it is still
+  running after `--task-after-ms` (see "Tasks: only long calls" below);
+  `get_task`, `cancel_task` and `update_task` on the `ServerHandler` read
+  the same store. rmcp's protocol layer (dispatch,
   the capability checks, the task types) is used; its
   `task_manager::TaskManager` store is not, because it has no owner per
   task (any caller with an id can read or cancel it), keeps its entries
@@ -337,6 +340,53 @@ backend's `Worker` drop kills the worker's process group: the same path as a
 client's `notifications/cancelled`. A queued job never starts. Shutdown (the
 stdio session's end, or the HTTP grace period's) kills every unfinished job
 and waits up to 2 s; jobs are not drained.
+
+**Tasks: only long calls (#57).** SEP-2663 leaves task creation to the
+server, per request: it MAY answer a task-capable `tools/call` with a
+`CreateTaskResult` instead of the standard result, the client MUST accept
+either, and the client does not signal a preference on the request. So a
+Tasks client's call runs synchronously first, and only a long one becomes
+a task:
+
+1. The request is checked under the job limits and takes a render slot the
+   synchronous way (`slot()`, with the queue timeout). The worker starts
+   with the job deadline and the job step limit, because a worker's limits
+   (its deadline, `RLIMIT_CPU`, PSCat's step and time limits) are fixed
+   when it starts.
+2. The render is one boxed future, owned by the call, polled against the
+   threshold (`--task-after-ms`, from when the slot was taken) and the
+   request's cancellation. A call that finishes first returns the tool's
+   result; the job store is never touched, so it takes no running-job
+   permit, counts against no cap and reserves nothing. A
+   `notifications/cancelled` drops the future, which kills the worker, as
+   for a synchronous call.
+3. At the threshold, `promote` takes a running-job permit without waiting
+   (the call holds a render slot, and a synchronous call must always have
+   one), then `JobStore::insert_since` checks the caps and reserves the
+   largest result, with the job's elapsed time counted from the render's
+   start. The job is `running` at once, and the same future, with its
+   worker and render slot, moves into a job task (`drive_job`, the same
+   runner `start_job` uses, with its drop guard), which selects on the
+   job's own token only: from then on `tasks/cancel` and shutdown stop it,
+   and the request's token does not. There is one worker and one
+   `executed` count, and the reservation is released by the job's one
+   `finish`. `CreateTaskResult` goes back only after the job is in the
+   store, as the extension requires.
+4. If the promotion is refused (no permit free, a cap, the budget, the
+   store closed), the call keeps the future and waits for it until the
+   sync deadline, which the server enforces here (`timeout`, counted in
+   `timed_out`). Such a call ran under the job step limit, so it can reach
+   the sync deadline (`timeout`) where a plain synchronous call might have
+   stopped at the sync step limit (`limit_exceeded`).
+
+A threshold of zero is the old behaviour: every eligible call is a job at
+once (`start_job`, queued for a running-job permit with no queue timeout).
+`JobsConfig::check` requires the threshold to be below the sync deadline
+when `--tasks` is on. The two other options in #57 were rejected: a
+per-call opt-in has no place in the protocol (the server decides; the
+client sends no preference), and a smaller reservation for task-originated
+jobs would still put quick calls through the caps, the running-job share
+and the job deadline.
 
 **Ownership and ids.** The owner is the principal. Each handler is built
 for one transport (`PscatMcp::new` for stdio, `PscatMcp::for_http`), so the

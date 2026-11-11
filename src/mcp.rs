@@ -33,11 +33,13 @@
 //!   (`unknown_job`, `job_not_finished`, `cancelled`).
 //!
 //! The four job tools are listed only when async jobs are on (always over
-//! stdio, `--async-jobs` over HTTP). With `--tasks` too, a client that
-//! declares the MCP Tasks extension on a `tools/call` of
-//! `render_postscript`, `chalkboard_math` or `handwrite` gets a task handle
-//! (`CreateTaskResult`) instead, served by `tasks/get` and `tasks/cancel`
-//! from the same job store (see [`crate::jobs`]).
+//! stdio, `--async-jobs` over HTTP). With `--tasks` too, a `tools/call` of
+//! `render_postscript`, `chalkboard_math` or `handwrite` from a client that
+//! declares the MCP Tasks extension runs synchronously at first; one still
+//! running after `--task-after-ms` becomes a job, and the client gets a task
+//! handle (`CreateTaskResult`) instead of the result, served by `tasks/get`
+//! and `tasks/cancel` from the same job store (see [`crate::jobs`] and
+//! [`RenderService::call_or_task`]).
 //!
 //! Prompts and resources (the PSCat plugin's skills) come from
 //! [`crate::guide`]; their handlers below only forward to it.
@@ -72,7 +74,7 @@ use crate::handwrite::HandwriteParams;
 use crate::jobs::{JobResult, JobState, JobStatus, LOCAL_PRINCIPAL};
 use crate::render::{
     DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, JobRequest, RenderError, RenderOutput,
-    RenderRequest, RenderService, ValidationReport,
+    RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
 };
 use crate::sheet::{
     MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
@@ -668,6 +670,9 @@ pub struct JobsInfo {
     pub enabled: bool,
     /// Whether the MCP Tasks extension is served.
     pub tasks: bool,
+    /// With Tasks: how long a call runs, in milliseconds, before it
+    /// becomes a task (0: at once).
+    pub task_after_ms: u64,
     /// Wall-clock deadline of one job's worker, in milliseconds.
     pub job_timeout_ms: u64,
     /// PSCat's step limit for a job; absent when there is none.
@@ -962,6 +967,7 @@ impl PscatMcp {
                 JobsInfo {
                     enabled: jobs.enabled(),
                     tasks: jobs.tasks_enabled(),
+                    task_after_ms: c.task_after_ms,
                     job_timeout_ms: c.job_timeout_ms,
                     job_max_steps: c.job_limits(l).steps(),
                     max_running_jobs: c.running_jobs(l),
@@ -1442,17 +1448,31 @@ impl ServerHandler for PscatMcp {
             && context
                 .client_capabilities()
                 .is_some_and(|caps| caps.supports_tasks());
-        if wants_task && let Some(job) = task_request(&request) {
-            let started = principal(self.transport, &context.extensions)
-                .and_then(|owner| self.service.start_job(&owner, job));
-            return Ok(match started {
-                Ok(status) => CallToolResponse::Task(CreateTaskResult::new(task_of(
-                    &status,
-                    self.service.jobs().config(),
-                ))),
-                // Refused before a job exists: the tool's usual failure.
-                Err(err) => CallToolResponse::Complete(failure_with(failure_lead(&tool), err)),
-            });
+        // A task-eligible call from a Tasks client runs synchronously first
+        // and becomes a task only past the task threshold (see
+        // `RenderService::call_or_task`). A request with no owner (HTTP
+        // without a principal) cannot own a task, so it takes the
+        // synchronous path below.
+        if wants_task
+            && let Some(job) = task_request(&request)
+            && let Ok(owner) = principal(self.transport, &context.extensions)
+        {
+            return Ok(
+                match self.service.call_or_task(&owner, job, &context.ct).await {
+                    TaskCall::Task(status) => CallToolResponse::Task(CreateTaskResult::new(
+                        task_of(&status, self.service.jobs().config()),
+                    )),
+                    // Finished before the threshold, or refused before a job
+                    // exists: what the tool returns synchronously.
+                    TaskCall::Done(outcome) => CallToolResponse::Complete(job_result(
+                        JobResult {
+                            tool: tool.to_string(),
+                            outcome: outcome.map(Arc::new).map_err(Arc::new),
+                        },
+                        self.service.limits().svg_bytes(),
+                    )),
+                },
+            );
         }
         let tcc = ToolCallContext::new(self, request, context);
         Ok(match self.tool_router.call(tcc).await? {
@@ -1757,10 +1777,6 @@ fn job_failure(lead: &str, err: RenderError) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text(text)]),
         &envelope,
     )
-}
-
-fn cancelled() -> RenderError {
-    RenderError::new(ErrorCode::Cancelled, "the request was cancelled")
 }
 
 fn code_name(code: ErrorCode) -> String {

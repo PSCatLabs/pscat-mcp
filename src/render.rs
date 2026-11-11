@@ -4,12 +4,15 @@
 //! backend. MCP tools (and a future REST API) call it; nothing here knows
 //! about MCP or HTTP.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendError, RenderBackend};
 use crate::config::{JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
@@ -658,15 +661,12 @@ impl RenderService {
         })
     }
 
-    /// Accept an async job for `owner` (see [`crate::jobs`]): check the
-    /// request under the job limits (the job deadline as the render
-    /// timeout) and the job caps, then run it in the background. Returns
-    /// its status, `queued`.
-    pub fn start_job(
-        self: &Arc<Self>,
-        owner: &str,
-        req: JobRequest,
-    ) -> Result<JobStatus, RenderError> {
+    /// Check `req` as an async job: under the job limits (the job deadline
+    /// as the render timeout). Returns the job and the tool it runs.
+    fn validate_job(
+        &self,
+        req: &JobRequest,
+    ) -> Result<(ValidatedRequest, &'static str), RenderError> {
         if !self.jobs.enabled() {
             return Err(RenderError::new(
                 ErrorCode::InvalidRequest,
@@ -674,7 +674,7 @@ impl RenderService {
             ));
         }
         let limits = self.jobs.config().job_limits(&self.limits);
-        let (checked, tool) = match &req {
+        let (checked, tool) = match req {
             JobRequest::Render(r) => (
                 validate_request(r, JobMode::Render, &limits),
                 "render_postscript",
@@ -688,47 +688,78 @@ impl RenderService {
                 "review_sheet does not run as an async job",
             ));
         }
+        Ok((validated, tool))
+    }
+
+    /// Accept an async job for `owner` (see [`crate::jobs`]): check the
+    /// request under the job limits (the job deadline as the render
+    /// timeout) and the job caps, then run it in the background. Returns
+    /// its status, `queued`.
+    pub fn start_job(
+        self: &Arc<Self>,
+        owner: &str,
+        req: JobRequest,
+    ) -> Result<JobStatus, RenderError> {
+        let (validated, tool) = self.validate_job(&req)?;
         let (id, cancel) = self.jobs.insert(owner, tool)?;
         self.counters.jobs_started.fetch_add(1, Ordering::Relaxed);
         tracing::info!(tool, "async job accepted");
         // The status as accepted (`queued`), before the job can move on.
         let status = self.jobs.status(owner, &id);
+        let guard = self.finish_on_drop(&id);
         let service = Arc::clone(self);
-        tokio::spawn(async move { service.run_async_job(id, validated.job, cancel).await });
+        let job = validated.job;
+        let deadline = self.jobs.config().job_timeout();
+        let work = {
+            let service = Arc::clone(self);
+            let id = id.clone();
+            async move {
+                // A running-job permit first, then a render slot shared with
+                // every synchronous call; a queued job waits as long as it
+                // takes.
+                let _running = service
+                    .jobs
+                    .running_permit()
+                    .await
+                    .ok_or_else(shutting_down)?;
+                let permit = service
+                    .slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| shutting_down())?;
+                service.jobs.mark_running(&id);
+                service
+                    .render_in_slot(permit, job, deadline, Instant::now())
+                    .await
+            }
+        };
+        tokio::spawn(async move { service.drive_job(guard, cancel, work).await });
         status
     }
 
-    async fn run_async_job(
-        self: Arc<Self>,
-        id: String,
-        job: WorkerJob,
-        cancel: tokio_util::sync::CancellationToken,
-    ) {
-        // Finishes the job as `worker_failed` if this task never reaches the
-        // `finish` below: a panic, or the task dropped (the runtime shutting
-        // down). The job then leaves the caps and keeps only its error
-        // against the budget, and `unfinished` counts it no more.
-        let mut guard = FinishOnDrop {
-            service: Arc::clone(&self),
-            id: id.clone(),
+    /// Finishes job `id` as `worker_failed` if it is dropped armed: its
+    /// task panicked, or was dropped (the runtime shutting down) before it
+    /// reached [`Self::drive_job`]'s `finish`, or before it first ran. The
+    /// job then leaves the caps and keeps only its error against the
+    /// budget, and `unfinished` counts it no more.
+    fn finish_on_drop(self: &Arc<Self>, id: &str) -> FinishOnDrop {
+        FinishOnDrop {
+            service: Arc::clone(self),
+            id: id.to_string(),
             armed: true,
-        };
-        let deadline = self.jobs.config().job_timeout();
-        let work = async {
-            // A running-job permit first, then a render slot shared with
-            // every synchronous call; a queued job waits as long as it takes.
-            let _running = self.jobs.running_permit().await.ok_or_else(shutting_down)?;
-            let permit = self
-                .slots
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| shutting_down())?;
-            self.jobs.mark_running(&id);
-            self.render_in_slot(permit, job, deadline, Instant::now())
-                .await
-        };
-        // Dropping `work` drops the backend's future, which kills the worker.
+        }
+    }
+
+    /// Run a job's `work` to its end, or until `cancel` fires, and record
+    /// the outcome. Dropping `work` drops the backend's future, which kills
+    /// the worker.
+    async fn drive_job(
+        self: Arc<Self>,
+        mut guard: FinishOnDrop,
+        cancel: CancellationToken,
+        work: impl Future<Output = Result<RenderOutput, RenderError>>,
+    ) {
         let outcome = tokio::select! {
             biased;
             () = cancel.cancelled() => None,
@@ -739,7 +770,143 @@ impl RenderService {
             tracing::info!("async job cancelled");
         }
         guard.armed = false;
-        self.jobs.finish(&id, outcome);
+        self.jobs.finish(&guard.id, outcome);
+    }
+
+    /// A Tasks client's `tools/call` of a task-eligible tool, for `owner`
+    /// (see [`crate::jobs`]). It runs synchronously first, in a render slot
+    /// taken the synchronous way (the queue timeout applies), and becomes a
+    /// task only if it is still running after the task threshold
+    /// (`--task-after-ms`):
+    ///
+    /// * finished before the threshold: its result, and the job store is
+    ///   never touched (no cap, no reservation, no running-job permit);
+    /// * past the threshold: the same render, worker and slot carry on as a
+    ///   job, which takes a running-job permit, counts against the caps and
+    ///   reserves its largest result only from then on;
+    /// * past the threshold but refused as a job (no running-job permit
+    ///   free, a cap, the budget): it carries on as a synchronous call and
+    ///   is stopped at the sync deadline (`timeout`).
+    ///
+    /// The worker starts under the job limits, since a worker's limits are
+    /// fixed when it starts; until the call becomes a task, the sync
+    /// deadline is enforced here. `ct` is the request's cancellation: it
+    /// kills the worker until the call has become a task, and after that
+    /// only `tasks/cancel` (the job's own token) does. A threshold of zero
+    /// makes the call a task at once ([`Self::start_job`]).
+    pub async fn call_or_task(
+        self: &Arc<Self>,
+        owner: &str,
+        req: JobRequest,
+        ct: &CancellationToken,
+    ) -> TaskCall {
+        let after = self.jobs.config().task_after();
+        if after.is_zero() {
+            return match self.start_job(owner, req) {
+                Ok(status) => TaskCall::Task(status),
+                Err(err) => TaskCall::Done(Err(err)),
+            };
+        }
+        let (validated, tool) = match self.validate_job(&req) {
+            Ok(v) => v,
+            Err(err) => return TaskCall::Done(Err(err)),
+        };
+        let permit = tokio::select! {
+            biased;
+            () = ct.cancelled() => return TaskCall::Done(Err(cancelled())),
+            p = self.slot() => match p {
+                Ok(p) => p,
+                Err(err) => return TaskCall::Done(Err(err)),
+            },
+        };
+        // The threshold and the sync deadline count from here, as a sync
+        // call's deadline does (time queued is not counted).
+        let started = Instant::now();
+        let job_deadline = self.jobs.config().job_timeout();
+        let service = Arc::clone(self);
+        let job = validated.job;
+        let mut render: RenderFuture = Box::pin(async move {
+            service
+                .render_in_slot(permit, job, job_deadline, started)
+                .await
+        });
+        tokio::select! {
+            biased;
+            r = &mut render => return TaskCall::Done(r),
+            () = ct.cancelled() => return TaskCall::Done(Err(cancelled())),
+            () = tokio::time::sleep(after) => {}
+        }
+        let render = match self.promote(owner, tool, started, render) {
+            Ok(status) => return TaskCall::Task(status),
+            Err((render, why)) => {
+                tracing::info!(
+                    tool,
+                    code = ?why.code,
+                    "call not promoted to a task; it carries on under the sync deadline"
+                );
+                render
+            }
+        };
+        let sync = self.limits.render_timeout();
+        let left = sync.saturating_sub(started.elapsed());
+        TaskCall::Done(tokio::select! {
+            biased;
+            r = render => r,
+            () = ct.cancelled() => Err(cancelled()),
+            () = tokio::time::sleep(left) => {
+                // Dropping `render` here kills the worker.
+                self.counters.timed_out.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(tool, "render killed at the deadline");
+                Err(RenderError::new(
+                    ErrorCode::Timeout,
+                    format!("the render ran past {} ms and was stopped", sync.as_millis()),
+                ))
+            }
+        })
+    }
+
+    /// Make the running `render` a job of `owner`'s: a running-job permit
+    /// (never waited for: the call holds a render slot, and sync calls must
+    /// always have one), then the caps and the reservation. On success the
+    /// render moves into a background task, with the same worker and slot.
+    /// On refusal the render comes back, still running.
+    fn promote(
+        self: &Arc<Self>,
+        owner: &str,
+        tool: &'static str,
+        started: Instant,
+        render: RenderFuture,
+    ) -> Result<JobStatus, (RenderFuture, RenderError)> {
+        let Some(running) = self.jobs.try_running_permit() else {
+            return Err((
+                render,
+                RenderError::new(ErrorCode::ServerBusy, "every running-job permit is taken"),
+            ));
+        };
+        let (id, cancel) = match self.jobs.insert_since(owner, tool, started) {
+            Ok(v) => v,
+            Err(err) => return Err((render, err)),
+        };
+        self.jobs.mark_running(&id);
+        let status = match self.jobs.status(owner, &id) {
+            Ok(status) => status,
+            Err(err) => {
+                self.jobs.finish(&id, None);
+                return Err((render, err));
+            }
+        };
+        self.counters.jobs_started.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(tool, "call promoted to a task");
+        let guard = self.finish_on_drop(&id);
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            let work = async move {
+                let _running = running;
+                render.await
+            };
+            service.drive_job(guard, cancel, work).await
+        });
+        Ok(status)
     }
 
     /// Cancel `owner`'s job `id` and wait (briefly) for it to stop; returns
@@ -947,7 +1114,25 @@ impl RenderService {
     }
 }
 
-/// See [`RenderService::run_async_job`].
+/// A render running in its slot, movable into a job's task.
+type RenderFuture = Pin<Box<dyn Future<Output = Result<RenderOutput, RenderError>> + Send>>;
+
+/// What [`RenderService::call_or_task`] gives.
+#[derive(Debug)]
+pub enum TaskCall {
+    /// The call's result: it finished before the task threshold, could not
+    /// become a task, or was refused or cancelled.
+    Done(Result<RenderOutput, RenderError>),
+    /// The call became a task (a job); its status as it became one.
+    Task(JobStatus),
+}
+
+/// The error for a request the client cancelled.
+pub(crate) fn cancelled() -> RenderError {
+    RenderError::new(ErrorCode::Cancelled, "the request was cancelled")
+}
+
+/// See [`RenderService::finish_on_drop`].
 struct FinishOnDrop {
     service: Arc<RenderService>,
     id: String,
