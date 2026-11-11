@@ -675,7 +675,7 @@ automate what the manual prompts in sections 5 and 6 and
 eye.
 
 ```bash
-cargo test --test eval_server -- --nocapture   # stdio + HTTP (bearer token); about 15 s
+cargo test --test eval_server -- --nocapture   # stdio, HTTP (bearer token), HTTP with async jobs; about 15 s
 cargo test --test eval_replay -- --nocapture   # recorded client traffic
 scripts/container-eval.sh                      # the same scenarios in the image (needs Docker)
 IMAGE=pscat-mcp:ci SKIP_BUILD=1 scripts/container-eval.sh
@@ -778,8 +778,10 @@ covers an rmcp client's cancellation of a call, which kills the worker).
 Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
 lines: `%` starts a comment that runs to the end of the line.
 
-The run prints a table (scenario, step, result, milliseconds) and writes
-`target/eval/<target>.json` and `<target>.xml` (JUnit);
+The targets are `stdio`, `http`, `http-async` (the HTTP pass with
+`PSCAT_MCP_ASYNC_JOBS=true` unless a scenario sets it, so scenario 66 runs over
+HTTP as well) and `container`. The run prints a table (scenario, step, result,
+milliseconds) and writes `target/eval/<target>.json` and `<target>.xml` (JUnit);
 `PSCAT_EVAL_REPORT_DIR` changes the directory, and `$GITHUB_STEP_SUMMARY`
 gets a markdown table when it is set.
 

@@ -21,7 +21,7 @@ use pscat_mcp::mcp::{PscatMcp, Transport};
 use pscat_mcp::render::RenderService;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ClientCapabilities,
-    ClientConfig, GetTaskParams, Implementation, TaskPayload, TaskStatus,
+    ClientConfig, ContentBlock, GetTaskParams, Implementation, TaskPayload, TaskStatus,
 };
 use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -29,6 +29,8 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 const SYNC_TIMEOUT_MS: u64 = 1_000;
 const JOB_TIMEOUT_MS: u64 = 15_000;
@@ -1149,4 +1151,81 @@ async fn over_http_a_task_is_found_by_a_later_request_of_its_owner_only() {
     let (w, h, px) = png_of(result);
     assert_eq!((w, h), (20, 10));
     assert!(px.iter().all(|p| *p == [255, 0, 0, 255]));
+}
+
+/// Many small marks: an SVG well over the 20 000-byte cap set below.
+const MANY_MARKS: &str =
+    "1 srand 0 1 2000 { pop rand 500 mod rand 500 mod 3 3 rectfill } for showpage";
+const SVG_CAP: u64 = 20_000;
+
+/// Over stdio (jobs are always on there) with the SVG cap set through the
+/// environment: a `start_render` job whose SVG is over the cap ends `failed`,
+/// and `render_result` names the budget. Polls with a generous deadline.
+#[tokio::test]
+async fn a_job_whose_svg_is_over_the_cap_fails_with_output_too_large() {
+    let cap = SVG_CAP.to_string();
+    let client = common::start_stdio(
+        env!("CARGO_BIN_EXE_pscat-mcp-server"),
+        &[("PSCAT_MCP_MAX_SVG_BYTES", &cap)],
+    )
+    .await;
+    let start = client
+        .call_tool(
+            CallToolRequestParams::new("start_render").with_arguments(
+                json!({"source": MANY_MARKS, "width": 500, "height": 500, "format": "svg"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("start_render");
+    assert_ne!(start.is_error, Some(true), "{start:?}");
+    let id = start.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let state = loop {
+        let r = client
+            .call_tool(
+                CallToolRequestParams::new("render_status")
+                    .with_arguments(json!({ "job_id": id }).as_object().unwrap().clone()),
+            )
+            .await
+            .expect("render_status");
+        let s = r.structured_content.as_ref().unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if matches!(s.as_str(), "done" | "failed" | "cancelled") {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "job never finished: {s}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(state, "failed");
+
+    let r = client
+        .call_tool(
+            CallToolRequestParams::new("render_result")
+                .with_arguments(json!({ "job_id": id }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("render_result");
+    assert_eq!(r.is_error, Some(true), "{r:?}");
+    assert!(
+        !r.content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::Image(_)) || c.as_resource().is_some()),
+        "a failed job returns no artifact"
+    );
+    let s = r.structured_content.clone().expect("structured content");
+    assert_eq!(s["error"]["code"], "output_too_large", "{s}");
+    assert_eq!(s["error"]["input"]["code"], "svg_bytes", "{s}");
+    assert_eq!(s["error"]["input"]["limit_bytes"], SVG_CAP, "{s}");
+    let reached = s["error"]["input"]["reached_bytes"].as_u64().unwrap();
+    assert!(reached > SVG_CAP, "{s}");
+    client.cancel().await.ok();
 }

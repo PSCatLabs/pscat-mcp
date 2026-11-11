@@ -50,6 +50,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// The log line the server writes for every job it hands to a worker.
 const RENDER_MARK: &str = "render started";
 const KNOWN_TRANSPORTS: [&str; 3] = ["stdio", "http", "container"];
+/// The HTTP pass with async jobs on (see `run_target`).
+const HTTP_ASYNC: &str = "http-async";
 /// Keys a step may have.
 const STEP_KEYS: &[&str] = &[
     "label", "tool", "args", "request", "params", "result", "parallel", "outcomes", "delay_ms",
@@ -1393,19 +1395,29 @@ async fn run_scenario(server: &Server, sc: &Scenario, rows: &mut Vec<StepRow>) {
 async fn run_target(target: &str) -> Vec<StepRow> {
     let scenarios = load_scenarios().expect("scenario files");
     let image = std::env::var("PSCAT_MCP_EVAL_IMAGE").unwrap_or_default();
+    // `http-async` is the HTTP pass with async jobs on: the same scenarios
+    // over the same transport, with PSCAT_MCP_ASYNC_JOBS=true unless a
+    // scenario sets it itself.
+    let async_jobs = target == HTTP_ASYNC;
+    let transport = if async_jobs { "http" } else { target };
 
     // Scenarios that share a server_env share a server.
     let mut groups: Vec<(BTreeMap<String, String>, Vec<&Scenario>)> = Vec::new();
-    for sc in scenarios.iter().filter(|s| s.runs_on(target)) {
-        match groups.iter_mut().find(|(e, _)| *e == sc.server_env) {
+    for sc in scenarios.iter().filter(|s| s.runs_on(transport)) {
+        let mut env = sc.server_env.clone();
+        if async_jobs {
+            env.entry("PSCAT_MCP_ASYNC_JOBS".into())
+                .or_insert_with(|| "true".into());
+        }
+        match groups.iter_mut().find(|(e, _)| *e == env) {
             Some((_, g)) => g.push(sc),
-            None => groups.push((sc.server_env.clone(), vec![sc])),
+            None => groups.push((env, vec![sc])),
         }
     }
 
     let mut rows = Vec::new();
     for (env, group) in groups {
-        let started = match target {
+        let started = match transport {
             "stdio" => start_stdio(&env).await,
             "http" => start_http(&env).await,
             _ => start_container(&image, &env).await,
@@ -1568,6 +1580,13 @@ async fn scenarios_over_stdio() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scenarios_over_http_with_a_bearer_token() {
     run_and_report("http").await;
+}
+
+/// The HTTP pass with `PSCAT_MCP_ASYNC_JOBS=true`, so the job tools
+/// (scenario 66) run over HTTP as they do over stdio.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scenarios_over_http_with_async_jobs() {
+    run_and_report(HTTP_ASYNC).await;
 }
 
 /// Runs only when `PSCAT_MCP_EVAL_IMAGE` names an image (see
