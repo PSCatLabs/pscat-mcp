@@ -48,7 +48,10 @@ authentication, the body limit (six times the largest of the source,
 `handwrite` text and `review_sheet` source limits, plus 64 KiB, so an input a little over its limit
 still gets a structured error), the optional capture layer (`capture.rs`,
 off unless `--capture-file` is set; it records each authenticated request
-just before rmcp sees it, without tokens), then rmcp. `render.rs` logs one
+just before rmcp sees it, without tokens), the `Accept` fix-up (`accept_json`
+in `http.rs`: a POST whose `Accept` allows JSON but lacks `text/event-stream`
+gets it added, because the server only ever answers JSON; see the README's
+limitations), then rmcp. `render.rs` logs one
 `render started` line per job it hands to a worker; the server-layer evals
 count those lines to assert how many renders a scenario executed.
 
