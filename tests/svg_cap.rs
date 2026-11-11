@@ -74,7 +74,7 @@ fn has_artifact(r: &CallToolResult) -> bool {
 
 /// The svg size of one render of `source`, with no cap in the way.
 async fn svg_bytes(source: &str) -> usize {
-    let client = start(&[]).await;
+    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
     let r = render(&client, source, "svg").await;
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     let n = r.structured_content.as_ref().unwrap()["artifacts"]
