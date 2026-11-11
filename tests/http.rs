@@ -836,13 +836,18 @@ async fn oversized_bodies_get_a_clean_413_every_time() {
 }
 
 /// A client without a valid token gets the 401, not a connection reset,
-/// even when its body is larger than the socket buffers: the server reads
-/// and discards a rejected body up to the body limit (issue #30).
+/// even when its body is larger than the socket buffers and the body limit:
+/// the server reads and discards a rejected body up to the drain cap
+/// (issue #30).
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_large_bodies_get_a_clean_401_every_time() {
-    // Default limits: the body limit is 256 KiB * 6 + 64 KiB, about 1.6 MB.
-    let srv = start(real_service(LimitsConfig::default())).await;
-    let big = format!("% {}\nshowpage", "x".repeat(1200 * 1024));
+    // Body limit 1024 * 6 + 64 KiB, about 71 KB; the body is 2 MB.
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    let big = format!("% {}\nshowpage", "x".repeat(2 * 1024 * 1024));
     let body = render_call(1, &big, 10, 10);
     for i in 0..10 {
         let (status, _, _) = post(&srv.mcp(), None, None, &body).await;

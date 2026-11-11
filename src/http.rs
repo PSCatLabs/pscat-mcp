@@ -153,12 +153,8 @@ pub fn router(
     );
     // Outer to inner: authenticate (before the body is used), then read the
     // body under the limit, then rmcp.
-    let auth_state = AuthState {
-        auth,
-        drain_max: body_limit as u64,
-    };
     let mcp = ServiceBuilder::new()
-        .layer(middleware::from_fn_with_state(auth_state, require_auth))
+        .layer(middleware::from_fn_with_state(auth, require_auth))
         .layer(middleware::from_fn_with_state(body_limit, limit_body))
         .service(mcp);
 
@@ -189,9 +185,8 @@ pub fn router(
         )
 }
 
-/// Most bytes of an oversized body read and thrown away before answering
-/// `413`, and the longest that may take (also the time limit for draining a
-/// rejected body before `401`). Answering while the client is still
+/// Most bytes of an oversized or rejected body read and thrown away before
+/// answering `413` or `401`, and the longest that may take. Answering while the client is still
 /// uploading makes the server close a connection with unread data, which the
 /// client can see as a TCP reset instead of the `413` (issue #20). Bodies
 /// declared larger than this are refused without reading.
@@ -231,7 +226,7 @@ async fn limit_body(State(limit): State<usize>, req: Request, next: Next) -> Res
                     continue;
                 };
                 if buf.len() + data.len() > limit {
-                    drain(body, (buf.len() + data.len()) as u64, DRAIN_MAX_BYTES).await;
+                    drain(body, (buf.len() + data.len()) as u64).await;
                     return too_large();
                 }
                 buf.extend_from_slice(data);
@@ -246,11 +241,11 @@ async fn limit_body(State(limit): State<usize>, req: Request, next: Next) -> Res
     next.run(Request::from_parts(parts, Body::from(buf))).await
 }
 
-/// Read and discard the rest of `body`, up to `max` bytes in total (`seen`
-/// already read) and [`DRAIN_MAX_TIME`].
-async fn drain(mut body: Body, mut seen: u64, max: u64) {
+/// Read and discard the rest of `body`, up to [`DRAIN_MAX_BYTES`] in total
+/// (`seen` already read) and [`DRAIN_MAX_TIME`].
+async fn drain(mut body: Body, mut seen: u64) {
     let _ = tokio::time::timeout(DRAIN_MAX_TIME, async {
-        while seen <= max {
+        while seen <= DRAIN_MAX_BYTES {
             match body.frame().await {
                 Some(Ok(frame)) => {
                     seen += frame.data_ref().map_or(0, |d| d.len() as u64);
@@ -266,22 +261,18 @@ async fn healthz() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
 }
 
-#[derive(Clone)]
-struct AuthState {
-    auth: Arc<dyn Authenticator>,
-    /// Most bytes of a rejected request's body read and thrown away before
-    /// answering `401`: the `/mcp` body limit.
-    drain_max: u64,
-}
-
 /// Authenticate from the headers alone. An accepted request goes on with its
 /// body untouched. A rejected one never reaches the body limit, rmcp or a
-/// render; its body, if it declares no more than `drain_max` bytes, is read
+/// render; unless it declares more than [`DRAIN_MAX_BYTES`], its body is read
 /// and discarded first (at most [`DRAIN_MAX_TIME`]) so that a client still
 /// uploading gets the `401` rather than a connection reset (issue #30).
-async fn require_auth(State(state): State<AuthState>, req: Request, next: Next) -> Response {
+async fn require_auth(
+    State(auth): State<Arc<dyn Authenticator>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let (mut parts, body) = req.into_parts();
-    match state.auth.authenticate(&parts) {
+    match auth.authenticate(&parts) {
         Ok(principal) => {
             tracing::debug!(principal = %principal.id, "authenticated");
             parts.extensions.insert(principal);
@@ -294,10 +285,10 @@ async fn require_auth(State(state): State<AuthState>, req: Request, next: Next) 
                 .get(header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            if declared.is_none_or(|n| n <= state.drain_max) {
-                drain(body, 0, state.drain_max).await;
+            if declared.is_none_or(|n| n <= DRAIN_MAX_BYTES) {
+                drain(body, 0).await;
             }
-            unauthorized(state.auth.as_ref(), &err)
+            unauthorized(auth.as_ref(), &err)
         }
     }
 }
