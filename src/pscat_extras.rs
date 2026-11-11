@@ -106,27 +106,6 @@ pub fn allow_program_page_size(interp: &mut pscat::Interp) {
         .set_page_size_source(pscat::gfx::PageSizeSource::Default);
 }
 
-/// The size in points of a page of `px` device pixels rendered at `dpi`,
-/// rounded to 0.01 pt.
-///
-/// Prefers the page size the interpreter recorded (`/PageSize` as the
-/// program or the request set it, so a page of 595.5 pt keeps its half
-/// point) when that size gives `px` at `dpi`. Otherwise (a program that
-/// changed the page size between pages, so the recorded size is the last
-/// page's) it converts the pixels back: `px * 72 / dpi`.
-pub fn page_points(interp: &pscat::Interp, dpi: f64, px: (u32, u32)) -> (f64, f64) {
-    let scale = dpi / 72.0;
-    let (rw, rh) = interp.gfx().page_size();
-    let fits = |pt: f64, px: u32| pt.is_finite() && (pt * scale - f64::from(px)).abs() <= 1.0;
-    let (w, h) = if fits(rw, px.0) && fits(rh, px.1) {
-        (rw, rh)
-    } else {
-        (f64::from(px.0) / scale, f64::from(px.1) / scale)
-    };
-    let round = |v: f64| (v * 100.0).round() / 100.0;
-    (round(w), round(h))
-}
-
 /// One halftoned page, encoded as PNG.
 pub struct HalftonePng {
     /// Width in device pixels.

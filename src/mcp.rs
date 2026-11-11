@@ -442,8 +442,9 @@ pub struct ArtifactSummary {
     /// Height in device pixels.
     pub height_px: u32,
     /// Width in points (1/72 inch) of the page as drawn, after any default
-    /// size and any `setpagedevice`; `width_px` is this times dpi / 72,
-    /// rounded.
+    /// size and any `setpagedevice`: `width_px * 72 / dpi`, rounded to 0.01
+    /// (a fractional page size comes back as its rounded pixels converted
+    /// back).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width_pt: Option<f64>,
     /// Height in points of the page as drawn; see `width_pt`.

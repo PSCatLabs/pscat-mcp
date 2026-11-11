@@ -602,14 +602,21 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
     }
 }
 
-/// The size in points of a page of `px` device pixels, as `Some` pair.
-fn points_of(
-    interp: &pscat::Interp,
-    job: &WorkerJob,
-    width_px: u32,
-    height_px: u32,
-) -> (Option<f64>, Option<f64>) {
-    let (w, h) = crate::pscat_extras::page_points(interp, job.dpi, (width_px, height_px));
+/// The size in points of a page of `width_px` x `height_px` device pixels
+/// rendered at `dpi`, as `px * 72 / dpi` rounded to 0.01 pt.
+///
+/// Computed from the pixels and the dpi alone, so it is the page as drawn
+/// (after the default size and any `setpagedevice`). The pixel size is the
+/// point size times dpi / 72, rounded, so a fractional page size comes back
+/// as the rounded pixels converted back: 595.5 pt at 72 dpi is 596 px, and
+/// is reported as 596 pt.
+pub(crate) fn points_from_px(dpi: f64, width_px: u32, height_px: u32) -> (f64, f64) {
+    let pt = |px: u32| (f64::from(px) * 72.0 / dpi * 100.0).round() / 100.0;
+    (pt(width_px), pt(height_px))
+}
+
+fn points_of(job: &WorkerJob, width_px: u32, height_px: u32) -> (Option<f64>, Option<f64>) {
+    let (w, h) = points_from_px(job.dpi, width_px, height_px);
     (Some(w), Some(h))
 }
 
@@ -651,7 +658,7 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(shot.png.len())?;
-                let (width_pt, height_pt) = points_of(interp, job, shot.width, shot.height);
+                let (width_pt, height_pt) = points_of(job, shot.width, shot.height);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: shot.width,
@@ -669,7 +676,7 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(png.len())?;
-                let (width_pt, height_pt) = points_of(interp, job, page.width(), page.height());
+                let (width_pt, height_pt) = points_of(job, page.width(), page.height());
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: page.width(),
@@ -699,7 +706,7 @@ fn encode(
             for (i, svg) in svgs.iter().enumerate() {
                 check(svg.len())?;
                 let (w, h) = pages.get(i).map_or((0, 0), |p| (p.width(), p.height()));
-                let (width_pt, height_pt) = points_of(interp, job, w, h);
+                let (width_pt, height_pt) = points_of(job, w, h);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: w,
@@ -717,7 +724,7 @@ fn encode(
             })?;
             check(pdf.len())?;
             let (w, h) = pages.first().map_or((0, 0), |p| (p.width(), p.height()));
-            let (width_pt, height_pt) = points_of(interp, job, w, h);
+            let (width_pt, height_pt) = points_of(job, w, h);
             artifacts.push(Artifact {
                 page: None,
                 width_px: w,
@@ -735,6 +742,15 @@ fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_come_from_pixels_and_dpi() {
+        assert_eq!(points_from_px(144.0, 800, 400), (400.0, 200.0));
+        assert_eq!(points_from_px(300.0, 1000, 1000), (240.0, 240.0));
+        assert_eq!(points_from_px(72.0, 612, 792), (612.0, 792.0));
+        // Rounded to 0.01 pt: 827 px at 100 dpi is 595.44 pt.
+        assert_eq!(points_from_px(100.0, 827, 1), (595.44, 0.72));
+    }
     use crate::generate::GeneratedProgram;
 
     fn job() -> WorkerJob {
