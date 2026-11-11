@@ -185,7 +185,7 @@ async fn the_cap_counts_every_page_together() {
 }
 
 #[tokio::test]
-async fn the_default_is_256_kib_and_the_cap_is_in_the_descriptions_and_renderer_info() {
+async fn the_default_is_128_kib_and_the_cap_is_in_the_descriptions_and_renderer_info() {
     let client = start(&[]).await;
     let info = client
         .call_tool(CallToolRequestParams::new("get_renderer_info"))
