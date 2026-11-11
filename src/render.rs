@@ -126,21 +126,25 @@ pub struct RenderError {
     pub input: Option<Box<InputDiagnostic>>,
 }
 
-/// The input error a generator reported.
+/// The input or budget a failure names: the input error a generator
+/// reported, or the limit that refused a request.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct InputDiagnostic {
-    /// The generator's stable code: for `chalkboard_math`,
-    /// `unsupported_command`, `unsupported_character`,
-    /// `unsupported_environment`, `missing_argument`, `config`, `empty`, ...
+    /// The stable code: for `chalkboard_math`, `unsupported_command`,
+    /// `unsupported_character`, `unsupported_environment`,
+    /// `missing_argument`, `config`, `empty`, ...; for a size limit,
+    /// `output_bytes`; for the async results budget,
+    /// `results_per_principal_bytes` or `results_budget_bytes`.
     pub code: String,
     /// The command, character or environment the error names, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// For a size limit (`output_bytes`), the limit in bytes.
+    /// For a size limit (`output_bytes`, the results budget), the limit in
+    /// bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_bytes: Option<u64>,
-    /// For a size limit (`output_bytes`), the size the output reached, in
-    /// bytes (for SVG, all pages together).
+    /// For a size limit, the size reached in bytes (for SVG, all pages
+    /// together; for the results budget, what the job would have held).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reached_bytes: Option<u64>,
 }

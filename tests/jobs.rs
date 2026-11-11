@@ -501,6 +501,63 @@ async fn job_caps_and_the_results_budget_are_enforced() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_principal_over_its_share_of_the_budget_is_told_which_limit() {
+    let small = LimitsConfig {
+        max_output_bytes: 30_000,
+        ..unlimited()
+    };
+    let largest = JobsConfig::max_result_bytes(&small);
+    // Room for three reservations, one reservation and a little
+    // bookkeeping (a cancelled job keeps some) per principal.
+    let min = pscat_mcp::config::JOB_MIN_CHARGE_BYTES;
+    let share = largest + 2 * min;
+    let svc = service(
+        small,
+        JobsConfig {
+            job_results_budget_bytes: 3 * share,
+            job_results_per_principal_bytes: Some(share),
+            ..jobs()
+        },
+        &tag(),
+    );
+    assert_eq!(svc.jobs().principal_share_bytes(), share);
+    let client = connect(svc.clone(), false).await;
+    let info = call(&client, "get_renderer_info", json!({})).await;
+    assert_eq!(
+        structured(&info)["jobs"]["results_per_principal_bytes"],
+        share,
+        "{info}"
+    );
+    let running = start_job(&client, FOREVER).await;
+    // Budget is left (two more reservations), but not for this principal.
+    let r = call(
+        &client,
+        "start_render",
+        json!({ "source": QUICK_BLUE, "width": 20, "height": 10 }),
+    )
+    .await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert_eq!(error_code(&r), "results_budget_exceeded", "{r}");
+    let input = &structured(&r)["error"]["input"];
+    assert_eq!(input["code"], "results_per_principal_bytes", "{r}");
+    assert_eq!(input["limit_bytes"], share, "{r}");
+    assert_eq!(input["reached_bytes"], 2 * largest, "{r}");
+    assert!(
+        structured(&r)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("per client"),
+        "{r}"
+    );
+    // Cancelling frees the reservation but for its bookkeeping, and the
+    // principal can start again.
+    call(&client, "cancel_render", json!({ "job_id": running })).await;
+    let done = start_job(&client, QUICK_BLUE).await;
+    poll_until_finished(&client, &done).await;
+    client.cancel().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn argument_errors_get_the_envelope() {
     let svc = service(limits(), jobs(), &tag());
     let client = connect(svc, false).await;

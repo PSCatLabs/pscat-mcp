@@ -16,9 +16,13 @@
 //!   (`server_busy`), a budget of result bytes held in memory
 //!   (`results_budget_exceeded`): a job reserves its largest possible
 //!   result when it is accepted and keeps only what it produced once it
-//!   finishes. A finished job is kept for the result TTL after it finished,
-//!   and fetching does not remove it; when the budget is short, results
-//!   already fetched are dropped first, oldest first.
+//!   finishes. A principal may reserve and hold at most its share of the
+//!   budget (`error.input.code` `results_per_principal_bytes`), so one
+//!   cannot fill it for the others. A finished job is kept for the result
+//!   TTL after it finished, and fetching does not remove it; when the
+//!   budget or the principal's share is short, results already fetched are
+//!   dropped first, oldest first, the requesting principal's own before
+//!   anyone else's (a share is made room for with its own only).
 //! * **Running.** A queued job waits for a running-job permit (at most
 //!   `max_running_jobs`) and then for a render slot shared with every
 //!   synchronous call, with no queue timeout. Cancelling drops the render,
@@ -37,10 +41,23 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{JOB_MIN_CHARGE_BYTES, JobsConfig, LimitsConfig};
-use crate::render::{ErrorCode, RenderError, RenderOutput};
+use crate::render::{ErrorCode, InputDiagnostic, RenderError, RenderOutput};
 
 /// The principal of every stdio call: there is one local user.
 pub const LOCAL_PRINCIPAL: &str = "local";
+
+/// A `results_budget_exceeded` error that names the limit that failed in
+/// `error.input` (`code`, `limit_bytes`, and the size the job would reach).
+fn budget_error(message: String, code: &str, limit: usize, reached: usize) -> RenderError {
+    let mut err = RenderError::new(ErrorCode::ResultsBudgetExceeded, message);
+    err.input = Some(Box::new(InputDiagnostic {
+        code: code.to_string(),
+        token: None,
+        limit_bytes: Some(limit as u64),
+        reached_bytes: Some(reached as u64),
+    }));
+    err
+}
 
 /// Where a job is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
@@ -156,6 +173,8 @@ pub struct JobStore {
     config: JobsConfig,
     timeout: Duration,
     max_result_bytes: usize,
+    /// Bytes of the results budget one principal may hold.
+    principal_share: usize,
     running: Arc<Semaphore>,
     inner: Mutex<Inner>,
     closed: AtomicBool,
@@ -175,6 +194,7 @@ impl JobStore {
         JobStore {
             timeout: config.job_timeout(),
             max_result_bytes: JobsConfig::max_result_bytes(limits),
+            principal_share: config.principal_share_bytes(limits),
             running: Arc::new(Semaphore::new(config.running_jobs(limits))),
             config,
             inner: Mutex::new(Inner::default()),
@@ -251,30 +271,64 @@ impl JobStore {
         }
         let need = self.max_result_bytes;
         let budget = self.config.job_results_budget_bytes;
-        // Results already fetched were delivered: they make room first,
-        // oldest first.
-        while inner.charged + need > budget {
-            let oldest = inner
-                .jobs
-                .iter()
-                .filter(|(_, j)| j.fetched && j.finished.is_some())
-                .min_by_key(|(_, j)| j.finished)
-                .map(|(id, _)| id.clone());
-            let Some(id) = oldest else { break };
-            if let Some(job) = inner.jobs.remove(&id) {
-                inner.charged -= job.charge;
+        let share = self.principal_share;
+        // What the requester holds, and what is already delivered (fetched)
+        // and so can make room.
+        let (mut mine, mut mine_fetched, mut all_fetched) = (0, 0, 0);
+        for j in inner.jobs.values() {
+            let fetched = if j.fetched && j.finished.is_some() {
+                j.charge
+            } else {
+                0
+            };
+            all_fetched += fetched;
+            if j.owner == owner {
+                mine += j.charge;
+                mine_fetched += fetched;
             }
         }
-        if inner.charged + need > budget {
-            return Err(RenderError::new(
-                ErrorCode::ResultsBudgetExceeded,
+        // Refuse before dropping anything a refused job would not use.
+        let held = mine - mine_fetched;
+        if held + need > share {
+            return Err(budget_error(
+                format!(
+                    "your async jobs hold {held} bytes of results (reserved, or waiting to be \
+                     fetched), and a job reserves {need}; this server allows {share} bytes per \
+                     client, of {budget} in all; fetch or cancel a job, or wait for results to \
+                     expire"
+                ),
+                "results_per_principal_bytes",
+                share,
+                held + need,
+            ));
+        }
+        let all_held = inner.charged - all_fetched;
+        if all_held + need > budget {
+            return Err(budget_error(
                 format!(
                     "job results waiting to be fetched hold {} of this server's {budget} bytes, \
                      and a job reserves {need}; fetch or cancel a job, or wait for results to \
                      expire",
-                    inner.charged
+                    all_held
                 ),
+                "results_budget_bytes",
+                budget,
+                all_held + need,
             ));
+        }
+        // Results already fetched were delivered: they make room, oldest
+        // first. Over its share, a principal gives up its own; short of
+        // budget, its own go before anyone else's.
+        while mine + need > share {
+            let Some(freed) = Self::evict_fetched(&mut inner, owner, true) else {
+                break;
+            };
+            mine -= freed;
+        }
+        while inner.charged + need > budget {
+            if Self::evict_fetched(&mut inner, owner, false).is_none() {
+                break;
+            }
         }
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
@@ -296,6 +350,21 @@ impl JobStore {
             },
         );
         Ok((id, cancel))
+    }
+
+    /// Drop the oldest fetched, finished job: `owner`'s own, or when
+    /// `own_only` is false anyone's, `owner`'s first. Returns the bytes it
+    /// freed.
+    fn evict_fetched(inner: &mut Inner, owner: &str, own_only: bool) -> Option<usize> {
+        let id = inner
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.fetched && j.finished.is_some() && (!own_only || j.owner == owner))
+            .min_by_key(|(_, j)| (j.owner != owner, j.finished))
+            .map(|(id, _)| id.clone())?;
+        let job = inner.jobs.remove(&id)?;
+        inner.charged -= job.charge;
+        Some(job.charge)
     }
 
     /// Wait for a running-job permit.
@@ -497,6 +566,22 @@ impl JobStore {
     pub fn charged_bytes(&self) -> usize {
         self.lock().charged
     }
+
+    /// Bytes `owner`'s jobs are charged against the results budget.
+    pub fn principal_charged_bytes(&self, owner: &str) -> usize {
+        self.lock()
+            .jobs
+            .values()
+            .filter(|j| j.owner == owner)
+            .map(|j| j.charge)
+            .sum()
+    }
+
+    /// Bytes of the results budget one principal may have reserved and
+    /// held.
+    pub fn principal_share_bytes(&self) -> usize {
+        self.principal_share
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +633,8 @@ mod tests {
         let largest = JobsConfig::max_result_bytes(&limits);
         let s = store(JobsConfig {
             job_results_budget_bytes: largest * 2,
+            // One principal, the whole budget: the share is off.
+            job_results_per_principal_bytes: Some(largest * 2),
             ..JobsConfig::default()
         });
         let (a, _) = s.insert("p", "render_postscript").unwrap();
@@ -565,6 +652,155 @@ mod tests {
         assert_eq!(s.status("p", &a).unwrap_err().code, ErrorCode::UnknownJob);
         s.finish(&b, None);
         assert_eq!(s.result("p", &b).unwrap_err().code, ErrorCode::Cancelled);
+    }
+
+    /// A store with room for `n` largest results and `extra` bytes more, and
+    /// `share` largest results per principal (unset: the default share).
+    fn shared(n: usize, extra: usize, share: Option<usize>) -> (JobStore, usize) {
+        let largest = JobsConfig::max_result_bytes(&LimitsConfig::default());
+        let s = store(JobsConfig {
+            job_results_budget_bytes: largest * n + extra,
+            job_results_per_principal_bytes: share.map(|n| largest * n),
+            max_jobs_per_principal: 16,
+            max_jobs: 64,
+            ..JobsConfig::default()
+        });
+        (s, largest)
+    }
+
+    /// Start a job for `owner`.
+    fn start(s: &JobStore, owner: &str) -> String {
+        s.insert(owner, "render_postscript").unwrap().0
+    }
+
+    /// Finish `id` with a small error (charged [`SMALL`] bytes) and fetch
+    /// it, so it counts as delivered.
+    fn finish_and_fetch(s: &JobStore, owner: &str, id: &str) {
+        s.finish(id, Some(Err(RenderError::new(ErrorCode::Timeout, "slow"))));
+        assert!(s.result(owner, id).is_ok());
+    }
+
+    /// What a job finished by [`finish_and_fetch`] is charged.
+    const SMALL: usize = JOB_MIN_CHARGE_BYTES + 4;
+
+    fn is_gone(s: &JobStore, owner: &str, id: &str) -> bool {
+        s.status(owner, id)
+            .is_err_and(|e| e.code == ErrorCode::UnknownJob)
+    }
+
+    #[test]
+    fn one_principal_filling_its_share_leaves_the_others_able_to_start() {
+        // Room for four largest results; a principal may hold two.
+        let (s, largest) = shared(4, 0, Some(2));
+        assert_eq!(s.principal_share_bytes(), 2 * largest);
+        start(&s, "a");
+        start(&s, "a");
+        let e = s.insert("a", "render_postscript").unwrap_err();
+        assert_eq!(e.code, ErrorCode::ResultsBudgetExceeded);
+        let input = e.input.as_deref().expect("names the limit");
+        assert_eq!(input.code, "results_per_principal_bytes");
+        assert_eq!(input.limit_bytes, Some(2 * largest as u64));
+        assert_eq!(input.reached_bytes, Some(3 * largest as u64));
+        assert!(e.message.contains("per client"), "{e}");
+        // Others are unaffected, up to the budget.
+        start(&s, "b");
+        start(&s, "b");
+        assert_eq!(s.principal_charged_bytes("a"), 2 * largest);
+        assert_eq!(s.principal_charged_bytes("b"), 2 * largest);
+        // The server budget is its own refusal.
+        let e = s.insert("c", "render_postscript").unwrap_err();
+        assert_eq!(e.code, ErrorCode::ResultsBudgetExceeded);
+        let input = e.input.as_deref().expect("names the limit");
+        assert_eq!(input.code, "results_budget_bytes");
+        assert_eq!(input.limit_bytes, Some(4 * largest as u64));
+        assert!(!e.message.contains("per client"), "{e}");
+    }
+
+    #[test]
+    fn the_default_share_leaves_room_for_one_more_principal() {
+        let (s, largest) = shared(4, 0, None);
+        assert_eq!(s.principal_share_bytes(), 3 * largest);
+        for _ in 0..3 {
+            start(&s, "a");
+        }
+        assert_eq!(
+            s.insert("a", "render_postscript").unwrap_err().code,
+            ErrorCode::ResultsBudgetExceeded
+        );
+        start(&s, "b");
+        // A budget under two largest results has no share to speak of.
+        let (s, largest) = shared(1, largest - 1, None);
+        assert_eq!(s.principal_share_bytes(), 2 * largest - 1);
+        start(&s, "a");
+    }
+
+    #[test]
+    fn over_its_share_a_principal_gives_up_only_its_own_fetched_results() {
+        let (s, _) = shared(4, 0, Some(2));
+        let b1 = start(&s, "b");
+        finish_and_fetch(&s, "b", &b1);
+        let a1 = start(&s, "a");
+        finish_and_fetch(&s, "a", &a1);
+        start(&s, "a");
+        assert!(s.status("a", &a1).is_ok(), "fits beside the reservation");
+        start(&s, "a");
+        // Two reservations plus a1 is over the share: a1 went, b1 did not.
+        assert!(is_gone(&s, "a", &a1));
+        assert!(s.status("b", &b1).is_ok());
+        // Nothing of its own left to give: refused, and b1 still kept.
+        assert!(s.insert("a", "render_postscript").is_err());
+        assert!(s.status("b", &b1).is_ok());
+    }
+
+    #[test]
+    fn a_short_budget_evicts_the_requesters_fetched_results_before_others() {
+        // Room for three reservations and two small results.
+        let (s, largest) = shared(3, 2 * SMALL, None);
+        let a1 = start(&s, "a");
+        finish_and_fetch(&s, "a", &a1);
+        let b1 = start(&s, "b");
+        finish_and_fetch(&s, "b", &b1);
+        let c0 = start(&s, "c");
+        finish_and_fetch(&s, "c", &c0);
+        start(&s, "d");
+        let d2 = start(&s, "d");
+        assert_eq!(s.charged_bytes(), 3 * SMALL + 2 * largest);
+        // `b` asks and the budget is one small result short: its own b1
+        // goes, though a1 is older.
+        let b2 = start(&s, "b");
+        assert!(is_gone(&s, "b", &b1));
+        assert!(s.status("a", &a1).is_ok());
+        assert!(s.status("c", &c0).is_ok());
+        // `c` asks: its own c0, though a1 is older.
+        finish_and_fetch(&s, "d", &d2);
+        start(&s, "c");
+        assert!(is_gone(&s, "c", &c0));
+        assert!(s.status("a", &a1).is_ok());
+        assert!(s.status("d", &d2).is_ok());
+        // `e` has none of its own: one of the others' goes, and no more.
+        finish_and_fetch(&s, "b", &b2);
+        start(&s, "e");
+        let kept = [("a", &a1), ("d", &d2), ("b", &b2)]
+            .iter()
+            .filter(|(o, id)| s.status(o, id).is_ok())
+            .count();
+        assert_eq!(kept, 2);
+    }
+
+    #[test]
+    fn a_refused_job_drops_nothing() {
+        // Three reservations and one small result fit exactly.
+        let (s, _) = shared(3, SMALL, None);
+        let p = start(&s, "p");
+        finish_and_fetch(&s, "p", &p);
+        for owner in ["x", "y", "z"] {
+            start(&s, owner);
+        }
+        assert_eq!(
+            s.insert("w", "render_postscript").unwrap_err().code,
+            ErrorCode::ResultsBudgetExceeded
+        );
+        assert!(s.status("p", &p).is_ok(), "refused, so nothing was dropped");
     }
 
     #[test]

@@ -412,6 +412,19 @@ pub struct JobsConfig {
     #[arg(long, env = "PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES", default_value_t = 128 * 1024 * 1024)]
     pub job_results_budget_bytes: usize,
 
+    /// Bytes of the results budget one principal (one bearer token, or the
+    /// local user over stdio) may have reserved and held, so that one
+    /// principal cannot fill the budget and get every other principal's new
+    /// jobs refused. A job over the share is refused with
+    /// `results_budget_exceeded` and `error.input.code`
+    /// `results_per_principal_bytes`. Unset: the budget less one largest
+    /// result, so another principal can always start a job, or the whole
+    /// budget when that holds fewer than two largest results. Must hold at
+    /// least one largest result and be at most the budget; equal to the
+    /// budget it turns the share off.
+    #[arg(long, env = "PSCAT_MCP_JOB_RESULTS_PER_PRINCIPAL_BYTES")]
+    pub job_results_per_principal_bytes: Option<usize>,
+
     /// Serve the MCP Tasks extension (SEP-2663, `io.modelcontextprotocol/tasks`)
     /// on top of the async jobs: a client that declares the extension on a
     /// `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
@@ -433,6 +446,7 @@ impl Default for JobsConfig {
             max_jobs: 16,
             job_result_ttl_ms: 3_600_000,
             job_results_budget_bytes: 128 * 1024 * 1024,
+            job_results_per_principal_bytes: None,
             tasks: false,
         }
     }
@@ -469,6 +483,24 @@ impl JobsConfig {
             .saturating_mul(4)
             .saturating_add(limits.max_program_output_bytes)
             .saturating_add(JOB_MIN_CHARGE_BYTES)
+    }
+
+    /// The bytes of the results budget one principal may have reserved and
+    /// held: the setting, or by default the budget less one largest result
+    /// (about 117 of the 128 MiB), so that another principal can always
+    /// start a job. A budget under two largest results cannot protect a
+    /// second principal whatever the share, so then the share is the whole
+    /// budget.
+    pub fn principal_share_bytes(&self, limits: &LimitsConfig) -> usize {
+        let budget = self.job_results_budget_bytes;
+        self.job_results_per_principal_bytes.unwrap_or_else(|| {
+            let largest = Self::max_result_bytes(limits);
+            if budget >= largest.saturating_mul(2) {
+                budget - largest
+            } else {
+                budget
+            }
+        })
     }
 
     /// The limits an async job runs under: the render's, with the job
@@ -528,6 +560,21 @@ impl JobsConfig {
                  bytes: max-output-bytes as base64, plus stdout)",
                 self.job_results_budget_bytes
             ));
+        }
+        if let Some(share) = self.job_results_per_principal_bytes {
+            if share < largest {
+                return Err(format!(
+                    "job-results-per-principal-bytes ({share}) must hold at least one largest \
+                     result ({largest} bytes), or a principal could never start a job"
+                ));
+            }
+            if share > self.job_results_budget_bytes {
+                return Err(format!(
+                    "job-results-per-principal-bytes ({share}) must not exceed \
+                     job-results-budget-bytes ({}); set it equal to turn the share off",
+                    self.job_results_budget_bytes
+                ));
+            }
         }
         Ok(())
     }
@@ -803,6 +850,42 @@ mod tests {
         };
         assert_eq!(steps.job_limits(&l).max_steps, 7);
 
+        // The per-principal share: by default the budget less one largest
+        // result (the whole budget when it holds fewer than two), or the
+        // setting, which can run from one largest result up to the budget.
+        let largest = JobsConfig::max_result_bytes(&l);
+        assert_eq!(
+            j.principal_share_bytes(&l),
+            j.job_results_budget_bytes - largest
+        );
+        let tight = |budget| JobsConfig {
+            job_results_budget_bytes: budget,
+            ..j.clone()
+        };
+        assert_eq!(tight(2 * largest).principal_share_bytes(&l), largest);
+        assert_eq!(
+            tight(2 * largest - 1).principal_share_bytes(&l),
+            2 * largest - 1
+        );
+        assert_eq!(tight(largest).principal_share_bytes(&l), largest);
+        for share in [largest, j.job_results_budget_bytes] {
+            let set = JobsConfig {
+                job_results_per_principal_bytes: Some(share),
+                ..j.clone()
+            };
+            assert_eq!(set.principal_share_bytes(&l), share);
+            assert!(set.check(&l).is_ok(), "{share}");
+        }
+        // Off with jobs off, like every job setting.
+        assert!(
+            JobsConfig {
+                job_results_per_principal_bytes: Some(0),
+                ..JobsConfig::default()
+            }
+            .check(&l)
+            .is_ok()
+        );
+
         // Jobs stay below the render slots, and the budget holds one result.
         for bad in [
             JobsConfig {
@@ -811,6 +894,18 @@ mod tests {
             },
             JobsConfig {
                 job_results_budget_bytes: JobsConfig::max_result_bytes(&l) - 1,
+                ..j.clone()
+            },
+            JobsConfig {
+                job_results_per_principal_bytes: Some(0),
+                ..j.clone()
+            },
+            JobsConfig {
+                job_results_per_principal_bytes: Some(JobsConfig::max_result_bytes(&l) - 1),
+                ..j.clone()
+            },
+            JobsConfig {
+                job_results_per_principal_bytes: Some(j.job_results_budget_bytes + 1),
                 ..j.clone()
             },
             JobsConfig {

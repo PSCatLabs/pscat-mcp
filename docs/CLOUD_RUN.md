@@ -104,7 +104,9 @@ them on only for a single instance whose CPU stays allocated: one machine,
 or a Cloud Run service with `--max-instances 1`, `--min-instances 1` and
 CPU always allocated (and sized for `PSCAT_MCP_MAX_RUNNING_JOBS` workers of
 up to the memory limit each, beside the synchronous ones; results add up to
-`PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`). A hosted design (a shared job and
+`PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`, of which one token may hold
+`PSCAT_MCP_JOB_RESULTS_PER_PRINCIPAL_BYTES`: the budget less one largest
+result by default, so lower it when several tokens share the service). A hosted design (a shared job and
 result store, and a place the render gets CPU, such as a Cloud Run Job) is
 tracked in the `pscat-cloud` brief, not here.
 
