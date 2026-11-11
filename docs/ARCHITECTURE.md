@@ -382,7 +382,10 @@ a task:
 A threshold of zero is the old behaviour: every eligible call is a job at
 once (`start_job`, queued for a running-job permit with no queue timeout).
 `JobsConfig::check` requires the threshold to be below the sync deadline
-when `--tasks` is on. The two other options in #57 were rejected: a
+when `--tasks` is on, and, with a threshold above zero, the job limits to be
+no tighter than the sync ones (job deadline at least the sync deadline, job
+step limit at least the sync one, 0 meaning none): a quick call runs under
+them and must not be held to less than a synchronous call. The two other options in #57 were rejected: a
 per-call opt-in has no place in the protocol (the server decides; the
 client sends no preference), and a smaller reservation for task-originated
 jobs would still put quick calls through the caps, the running-job share

@@ -429,7 +429,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
 | `PSCAT_MCP_TASKS` | `false` | also serve the MCP Tasks extension on top of the jobs (needs async jobs) |
-| `PSCAT_MCP_TASK_AFTER_MS` | 2000 | with `PSCAT_MCP_TASKS`: how long a Tasks client's call runs (from when its worker starts) before it becomes a task; a quicker call returns its result directly and never touches the job caps or budget. Must be below `PSCAT_MCP_RENDER_TIMEOUT_MS`; 0 makes every eligible call a task at once |
+| `PSCAT_MCP_TASK_AFTER_MS` | 2000 | with `PSCAT_MCP_TASKS`: how long a Tasks client's call runs (from when its worker starts) before it becomes a task; a quicker call returns its result directly and never touches the job caps or budget. Must be below `PSCAT_MCP_RENDER_TIMEOUT_MS`; 0 makes every eligible call a task at once. Above 0, the job limits must be no tighter than the sync ones (`PSCAT_MCP_JOB_TIMEOUT_MS` ≥ `PSCAT_MCP_RENDER_TIMEOUT_MS`, the job step limit ≥ `PSCAT_MCP_MAX_STEPS`), since such a call's worker starts under them |
 | `PSCAT_MCP_JOB_TIMEOUT_MS` | 600000 | wall-clock deadline of one job's worker (SIGKILL after it); PSCat's time limit and the CPU rlimit follow it |
 | `PSCAT_MCP_JOB_MAX_STEPS` | 25000000000 (0 if `PSCAT_MCP_MAX_STEPS` is 0) | PSCat step limit of a job |
 | `PSCAT_MCP_MAX_RUNNING_JOBS` | half the render slots, at least 1 | jobs running at once (more wait queued); must stay below `PSCAT_MCP_MAX_CONCURRENT_RENDERS` (1 with one slot) |

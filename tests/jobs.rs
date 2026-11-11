@@ -774,11 +774,14 @@ async fn job_tools_are_listed_only_when_jobs_are_on() {
 
 // ------------------------------------------------------- the Tasks extension
 
-/// The Tasks extension on, with calls becoming tasks after `after_ms`.
+/// The Tasks extension on, with calls becoming tasks after `after_ms`. A
+/// Tasks call starts under the job limits, so the job deadline is at least
+/// every sync deadline here (`relaxed()`'s 20 s).
 fn tasks_after(after_ms: u64) -> JobsConfig {
     JobsConfig {
         tasks: true,
         task_after_ms: after_ms,
+        job_timeout_ms: 30_000,
         ..jobs()
     }
 }
