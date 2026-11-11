@@ -346,6 +346,16 @@ fn title_of(path: &str, text: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// `a`, `a or b`, `a, b or c` (each in backticks).
+fn either(items: &[&str]) -> String {
+    let quoted: Vec<String> = items.iter().map(|i| format!("`{i}`")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// The note this server puts before PSCat's text for the file at `path`.
 fn note(path: &str, facts: &ServerFacts) -> String {
     let src = source();
@@ -404,6 +414,16 @@ fn note(path: &str, facts: &ServerFacts) -> String {
          `photo-etch`, the window) have no equivalent here."
             .to_string(),
     );
+    for (command, tool) in [
+        ("pscat handwrite", "handwrite"),
+        ("pscat chalk", "chalkboard_math"),
+        ("pscat sheet", "review_sheet"),
+    ] {
+        if facts.has(tool) {
+            let last = lines.last_mut().expect("a line");
+            let _ = write!(last, " `{command}` is the `{tool}` tool.");
+        }
+    }
     lines.push(
         "- Pages come back inline in the tool result. There is no `out_path`, nothing is \
          saved, and there is no file path to show the user."
@@ -422,13 +442,8 @@ fn note(path: &str, facts: &ServerFacts) -> String {
         .collect();
     if !lacking.is_empty() {
         lines.push(format!(
-            "- `render_postscript` has no {} argument{}.",
-            lacking
-                .iter()
-                .map(|a| format!("`{a}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if lacking.len() == 1 { "" } else { "s" },
+            "- `render_postscript` has no {} argument.",
+            either(&lacking)
         ));
     }
     lines.push(format!(
@@ -687,7 +702,10 @@ mod tests {
         assert!(n.contains("`review_sheet`"));
         assert!(n.contains("`start_render`"));
         assert!(!n.contains("`render_postscript` are not"));
-        assert!(n.contains("no `out_path`, `bbox` arguments"));
+        assert!(n.contains("no `out_path` or `bbox` argument"));
+        assert!(!n.contains("`pscat chalk` is"));
+        assert_eq!(either(&["a", "b", "c"]), "`a`, `b` or `c`");
+        assert_eq!(either(&["a"]), "`a`");
         assert!(!n.contains("`bands`, "));
         assert!(n.contains("20 s"));
     }

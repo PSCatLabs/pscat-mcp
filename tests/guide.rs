@@ -93,8 +93,30 @@ fn toml_tag() -> String {
         .to_string()
 }
 
-/// The pinned PSCat checkout, as cargo resolves it.
+/// The pinned PSCat checkout. Cargo keeps a git dependency in
+/// `$CARGO_HOME/git/checkouts/<name>-<hash>/<first 7 of the commit>`, so it
+/// is looked up there first; `cargo metadata` is the fallback, because it
+/// can wait a long time on the shared package-cache lock while another
+/// cargo runs.
 fn pscat_checkout() -> PathBuf {
+    let commit = lock_commit();
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    if let Some(home) = home
+        && let Ok(entries) = std::fs::read_dir(home.join("git/checkouts"))
+    {
+        for e in entries.flatten() {
+            let dir = e.path().join(&commit[..7]);
+            if e.file_name().to_string_lossy().starts_with("pscat-")
+                && dir.join("plugin/skills").is_dir()
+                && std::fs::read_to_string(dir.join("Cargo.toml"))
+                    .is_ok_and(|t| t.contains("name = \"pscat\""))
+            {
+                return dir;
+            }
+        }
+    }
     let out = std::process::Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--locked", "--offline"])
         .current_dir(repo())
@@ -112,6 +134,11 @@ fn pscat_checkout() -> PathBuf {
         .iter()
         .find(|p| p["name"] == "pscat")
         .expect("pscat package");
+    assert!(
+        pkg["source"].as_str().is_some_and(|s| s.ends_with(&commit)),
+        "cargo resolves pscat to {}, not {commit}",
+        pkg["source"]
+    );
     Path::new(pkg["manifest_path"].as_str().unwrap())
         .parent()
         .unwrap()
