@@ -1,0 +1,109 @@
+{
+  "id": "curl-smoke",
+  "client": {
+    "name": "curl",
+    "version": null
+  },
+  "obtained": "synthesized",
+  "captured_on": "2026-11-10",
+  "how": "hand-written to match what scripts/container-smoke.sh sends with curl: Accept lists both types, protocol 2025-06-18, a notification, a render and a PDF render",
+  "requests": [
+    {
+      "name": "initialize",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "container-smoke",
+            "version": "1.0"
+          }
+        }
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-06-18"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+      }
+    },
+    {
+      "name": "tools/call render_postscript png",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-06-18"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "name": "render_postscript",
+          "arguments": {
+            "source": "%!PS\n% 200x100 page: background, red circle, green square, blue triangle\n0.95 0.95 1.0 setrgbcolor 0 0 200 100 rectfill\n1 0 0 setrgbcolor newpath 40 50 30 0 360 arc closepath fill\n0 0.6 0 setrgbcolor 80 20 60 60 rectfill\n0 0 1 setrgbcolor newpath 150 20 moveto 190 20 lineto 170 80 lineto closepath fill\nshowpage\n",
+            "format": "png",
+            "width": 200,
+            "height": 100
+          }
+        }
+      }
+    },
+    {
+      "name": "tools/call render_postscript pdf",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-06-18"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+          "name": "render_postscript",
+          "arguments": {
+            "source": "%!PS\n% 200x100 page: background, red circle, green square, blue triangle\n0.95 0.95 1.0 setrgbcolor 0 0 200 100 rectfill\n1 0 0 setrgbcolor newpath 40 50 30 0 360 arc closepath fill\n0 0.6 0 setrgbcolor 80 20 60 60 rectfill\n0 0 1 setrgbcolor newpath 150 20 moveto 190 20 lineto 170 80 lineto closepath fill\nshowpage\n",
+            "format": "pdf",
+            "width": 200,
+            "height": 100
+          }
+        }
+      }
+    }
+  ]
+}

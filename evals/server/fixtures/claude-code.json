@@ -1,0 +1,159 @@
+{
+  "id": "claude-code",
+  "client": {
+    "name": "claude-code",
+    "version": "2.1.322"
+  },
+  "obtained": "real-capture",
+  "how": "claude -p 2.1.322 (one prompt, one get_renderer_info call, claude.ai subscription login behind the evals/agent/guard.py billing guard) against serve-http --capture-file; evals/server/record_claude.py",
+  "captured_on": "2026-11-10",
+  "requests": [
+    {
+      "name": "server/discover",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-method": "server/discover",
+        "mcp-protocol-version": "2026-07-28",
+        "user-agent": "claude-code/2.1.322 (sdk-cli)"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": "server-discover-probe-1",
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.322",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              },
+              "extensions": {
+                "io.modelcontextprotocol/tasks": {}
+              }
+            }
+          }
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/list",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-method": "tools/list",
+        "mcp-protocol-version": "2026-07-28",
+        "user-agent": "claude-code/2.1.322 (sdk-cli)"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "method": "tools/list",
+        "jsonrpc": "2.0",
+        "id": 0,
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.322",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              },
+              "extensions": {
+                "io.modelcontextprotocol/tasks": {}
+              }
+            }
+          }
+        }
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    },
+    {
+      "name": "tools/call get_renderer_info",
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-method": "tools/call",
+        "mcp-name": "get_renderer_info",
+        "mcp-protocol-version": "2026-07-28",
+        "user-agent": "claude-code/2.1.322 (sdk-cli)"
+      },
+      "authorization": {
+        "scheme": "Bearer"
+      },
+      "body": {
+        "method": "tools/call",
+        "params": {
+          "name": "get_renderer_info",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.322",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            },
+            "claudecode/toolUseId": "toolu_scrubbed",
+            "progressToken": 1
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 1
+      },
+      "observed": {
+        "status": 200,
+        "content_type": "application/json"
+      }
+    }
+  ],
+  "note": "Claude Code 2.1.322 speaks the MCP 2026-07-28 stateless protocol: no initialize and no session, a server/discover probe first, then tools/list and tools/call, each with MCP-Protocol-Version, Mcp-Method and Mcp-Name headers and the client info and capabilities in params._meta. A claude -p run opens no GET stream and sends no DELETE."
+}

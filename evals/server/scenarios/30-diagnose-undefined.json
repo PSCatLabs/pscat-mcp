@@ -1,0 +1,54 @@
+{
+  "id": "diagnose-undefined",
+  "title": "Scenario 3: validate_postscript pinpoints an undefined operator; the corrected program is valid",
+  "origin": "examples/agent-scenarios.md section 3",
+  "steps": [
+    {
+      "label": "shw is undefined, line 4",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) shw\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n"
+      },
+      "result": {
+        "text_contains": [
+          "Not valid",
+          "shw"
+        ],
+        "structured": {
+          "ok": true,
+          "valid": false,
+          "syntax.ok": true,
+          "execution_error.name": "undefined",
+          "execution_error.limit": null,
+          "execution_error.report": {
+            "contains": [
+              "OffendingCommand: shw",
+              "Line: 4"
+            ]
+          },
+          "lint.0.check": "blank-page"
+        }
+      }
+    },
+    {
+      "label": "the corrected program is valid",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) show\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n"
+      },
+      "result": {
+        "text_contains": [
+          "Valid: the program ran without error and produced 1 page(s)."
+        ],
+        "structured": {
+          "ok": true,
+          "valid": true,
+          "page_count": 1,
+          "execution_error": {
+            "absent": true
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "diagnose-syntax",
+  "title": "Scenario 3 variant: an unterminated procedure is a syntaxerror with a syntax message",
+  "origin": "examples/agent-scenarios.md section 3 (variant)",
+  "steps": [
+    {
+      "label": "unterminated procedure",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\n72 72 moveto 100 100 lineto stroke\n{ 1 2 add\nshowpage\n"
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "valid": false,
+          "syntax.ok": false,
+          "syntax.error": {
+            "contains": "unterminated procedure"
+          },
+          "execution_error.name": "syntaxerror",
+          "execution_error.report": {
+            "contains": [
+              "syntaxerror",
+              "Line: 5"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+{
+  "id": "invalid-request",
+  "title": "Bad arguments get the structured invalid_request envelope, not a transport error",
+  "origin": "error code list in examples/agent-scenarios.md; tests/mcp_stdio.rs",
+  "steps": [
+    {
+      "label": "empty source",
+      "tool": "render_postscript",
+      "args": {
+        "source": ""
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": "source is empty"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "blank source",
+      "tool": "render_postscript",
+      "args": {
+        "source": "   \n"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "missing source",
+      "tool": "render_postscript",
+      "args": {
+        "width": 5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "missing field `source`"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "source of the wrong type",
+      "tool": "render_postscript",
+      "args": {
+        "source": 5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "expected a string"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "negative width",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n",
+        "width": -5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request",
+          "error.message": {
+            "contains": "expected u32"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "validate: empty source",
+      "tool": "validate_postscript",
+      "args": {
+        "source": ""
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "invalid_request"
+        },
+        "renders_executed": 0,
+        "text_contains": [
+          "Validation could not run"
+        ]
+      }
+    }
+  ]
+}

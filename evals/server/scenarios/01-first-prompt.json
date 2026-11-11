@@ -1,0 +1,159 @@
+{
+  "id": "first-prompt",
+  "title": "LOCAL_TESTING first prompt: renderer info, PNG/SVG/PDF, validate a typo",
+  "origin": "docs/LOCAL_TESTING.md section 5, steps 1-4 (step 5, the runaway loop, is runaway-steps / runaway-time / runaway-timeout)",
+  "steps": [
+    {
+      "label": "get_renderer_info",
+      "tool": "get_renderer_info",
+      "args": {},
+      "result": {
+        "content_types": [
+          "text"
+        ],
+        "structured": {
+          "server_version": "{{server_version}}",
+          "renderer.engine": "pscat",
+          "renderer.version": "{{pscat_version}}",
+          "renderer.revision": "{{pscat_revision}}",
+          "limits.max_source_bytes": 262144,
+          "limits.max_side_px": 8000
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "PNG 300x200",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n",
+        "width": 300,
+        "height": 200
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "forbid_content_types": [
+          "resource"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "mime_type": "image/png",
+          "page_count": 1,
+          "artifacts.0.width_px": 300,
+          "artifacts.0.height_px": 200
+        },
+        "png": {
+          "width": 300,
+          "height": 200,
+          "pixels": [
+            {
+              "x": 5,
+              "y": 5,
+              "rgb": [
+                26,
+                51,
+                153
+              ]
+            },
+            {
+              "x": 150,
+              "y": 90,
+              "rgb": [
+                255,
+                77,
+                51
+              ]
+            }
+          ]
+        },
+        "renders_executed": 1
+      }
+    },
+    {
+      "label": "SVG is an embedded resource",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n",
+        "format": "svg"
+      },
+      "result": {
+        "content_types": [
+          "resource:image/svg+xml"
+        ],
+        "forbid_content_types": [
+          "image"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "svg",
+          "mime_type": "image/svg+xml"
+        },
+        "resource": {
+          "mime": "image/svg+xml",
+          "starts_with": [
+            "<?xml",
+            "<svg"
+          ],
+          "contains": [
+            "<svg"
+          ]
+        }
+      }
+    },
+    {
+      "label": "PDF is an embedded resource",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill\n1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill\n1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show\nshowpage\n",
+        "format": "pdf"
+      },
+      "result": {
+        "content_types": [
+          "resource:application/pdf"
+        ],
+        "forbid_content_types": [
+          "image"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "pdf",
+          "mime_type": "application/pdf"
+        },
+        "resource": {
+          "mime": "application/pdf",
+          "starts_with": "%PDF-",
+          "contains": [
+            "%%EOF"
+          ]
+        }
+      }
+    },
+    {
+      "label": "validate keeps the typo",
+      "tool": "validate_postscript",
+      "args": {
+        "source": "%!PS\n100 100 moveto\n200 200 liento\nstroke showpage\n"
+      },
+      "result": {
+        "text_contains": [
+          "liento"
+        ],
+        "structured": {
+          "ok": true,
+          "valid": false,
+          "execution_error.name": "undefined",
+          "execution_error.report": {
+            "contains": [
+              "OffendingCommand: liento",
+              "Line: 3"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

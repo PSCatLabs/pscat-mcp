@@ -82,5 +82,6 @@ else isolates its system calls.
 Logs are JSON on stderr: one line per request with `request_id`, method,
 path, status and latency, and one line per render with source byte count,
 steps, elapsed ms, pages and failure flag. PostScript source and tokens are
-never logged. No per-user or per-program labels are emitted, so cardinality
+never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
+which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality
 stays low.

@@ -72,3 +72,14 @@ jobs:
       - uses: actions/checkout@v7
       - run: python3 --version
       - run: python3 -I -m unittest discover -s evals/agent -t evals/agent -v
+
+  # The server-layer evals (evals/server/scenarios, recorded-traffic replay)
+  # run inside `cargo test` in the test jobs above, and against the container
+  # image in container.yml. This job runs the offline unit tests of the
+  # recorder's converter (evals/server/capture_to_fixture.py).
+  server-eval-offline:
+    name: server eval offline tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -I -m unittest discover -s evals/server -t evals/server -v

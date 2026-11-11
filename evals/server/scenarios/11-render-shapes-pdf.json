@@ -1,0 +1,36 @@
+{
+  "id": "render-shapes-pdf",
+  "title": "Scenario 1 variant: the same program as a PDF (no page field: one document holds every page)",
+  "origin": "examples/agent-scenarios.md section 1 (variant)",
+  "steps": [
+    {
+      "label": "PDF",
+      "tool": "render_postscript",
+      "args": {
+        "source": "{{file:examples/shapes.ps}}",
+        "format": "pdf"
+      },
+      "result": {
+        "content_types": [
+          "resource:application/pdf"
+        ],
+        "forbid_content_types": [
+          "image"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "pdf",
+          "artifacts.0.page": {
+            "absent": true
+          },
+          "artifacts.0.mime_type": "application/pdf"
+        },
+        "resource": {
+          "mime": "application/pdf",
+          "starts_with": "%PDF-",
+          "min_bytes": 500
+        }
+      }
+    }
+  ]
+}

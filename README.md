@@ -218,6 +218,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level |
+| `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 
 ## Authentication
 
@@ -279,10 +280,13 @@ control is enforced by PSCat and which by the server.
   static checker beyond its tokenizer, so validation runs the program under
   the same limits.
 * **Client testing.** Tested with the rmcp 3.9 client over stdio and HTTP
-  (it negotiates 2025-11-25), and with raw JSON-RPC over stateless HTTP at
+  (it negotiates 2025-11-25), with raw JSON-RPC over stateless HTTP at
   2025-03-26, 2025-06-18 and 2026-07-28 (sessionless, with `_meta` and the
-  `Mcp-Method`/`Mcp-Name` headers that version requires). Not yet tested
-  with ChatGPT, Claude, Gemini, Muse or MCP Inspector.
+  `Mcp-Method`/`Mcp-Name` headers that version requires), and with Claude
+  Code 2.1.322 over HTTP (its traffic is recorded in
+  `evals/server/fixtures/` and replayed in CI; it speaks 2026-07-28). Not
+  yet tested with Codex (its fixture is synthesized), ChatGPT, Gemini, Muse
+  or MCP Inspector.
 * **`Accept` header.** HTTP clients must accept both `application/json` and
   `text/event-stream`, as the spec requires. rmcp answers 406 otherwise.
 
@@ -293,7 +297,9 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all              # unit + integration; all use the real PSCat worker
 scripts/container-smoke.sh    # needs Docker
+scripts/container-eval.sh     # server-layer evals against the image; needs Docker
 scripts/agent-eval.sh --test  # offline unit tests of the agent evals
+python3 -I -m unittest discover -s evals/server -t evals/server   # recorder tests
 ```
 
 GitHub Actions runs these on every pull request and push to `main`:
@@ -302,8 +308,10 @@ GitHub Actions runs these on every pull request and push to `main`:
   * fmt and clippy;
   * the test suite on Linux and macOS;
   * a `cargo check` with the minimum Rust version in `Cargo.toml`;
-  * the agent evals' offline unit tests (no model).
-* `.github/workflows/container.yml`: the amd64 image plus the smoke test.
+  * the agent evals' offline unit tests (no model);
+  * the offline unit tests of the server evals' recorder.
+* `.github/workflows/container.yml`: the amd64 image, the smoke test, and
+  the server-layer evals against that image.
 
 | Suite | Covers |
 |---|---|
@@ -311,6 +319,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list (one `EXPECTED_TOOLS` table), annotations and schemas, the art catalog (index, kind pages and named entries with size ceilings, argument errors, no server paths, load lines usable in a render), PNG image content with pixel checks, SVG/PDF resources, PostScript errors without images, pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render), client disconnect kills the worker and frees the slot |
+| `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Exact assertions on `isError` and the error code, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
+| `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture records #17 as a known failure that fails the test when it is fixed. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 
 ## License

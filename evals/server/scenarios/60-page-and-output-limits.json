@@ -1,0 +1,74 @@
+{
+  "id": "page-and-output-limits",
+  "title": "too_many_pages and output_too_large with small PSCAT_MCP_MAX_PAGES / PSCAT_MCP_MAX_OUTPUT_BYTES",
+  "origin": "error code list in examples/agent-scenarios.md",
+  "server_env": {
+    "PSCAT_MCP_MAX_PAGES": "2",
+    "PSCAT_MCP_MAX_OUTPUT_BYTES": "6000"
+  },
+  "steps": [
+    {
+      "label": "three pages, two allowed",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n{{pages:3}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "too_many_pages",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "too_many_pages",
+          "error.message": "the program produced 3 pages; at most 2 are returned"
+        }
+      }
+    },
+    {
+      "label": "a PNG over the output cap",
+      "tool": "render_postscript",
+      "args": {
+        "source": "{{file:examples/shapes.ps}}",
+        "width": 400,
+        "height": 300
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "output_too_large",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.code": "output_too_large",
+          "error.message": {
+            "contains": "the rendered output is over 6000 bytes"
+          }
+        }
+      }
+    },
+    {
+      "label": "a small PNG is still returned",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nshowpage\n"
+      },
+      "result": {
+        "content_types": [
+          "image:image/png"
+        ],
+        "png": {
+          "width": 612,
+          "height": 792
+        },
+        "structured": {
+          "ok": true
+        }
+      }
+    }
+  ]
+}

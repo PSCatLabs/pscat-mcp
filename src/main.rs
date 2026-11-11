@@ -1,7 +1,9 @@
 //! `pscat-mcp-server`: `serve-http`, `serve-stdio`, and the internal
 //! `render-worker` subcommand.
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
+use pscat_mcp::capture::CaptureConfig;
 use pscat_mcp::config::{HttpConfig, LimitsConfig, WorkerConfig};
 use pscat_mcp::telemetry::{self, LogFormat};
 
@@ -34,6 +36,8 @@ enum Command {
         limits: LimitsConfig,
         #[command(flatten)]
         worker: WorkerConfig,
+        #[command(flatten)]
+        capture: CaptureConfig,
         /// Log format.
         #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Json)]
         log_format: LogFormat,
@@ -69,10 +73,25 @@ fn main() -> std::process::ExitCode {
             http,
             limits,
             worker,
+            capture,
             log_format,
         } => run(log_format, async move {
             let service = pscat_mcp::build_service(limits, &worker)?;
-            pscat_mcp::http::serve(http, service).await
+            let capture = match &capture.capture_file {
+                Some(path) => {
+                    pscat_mcp::http::check_capture_bind(&http)?;
+                    let file = pscat_mcp::capture::Capture::open(path)
+                        .with_context(|| format!("opening the capture file {}", path.display()))?;
+                    tracing::warn!(
+                        path = %path.display(),
+                        "CAPTURE MODE: request heads (no tokens) and bodies are written to this file; \
+                         for local debugging only"
+                    );
+                    Some(std::sync::Arc::new(file))
+                }
+                None => None,
+            };
+            pscat_mcp::http::serve_with_capture(http, service, capture).await
         }),
         Command::ServeStdio {
             limits,

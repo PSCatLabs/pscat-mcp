@@ -84,6 +84,21 @@ jobs:
       - name: Container smoke test
         run: SKIP_BUILD=1 IMAGE=pscat-mcp:ci scripts/container-smoke.sh
 
+      # The server-layer evals (evals/server/scenarios) against the image
+      # that was just smoke-tested. They are an rmcp client test, so this
+      # needs a Rust toolchain; the cache keeps the build to the test crate.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Container server evals
+        run: SKIP_BUILD=1 IMAGE=pscat-mcp:ci scripts/container-eval.sh
+      - name: Upload eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-evals-container
+          path: target/eval/
+          if-no-files-found: ignore
+
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
