@@ -494,7 +494,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | File reads | PSCat read roots: only compiled-in `lib/` | — |
 | Open files | kernel `RLIMIT_NOFILE` | 64 |
 | Output bytes | worker (artifact cap) + server (stdout cap, kill) | 8 MiB |
-| SVG bytes (all pages together; at most the output cap) | worker, from the SVG text's length before any page is encoded or returned: `output_too_large` with `error.input.code` `svg_bytes` | 256 KiB |
+| SVG bytes (all pages together; at most the output cap) | worker, from the SVG text's length before any page is encoded or returned: `output_too_large` with `error.input.code` `svg_bytes` | 128 KiB |
 | Pages returned | worker | 10 |
 | Program stdout returned | worker (truncates) | 16 KiB |
 | Concurrent renders | server semaphore, queue timeout → `server_busy` | min(CPUs, 4) |

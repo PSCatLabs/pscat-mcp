@@ -315,6 +315,8 @@ scripts/agent-eval.sh              # every case, stdio and HTTP, once
 | `--include-expensive` | Also run cases tagged `expensive` (scenario 5c pastes about 285 KB of PostScript). |
 | `--server PATH` | Server binary. Default `target/release/pscat-mcp-server`. |
 | `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case, and write `RUN_DIR/recheck.json`. No agent runs. The HTTP POST check and an error (guard stop, timeout) keep their live result. |
+| `--claude-env NAME=VALUE` | Pass one tuning variable to the Claude Code child (repeatable). Only `MAX_MCP_OUTPUT_TOKENS`, a positive integer. The child's environment is otherwise the guard's allowlist, so a value in your shell never reaches it. The value is recorded in `summary.json` (`claude_env`). |
+| `--save-claude-state DIR` | Copy the folder Claude Code keeps for each run (a tool result it saved as a file) to `DIR/<run name>` before the runner deletes it. Keep `DIR` outside the repository. |
 | `--max-sessions N` | Refuse to start when the plan has more than N agent sessions (default 120). The cap is per invocation; keep your own count across runs. |
 | `--compare BASELINE` | After the table, list the rows that regressed, improved or stayed the same against a baseline JSON, and those of cases the baseline has no row for as `unbaselined` (see below). Works with `--recheck` too. |
 | `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions and model, agree on the file of every case they cover, and none may have stopped early. `--rechecked` takes each run's `recheck.json` instead; `--server-commit SHA` names the commit the binary was built from. |
@@ -657,6 +659,11 @@ An embedded resource becomes a text block,
 `Binary content (application/pdf, 3.4KB) saved to <path>`. And the
 `structuredContent` JSON replaces the server's text summary. The checks
 read those forms.
+A large result takes other forms, shown in
+[section 11](#11-what-clients-do-with-large-tool-results). An error result
+reaches the model as its text only, with no `structuredContent`, so a check
+on an error reads `text_contains`, not `structured`
+(`54-svg-over-cap.json`).
 
 ## 10. Server-layer evals
 
@@ -854,3 +861,110 @@ replaces tool-use ids, and refuses to write a fixture containing a
 Not recorded yet: Codex (not run), ChatGPT, Claude.ai, Gemini, MCP
 Inspector. Codex 0.167.1's binary contains the strings `Mcp-Method`,
 `Mcp-Name` and `2026-07-28`, so it probably behaves like Claude Code.
+
+## 11. What clients do with large tool results
+
+An SVG comes back from `render_postscript` as an embedded **text** resource,
+so a client may hand it to the model as text, shorten it, save it to a file
+or refuse it. A PDF is an embedded **blob**. Issue #64 measured Claude Code
+and read the documentation and source for the others, to choose
+`PSCAT_MCP_MAX_SVG_BYTES` (default 128 KiB; see `DEFAULT_MAX_SVG_BYTES` in
+`src/config.rs`). Rows marked **measured** come from live sessions (below);
+rows marked **docs only** were not run.
+
+### Results
+
+| Client | Result | Size | What the model gets | Basis |
+|---|---|---|---|---|
+| Claude Code 2.1.322 | SVG text | 40.5 KB | The text inline: `[Resource from pscat-render at urn:...] <svg ...>` plus the `structuredContent` JSON as a second block. About 21,400 tokens (1.9 characters per token for this SVG). | measured |
+| Claude Code 2.1.322 | SVG text | 47.5 KB, `MAX_MCP_OUTPUT_TOKENS=200000` | Inline, as above (47,603 characters). | measured |
+| Claude Code 2.1.322 | SVG text | 101 KB, 252 KB, 1.0 MB, 5.0 MB | A text of about 1.9k characters, with `is_error` unset: `Error: result (109,401 characters) exceeds maximum allowed tokens. Output has been saved to <path>.txt`, then `Format: JSON array with schema: [{type: string, text: string}]`, `Use jq to make structured queries ...` and a block of instructions to read the file. The count is the size of the whole result (272,133 for 252 KB, 1,085,923 for 1.0 MB, 5,426,004 for 5.0 MB). No SVG text. | measured |
+| Claude Code 2.1.322 | SVG text | 101 KB, `MAX_MCP_OUTPUT_TOKENS=200000` | Still not inline, with another note: `<persisted-output>`, `Output too large (106.8KB). Full output saved to: <path>.json`, `Preview (first 2KB):` and the first 2 KB of the result. | measured |
+| Claude Code 2.1.322 | PDF blob | 1.08 MB | `[Resource from pscat-render at urn:...] Binary content (application/pdf, 1MB) saved to <path>.pdf` plus the `structuredContent` JSON. The file is the PDF itself (1,080,989 bytes, `file`: PDF 1.4). | measured |
+| Claude Code 2.1.322 | `output_too_large` (default server, 1.0 MB SVG) | | The error text only: `Render failed (output_too_large): the SVG is 1007302 bytes ... use png or pdf, lower the page size, or simplify the program` and `Input error: svg_bytes`. Not `structuredContent`. The model offered PNG/PDF or fewer marks (`svg-over-cap`, stdio and HTTP). | measured |
+| Claude Code (documented) | text | over 50,000 characters | Saved to a file whatever `MAX_MCP_OUTPUT_TOKENS` says; a tool can raise this with `_meta["anthropic/maxResultSizeChars"]` in `tools/list`, up to 500,000 characters. The token limit (25,000 by default, warning at 10,000) applies to the rest and to images. | docs only (<https://code.claude.com/docs/en/mcp>, "MCP output limits and warnings"); the `_meta` override not tried |
+| Codex (openai/codex `main`, read 2026-11-11) | any, when the result has `structuredContent` | any | Only the serialized `structuredContent` (`CallToolResult::as_function_call_output_payload` in `protocol/src/models.rs` returns it in place of the content blocks). The SVG text never reaches the model: it sees the metadata JSON (about 360 bytes) and no markup. Without `structuredContent`, the content items. | docs only (source) |
+| Codex | tool output in the model's history | model's truncation policy | Cut in the middle to the model's `truncation_policy` times 1.2: `tokens: 10000` for the listed models, `bytes: 10000` if a model sets none (about 48 KB for a text); the cut text starts `Warning: truncated output (original token count: N)`. `tool_output_token_limit` in `config.toml` changes it. | docs only (source: `models-manager/src/model_info.rs`, `utils/output-truncation`, `core/src/tools/context.rs`) |
+| Claude.ai, Claude Desktop | tool result | about 150,000 characters | The connector docs give "~150,000 characters" as the maximum tool result size; the connector FAQ says "25,000 tokens". What happens above is not documented. | docs only (<https://claude.com/docs/connectors/building>, connector FAQ) |
+| ChatGPT (connectors, developer mode) | tool result | not published | No limit in OpenAI's docs. Forum reports show `Response output was truncated at a line boundary to fit the tool response budget.` OpenAI support has asked affected users whether a `structuredContent`-only result helped. | docs only (OpenAI developer community, July 2026) |
+
+What this shows:
+
+* **Claude Code's limit is in characters as well as tokens.** A text result
+  over about 50,000 characters is saved to a file at every size measured,
+  from 101 KB to 5 MB, and raising `MAX_MCP_OUTPUT_TOKENS` to 200000 does not
+  change that (the result was still saved, with a different note). With the
+  default 25,000 tokens, a dense SVG hits the token limit at about the same
+  size: 40.5 KB was about 21,400 tokens. A text SVG therefore reaches Claude
+  Code's model inline only up to about 45 to 50 KB.
+* **A saved file is not nothing.** The SVG is in the file, as the first
+  block of a JSON array (`jq -r '.[0].text'`, minus the
+  `[Resource from ... at ...] ` prefix), and a Claude Code session with a
+  `Read` tool is told to read it. But in the measured sessions (no built-in
+  tools) the model had only the note, and the file is one JSON-escaped line
+  of megabytes.
+* **A blob is saved as a real file.** The PDF came back as the PDF itself.
+  An SVG blob (`image/svg+xml`) has not been tried; that is #63.
+* **Codex does not show SVG text to the model at all** while the server sets
+  `structuredContent`. That is a consequence of how `structuredContent` is
+  handled, not of any size.
+* The server's cap therefore decides little in Claude Code above 50 KB (a
+  file either way), and a cap near 48 KB would turn a saved file into an
+  error. It matters for a client that returns the text up to a larger limit.
+  The only such limit found is claude.ai's documented 150,000 characters; a
+  result is SVG plus about 8 % JSON escaping plus about 400 bytes of
+  `structuredContent`, so the default is 128 KiB (about 142,000 characters).
+
+### How the measurements were made
+
+Claude Code 2.1.322, model `claude-sonnet-5-5`, server 0.1.0 with PSCat
+0.7.0-rc.4 (`df39114f1223`), over stdio, on the claude.ai Max subscription
+(the billing guard's pre-flight read `max`, `max_5x`), 10 live sessions in
+all. `MAX_MCP_OUTPUT_TOKENS` was unset except in the two runs that name it.
+The agent has no built-in tools in these runs (`--tools=`), so it cannot
+open a saved file; the evidence is the `tool_result` in the transcript, not
+the agent's answer.
+
+The server's SVG cap was raised so the SVG was returned and the client's
+limit was what got measured, with a wrapper script passed as `--server`:
+
+```bash
+#!/bin/sh
+PSCAT_MCP_MAX_SVG_BYTES=4194304 exec target/release/pscat-mcp-server "$@"
+```
+
+(8388608 for the 5 MB run.) Each case asked for one `render_postscript` call
+with `format: "svg"` and a program of this form, `N` chosen for the size
+(520, 610, 1300, 3250, 13000 and 65000 give 40.5 KB, 47.5 KB, 101 KB,
+252 KB, 1.0 MB and 5.0 MB of SVG):
+
+```postscript
+0 1 N {dup 37 mul 400 mod exch 53 mul 300 mod 3 3 rectfill} for
+```
+
+and then to say what the result contained. The PDF case drew a 600x600
+random-byte RGB image (a vector PDF would compress to a few KB):
+
+```postscript
+/row 1800 string def 400 300 scale 600 600 8 [600 0 0 -600 0 600]
+{0 1 1799 {row exch rand -9 bitshift 255 and put} for row} false 3 colorimage showpage
+```
+
+```bash
+scripts/agent-eval.sh --server ./svg-wrapper.sh --transport stdio --case SIZE_CASE \
+  --claude-env MAX_MCP_OUTPUT_TOKENS=200000 --save-claude-state /path/outside/the/repo
+```
+
+The size cases were one-off files and are not in `evals/agent/cases/`; the
+transcripts, the cases, the wrapper scripts and the saved files are
+archived outside the repository (`pscat-eval-archive/2026-11-11-issue64/`,
+not committed). `54-svg-over-cap.json` is the case kept: with the default
+server it asks for a 1 MB SVG, expects `output_too_large` and an answer that
+names PNG or PDF. It passed once on stdio and once on HTTP and is
+unbaselined.
+
+Not verified: other models or Claude Code versions; the interactive client
+(the runs were `claude -p`); the `maxResultSizeChars` override; behaviour of
+claude.ai above its limit; any measurement of Codex, ChatGPT or Claude.ai;
+which of the two Claude Code limits (characters or tokens) fired for the
+default-token runs of 101 KB and larger, since each is over both.

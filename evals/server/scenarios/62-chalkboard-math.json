@@ -98,7 +98,7 @@
         "structured": {
           "ok": false,
           "error.input.code": "svg_bytes",
-          "error.input.limit_bytes": 262144
+          "error.input.limit_bytes": 131072
         },
         "renders_executed": 1
       }

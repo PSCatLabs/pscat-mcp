@@ -294,8 +294,8 @@ async fn svg_over_the_svg_cap_is_output_too_large() {
     let r = call(&client, json!({"latex": r"\frac{1}{2}", "format": "svg"})).await;
     let s = assert_fails(&r, "output_too_large");
     assert_eq!(s["error"]["input"]["code"], "svg_bytes", "{s}");
-    assert_eq!(s["error"]["input"]["limit_bytes"], 256 * 1024, "{s}");
-    assert!(s["error"]["input"]["reached_bytes"].as_u64().unwrap() > 256 * 1024);
+    assert_eq!(s["error"]["input"]["limit_bytes"], 128 * 1024, "{s}");
+    assert!(s["error"]["input"]["reached_bytes"].as_u64().unwrap() > 128 * 1024);
     let m = s["error"]["message"].as_str().unwrap();
     assert!(
         m.contains("runs to megabytes") && m.contains("png is the practical format"),

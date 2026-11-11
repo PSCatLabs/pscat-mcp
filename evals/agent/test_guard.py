@@ -105,6 +105,56 @@ class ChildEnv(unittest.TestCase):
         self.assertEqual(env["PSCAT_EVAL_TOKEN"], "tok")
 
 
+class ClientEnv(unittest.TestCase):
+    """--claude-env passes only the tuning variables run.py names (#64)."""
+
+    def test_allowed_variable_reaches_the_child_env(self):
+        extra = run.parse_client_env(["MAX_MCP_OUTPUT_TOKENS=200000"])
+        self.assertEqual(extra, {"MAX_MCP_OUTPUT_TOKENS": "200000"})
+        env = guard.child_env({"HOME": "/h", "MAX_MCP_OUTPUT_TOKENS": "1"}, extra)
+        self.assertEqual(env["MAX_MCP_OUTPUT_TOKENS"], "200000")
+
+    def test_parent_value_is_not_inherited(self):
+        env = guard.child_env({"HOME": "/h", "MAX_MCP_OUTPUT_TOKENS": "1"})
+        self.assertNotIn("MAX_MCP_OUTPUT_TOKENS", env)
+
+    def test_other_names_and_values_are_refused(self):
+        for bad in ("ANTHROPIC_API_KEY=sk", "ANTHROPIC_BASE_URL=http://x", "PATH=/x", "MAX_MCP_OUTPUT_TOKENS", "MAX_MCP_OUTPUT_TOKENS=", "MAX_MCP_OUTPUT_TOKENS=0", "MAX_MCP_OUTPUT_TOKENS=-5", "MAX_MCP_OUTPUT_TOKENS=1e5"):
+            with self.assertRaises(SystemExit, msg=bad):
+                run.parse_client_env([bad])
+
+    def test_none_is_empty(self):
+        self.assertEqual(run.parse_client_env(None), {})
+
+
+class SaveClaudeState(unittest.TestCase):
+    def test_state_is_copied_before_it_is_removed(self):
+        import os
+        import re
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            workdir = Path(tmp) / "pscat-eval-cwd-abc"
+            workdir.mkdir()
+            slug = re.sub(r"[^A-Za-z0-9]", "-", str(workdir.resolve()))
+            state = config / "projects" / slug / "tool-results"
+            state.mkdir(parents=True)
+            (state / "r.txt").write_text("saved result")
+            saved = Path(tmp) / "archive" / "run1"
+            old = os.environ.get("CLAUDE_CONFIG_DIR")
+            os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+            try:
+                run.forget_claude_project(workdir, saved)
+            finally:
+                if old is None:
+                    del os.environ["CLAUDE_CONFIG_DIR"]
+                else:
+                    os.environ["CLAUDE_CONFIG_DIR"] = old
+            self.assertEqual((saved / "tool-results" / "r.txt").read_text(), "saved result")
+            self.assertFalse((config / "projects" / slug).exists())
+
+
 class AuthStatus(unittest.TestCase):
     def test_claude_ai_login_passes_and_drops_identity(self):
         summary = guard.check_auth_status(0, json.dumps(AUTH_OK))

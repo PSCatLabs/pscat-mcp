@@ -192,13 +192,13 @@ async fn the_default_is_256_kib_and_the_cap_is_in_the_descriptions_and_renderer_
         .await
         .unwrap();
     let limits = &info.structured_content.unwrap()["limits"];
-    assert_eq!(limits["max_svg_bytes"], 256 * 1024);
+    assert_eq!(limits["max_svg_bytes"], 128 * 1024);
     assert_eq!(limits["max_output_bytes"], 8 * 1024 * 1024);
     let tools = client.list_all_tools().await.unwrap();
     for name in ["render_postscript", "chalkboard_math"] {
         let d = tools.iter().find(|t| t.name == name).unwrap();
         let d = d.description.as_deref().unwrap();
-        assert!(d.contains("svg, up to 262144 bytes"), "{name}: {d}");
+        assert!(d.contains("svg, up to 131072 bytes"), "{name}: {d}");
     }
     client.cancel().await.ok();
     // A small output cap pulls the default down with it.
