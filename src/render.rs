@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::backend::{BackendError, RenderBackend};
@@ -93,7 +93,7 @@ pub struct RenderError {
 }
 
 impl RenderError {
-    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         RenderError {
             code,
             message: message.into(),
@@ -193,6 +193,103 @@ impl From<LintNote> for LintReport {
     }
 }
 
+/// PSCat's catalog of the art capabilities a program can use, as returned
+/// by `describe_art_capabilities`. Mirrors `pscat --capabilities`, minus the
+/// host filesystem paths.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ArtCatalog {
+    /// PSCat version that produced the catalog.
+    pub pscat_version: String,
+    /// Fingerprint of which capabilities are available. A change here or in
+    /// `pscat_version` means the set changed.
+    pub catalog_signature: String,
+    /// Installed font packs.
+    pub font_packs: FontPacks,
+    /// Every capability, sorted by name then kind.
+    pub capabilities: Vec<ArtCapability>,
+}
+
+/// One capability: a font, Type 3 face, palette, page template, procedure,
+/// native operator or config variable.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ArtCapability {
+    /// Name as a program uses it.
+    pub name: String,
+    /// One of `font`, `type3_face`, `palette`, `template`, `procedure`,
+    /// `operator`, `dial`.
+    pub kind: String,
+    /// What it is or does.
+    pub description: String,
+    /// Named keys of the options dict, for dict-driven procedures and
+    /// templates; empty for positional ones.
+    pub parameters: Vec<ArtParameter>,
+    /// Where it is defined (`lib/artkit.ps`, `systemdict`, `fonts/`, ...).
+    pub source: String,
+    /// The `run` sequence that brings it into scope before `example`; empty
+    /// when nothing needs loading.
+    pub load: String,
+    /// A usage example or the stack effect.
+    pub example: String,
+    /// Where it resolves (`builtin`, `catalog ...`, or a library file).
+    pub availability: String,
+}
+
+/// One named key of a capability's options dict.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ArtParameter {
+    /// Key name.
+    pub name: String,
+    /// Meaning and range.
+    pub description: String,
+    /// Default value as PostScript text, when it has one.
+    pub default: Option<String>,
+}
+
+/// Font packs known to the linked PSCat build.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FontPacks {
+    /// The font-pack release this build pins, if any.
+    pub pinned_index: Option<PinnedIndex>,
+    /// Installed packs. Their directories are not reported.
+    pub installed: Vec<InstalledFontPack>,
+    /// Font directories chosen explicitly, which take precedence over
+    /// packs. Their locations are not reported.
+    pub overrides: Vec<FontOverride>,
+    /// Names of the packs that can be installed.
+    pub available: Vec<String>,
+}
+
+/// The pinned font-pack release.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PinnedIndex {
+    /// Release tag.
+    pub tag: String,
+    /// SHA-256 of the pack index.
+    pub sha256: String,
+}
+
+/// An installed font pack.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InstalledFontPack {
+    /// Pack name.
+    pub name: String,
+    /// Release tag it was installed from.
+    pub tag: String,
+    /// Whether it is the pinned release or user-selected.
+    pub status: String,
+    /// SHA-256 of the index it came from.
+    pub index_sha256: Option<String>,
+    /// SHA-256 of the pack archive.
+    pub pack_sha256: String,
+}
+
+/// A font directory chosen explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FontOverride {
+    /// Always `user-selected`.
+    pub status: String,
+}
+
 /// Counters exposed for health and tests. Low-cardinality by design.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -288,17 +385,21 @@ pub fn validate_request(
             format,
             page_points,
             dpi,
-            limits: InterpLimits {
-                max_steps: limits.steps(),
-                max_time_ms: limits.interp_time_limit().map(|d| d.as_millis() as u64),
-                max_memory_bytes: limits.memory(),
-                max_page_pixels: limits.max_pixels,
-                max_pages: limits.max_pages,
-                max_output_bytes: limits.max_output_bytes,
-                max_program_output_bytes: limits.max_program_output_bytes,
-            },
+            limits: interp_limits(limits),
         },
     })
+}
+
+fn interp_limits(limits: &LimitsConfig) -> InterpLimits {
+    InterpLimits {
+        max_steps: limits.steps(),
+        max_time_ms: limits.interp_time_limit().map(|d| d.as_millis() as u64),
+        max_memory_bytes: limits.memory(),
+        max_page_pixels: limits.max_pixels,
+        max_pages: limits.max_pages,
+        max_output_bytes: limits.max_output_bytes,
+        max_program_output_bytes: limits.max_program_output_bytes,
+    }
 }
 
 /// The rendering service shared by every transport.
@@ -306,6 +407,9 @@ pub struct RenderService {
     backend: Arc<dyn RenderBackend>,
     limits: LimitsConfig,
     slots: Arc<Semaphore>,
+    /// The art catalog, fetched from a worker on first use. A failed fetch
+    /// leaves it empty, so the next call tries again.
+    catalog: tokio::sync::OnceCell<Arc<ArtCatalog>>,
     /// Counters for health and tests.
     pub counters: Arc<Counters>,
 }
@@ -318,6 +422,7 @@ impl RenderService {
             backend,
             limits,
             slots,
+            catalog: tokio::sync::OnceCell::new(),
             counters: Arc::new(Counters::default()),
         }
     }
@@ -332,7 +437,7 @@ impl RenderService {
         let validated = self.check(&req, JobMode::Render)?;
         let format = validated.job.format;
         let started = Instant::now();
-        let result = self.run(validated).await?;
+        let result = self.run(validated.job).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
         if let Some(failure) = result.failure.clone() {
             return Err(failure_to_error(failure, result));
@@ -362,7 +467,7 @@ impl RenderService {
             ..RenderRequest::default()
         };
         let validated = self.check(&req, JobMode::Validate)?;
-        let result = self.run(validated).await?;
+        let result = self.run(validated.job).await?;
         match &result.failure {
             None | Some(WorkerFailure::PostScript) => {}
             Some(other) => return Err(failure_to_error(other.clone(), result)),
@@ -383,6 +488,48 @@ impl RenderService {
         })
     }
 
+    /// PSCat's art catalog, read in a worker process so it reflects the
+    /// environment renders run in (fonts, font packs), not the server's.
+    ///
+    /// The first successful call runs the worker (no PostScript; it takes a
+    /// render slot and the render deadline) and the result is kept for the
+    /// life of the service: the worker's environment is fixed, so the
+    /// catalog is too. Later calls take no slot. Concurrent first calls share
+    /// one fetch; a failed fetch is not kept.
+    pub async fn capabilities(&self) -> Result<Arc<ArtCatalog>, RenderError> {
+        self.catalog
+            .get_or_try_init(|| async { self.fetch_catalog().await.map(Arc::new) })
+            .await
+            .cloned()
+    }
+
+    async fn fetch_catalog(&self) -> Result<ArtCatalog, RenderError> {
+        let job = WorkerJob {
+            mode: JobMode::Capabilities,
+            source: String::new(),
+            format: OutputFormat::Png,
+            page_points: None,
+            dpi: 72.0,
+            limits: interp_limits(&self.limits),
+        };
+        let result = self.run(job).await?;
+        if let Some(failure) = result.failure.clone() {
+            return Err(failure_to_error(failure, result));
+        }
+        let value = result.capabilities.ok_or_else(|| {
+            RenderError::new(
+                ErrorCode::WorkerFailed,
+                "the worker returned no capability catalog",
+            )
+        })?;
+        serde_json::from_value(value).map_err(|e| {
+            RenderError::new(
+                ErrorCode::WorkerFailed,
+                format!("the capability catalog has an unexpected shape: {e}"),
+            )
+        })
+    }
+
     fn check(&self, req: &RenderRequest, mode: JobMode) -> Result<ValidatedRequest, RenderError> {
         validate_request(req, mode, &self.limits).inspect_err(|e| {
             self.counters.rejected.fetch_add(1, Ordering::Relaxed);
@@ -390,7 +537,7 @@ impl RenderService {
         })
     }
 
-    async fn run(&self, validated: ValidatedRequest) -> Result<WorkerResult, RenderError> {
+    async fn run(&self, job: WorkerJob) -> Result<WorkerResult, RenderError> {
         let permit = tokio::time::timeout(
             self.limits.queue_timeout(),
             self.slots.clone().acquire_owned(),
@@ -404,10 +551,10 @@ impl RenderService {
         })?
         .map_err(|_| RenderError::new(ErrorCode::ServerBusy, "the server is shutting down"))?;
         self.counters.executed.fetch_add(1, Ordering::Relaxed);
-        let source_len = validated.job.source.len();
+        let source_len = job.source.len();
         let outcome = self
             .backend
-            .execute(validated.job, self.limits.render_timeout())
+            .execute(job, self.limits.render_timeout())
             .await;
         drop(permit);
         match outcome {
@@ -489,6 +636,7 @@ fn failure_to_error(failure: WorkerFailure, result: WorkerResult) -> RenderError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::RenderBackend;
 
     fn req(src: &str) -> RenderRequest {
         RenderRequest {
@@ -576,5 +724,116 @@ mod tests {
         let d = validate_request(&req("showpage"), JobMode::Render, &limits).unwrap();
         assert_eq!(d.page_px, (612, 792));
         assert!(d.job.page_points.is_none());
+    }
+
+    /// A backend that answers every job with a fixed outcome and counts the
+    /// jobs it was given.
+    struct Fixed {
+        outcome: fn() -> Result<WorkerResult, BackendError>,
+        calls: Arc<AtomicU64>,
+    }
+
+    impl RenderBackend for Fixed {
+        fn execute(
+            &self,
+            _job: WorkerJob,
+            _deadline: std::time::Duration,
+        ) -> crate::backend::BackendFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = (self.outcome)();
+            Box::pin(async move { outcome })
+        }
+    }
+
+    fn service_with(
+        outcome: fn() -> Result<WorkerResult, BackendError>,
+    ) -> (RenderService, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let backend = Fixed {
+            outcome,
+            calls: calls.clone(),
+        };
+        (
+            RenderService::new(Arc::new(backend), LimitsConfig::default()),
+            calls,
+        )
+    }
+
+    async fn capabilities_with(
+        outcome: fn() -> Result<WorkerResult, BackendError>,
+    ) -> Result<Arc<ArtCatalog>, RenderError> {
+        service_with(outcome).0.capabilities().await
+    }
+
+    fn catalog_result() -> Result<WorkerResult, BackendError> {
+        Ok(WorkerResult {
+            capabilities: Some(serde_json::json!({
+                "pscat_version": "0.0.0",
+                "catalog_signature": "0000000000000000",
+                "font_packs": {
+                    "pinned_index": null, "installed": [], "overrides": [], "available": []
+                },
+                "capabilities": []
+            })),
+            ..WorkerResult::empty()
+        })
+    }
+
+    #[tokio::test]
+    async fn the_catalog_is_fetched_once_and_failures_are_not_kept() {
+        let (service, calls) = service_with(catalog_result);
+        let first = service.capabilities().await.unwrap();
+        let second = service.capabilities().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call hit the worker"
+        );
+        assert_eq!(service.counters.executed.load(Ordering::SeqCst), 1);
+
+        let (service, calls) = service_with(|| Err(BackendError::Timeout));
+        assert!(service.capabilities().await.is_err());
+        assert!(service.capabilities().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a failure was cached");
+    }
+
+    #[tokio::test]
+    async fn capabilities_failures_use_the_error_codes() {
+        let err = capabilities_with(|| Err(BackendError::Timeout))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Timeout);
+
+        let err = capabilities_with(|| Err(BackendError::Crashed("signal 9".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WorkerFailed);
+
+        let err = capabilities_with(|| Ok(WorkerResult::empty()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WorkerFailed);
+        assert!(err.message.contains("no capability catalog"), "{err}");
+
+        let err = capabilities_with(|| {
+            Ok(WorkerResult {
+                capabilities: Some(serde_json::json!({"capabilities": 3})),
+                ..WorkerResult::empty()
+            })
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WorkerFailed);
+        assert!(err.message.contains("unexpected shape"), "{err}");
+
+        let err = capabilities_with(|| {
+            Ok(WorkerResult::fail(WorkerFailure::BadJob {
+                message: "nope".into(),
+            }))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WorkerFailed);
     }
 }

@@ -10,12 +10,13 @@ Codex) and checks the transcripts; see "Automated agent evals" in
 [`docs/LOCAL_TESTING.md`](../docs/LOCAL_TESTING.md#9-automated-agent-evals).
 The case files are in [`evals/agent/cases/`](../evals/agent/cases/).
 
-The server exposes three tools:
+The server exposes four tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
+| `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
 Every failure is `isError: true` with a text explanation and
@@ -315,6 +316,47 @@ HTTP).
 
 ---
 
+## 6. Find real names before using a palette or template
+
+**Prompt**
+
+> Make a greeting card with the PSCat page templates. Check which templates
+> and palettes this server has first, rather than guessing names.
+
+**Expected tool calls**
+
+```json
+{ "name": "describe_art_capabilities", "arguments": {} }
+{ "name": "describe_art_capabilities", "arguments": { "kind": "template" } }
+{ "name": "describe_art_capabilities", "arguments": { "names": ["pgcard"] } }
+```
+
+then `render_postscript` with a `source` that starts with the `load` line of
+the template it chose (for `pgcard`: `(lib/artkit.ps) run (lib/pagekit.ps) run`)
+and passes a palette name from the catalog.
+
+**Expected result**
+
+- The first call returns `ok: true`, `view: "index"` with the kinds
+  `font`, `type3_face`, `palette`, `template`, `procedure`, `operator` and
+  `dial`, each with its names (templates `pgcard`, `pgcertificate`,
+  `pginvitation`, `pgletter`, `pgposter`; palettes such as `acid`, `brass`).
+  The reply is about 5 KB.
+- `kind: "template"` lists the five with a one-line description each.
+- `names: ["pgcard"]` returns the full entry: its dict keys under
+  `parameters` and the `run` lines it needs under `load`. A made-up name in
+  `names` comes back under `not_found`, and the call still succeeds.
+- No entry or text carries a server file path, and `font_packs.installed`
+  has no `path` fields.
+- The agent uses only names from the catalog, and the render returns a PNG
+  with `ok: true`.
+
+This case is covered by `tests/mcp_stdio.rs` (the three views and their size ceilings, no paths,
+`pgcard` rendering from its `load` line); it has not been run through an
+agent against the container image.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -326,3 +368,4 @@ HTTP).
 | 5a | Infinite loop | `render_postscript` | `limit_exceeded` or `timeout`; server still healthy |
 | 5b | 10000×10000 page | `render_postscript` | `invalid_dimensions` (5000×5000: `too_many_pixels`) |
 | 5c | Huge source | `render_postscript` | `source_too_large` (or HTTP 413) |
+| 6 | Real names | `describe_art_capabilities` then `render_postscript` | Catalog lists templates and palettes; render uses a listed template and its `load` line |

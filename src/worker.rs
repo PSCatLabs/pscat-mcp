@@ -76,6 +76,9 @@ pub enum JobMode {
     Render,
     /// Scan the program, run it, and return diagnostics only.
     Validate,
+    /// Run no program: return PSCat's art catalog (`capabilities` in the
+    /// result). Every other job field is ignored.
+    Capabilities,
 }
 
 /// Interpreter-level limits applied inside the worker by PSCat itself.
@@ -216,10 +219,13 @@ pub struct WorkerResult {
     pub steps_used: u64,
     /// Time spent executing the program, in milliseconds.
     pub elapsed_ms: u64,
+    /// PSCat's art catalog (capabilities mode only).
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
 }
 
 impl WorkerResult {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         WorkerResult {
             failure: None,
             ps_error: None,
@@ -231,10 +237,11 @@ impl WorkerResult {
             program_output_truncated: false,
             steps_used: 0,
             elapsed_ms: 0,
+            capabilities: None,
         }
     }
 
-    fn fail(failure: WorkerFailure) -> Self {
+    pub(crate) fn fail(failure: WorkerFailure) -> Self {
         WorkerResult {
             failure: Some(failure),
             ..WorkerResult::empty()
@@ -273,50 +280,9 @@ pub fn run_stdio(max_job_bytes: usize) -> i32 {
 }
 
 /// Scan `source` with PSCat's tokenizer without executing anything, and
-/// check that procedure braces balance (the tokenizer reports `{`/`}` as
-/// separate tokens and leaves balancing to the interpreter).
+/// check that procedure braces balance.
 pub fn syntax_scan(source: &[u8]) -> SyntaxScan {
-    let mut lexer = pscat::lexer::Lexer::new(source.to_vec());
-    let mut tokens = 0usize;
-    let mut depth = 0usize;
-    loop {
-        match lexer.next_token() {
-            Ok(Some(token)) => {
-                tokens += 1;
-                match token {
-                    pscat::lexer::Token::LBrace => depth += 1,
-                    pscat::lexer::Token::RBrace => {
-                        if depth == 0 {
-                            return SyntaxScan {
-                                ok: false,
-                                tokens,
-                                error: Some(format!("unmatched '}}' (token {tokens})")),
-                            };
-                        }
-                        depth -= 1;
-                    }
-                    _ => {}
-                }
-            }
-            Ok(None) => {
-                let error = (depth > 0).then(|| {
-                    format!("unterminated procedure: {depth} '{{' without a matching '}}'")
-                });
-                return SyntaxScan {
-                    ok: error.is_none(),
-                    tokens,
-                    error,
-                };
-            }
-            Err(e) => {
-                return SyntaxScan {
-                    ok: false,
-                    tokens,
-                    error: Some(e.to_string()),
-                };
-            }
-        }
-    }
+    crate::pscat_extras::syntax_scan(source)
 }
 
 fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
@@ -335,9 +301,7 @@ fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
             })?;
             // Like `Interp::new()`: nothing chose this size, so the program's
             // `setpagedevice` may replace it (bounded by max_page_pixels).
-            interp
-                .gfx_mut()
-                .set_page_size_source(pscat::gfx::PageSizeSource::Default);
+            crate::pscat_extras::allow_program_page_size(&mut interp);
             interp
         }
     };
@@ -375,6 +339,12 @@ fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
 /// through the `render-worker` subprocess.
 pub fn execute(job: &WorkerJob) -> WorkerResult {
     let mut result = WorkerResult::empty();
+    if job.mode == JobMode::Capabilities {
+        let started = Instant::now();
+        result.capabilities = Some(crate::pscat_extras::capabilities_json());
+        result.elapsed_ms = started.elapsed().as_millis() as u64;
+        return result;
+    }
     if job.mode == JobMode::Validate {
         result.syntax = Some(syntax_scan(job.source.as_bytes()));
     }

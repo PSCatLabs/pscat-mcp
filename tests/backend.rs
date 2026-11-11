@@ -472,3 +472,34 @@ async fn a_worker_killed_by_a_signal_is_a_crash() {
     assert!(message.contains("signal 9"), "{message}");
     assert!(message.contains("dying"), "{message}");
 }
+
+/// Capabilities mode runs no program: it returns PSCat's catalog, with no
+/// host paths, inside the same sandboxed worker process.
+#[tokio::test]
+async fn the_worker_returns_the_art_catalog() {
+    let job = WorkerJob {
+        mode: JobMode::Capabilities,
+        source: String::new(),
+        format: OutputFormat::Png,
+        page_points: None,
+        dpi: 72.0,
+        limits: limits(),
+    };
+    let started = Instant::now();
+    let result = backend()
+        .execute(job, Duration::from_secs(20))
+        .await
+        .expect("worker result");
+    assert_eq!(result.failure, None);
+    assert!(result.artifacts.is_empty());
+    assert_eq!(result.page_count, 0);
+    let catalog = result.capabilities.expect("catalog");
+    assert!(!catalog["capabilities"].as_array().unwrap().is_empty());
+    assert!(!catalog.to_string().contains("\"path\""), "no host paths");
+    // Cheap enough to run per call without a cache.
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

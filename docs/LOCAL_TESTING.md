@@ -51,7 +51,7 @@ server is registered only for the directory you ran the command in
 (`local` scope), and a session started elsewhere won't see it.
 
 Start a new `claude` session (servers are loaded at startup) and run
-`/mcp`. `pscat-render` should be connected with three tools.
+`/mcp`. `pscat-render` should be connected with four tools.
 
 To see the server's logs, start the session with `claude --debug`. Logs
 are on stderr, so they never mix with MCP messages. Set a level with
@@ -149,8 +149,9 @@ The client entries above work unchanged. Build locally rather than pulling
 
 ## 5. A first prompt
 
-Paste this into a new session. It calls all three tools, and each step has
-a known result.
+Paste this into a new session. It calls `get_renderer_info`, `render_postscript` and `validate_postscript`,
+and each step has a known result. (`describe_art_capabilities` is covered by
+the `describe-capabilities` eval case and scenario 6.)
 
 ````text
 Use only the pscat-render MCP server for this (not the pscat plugin's tools).
@@ -200,10 +201,10 @@ way.
 
 ## 6. What else to try
 
-[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has five
+[`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has six
 prompts with the expected tool call and result: render a program, draw a
-diagram, diagnose an invalid program, ask for an unsupported format, and
-try to exhaust resources. Beyond those and the prompt above:
+diagram, diagnose an invalid program, ask for an unsupported format,
+try to exhaust resources, and look up palette, template and procedure names. Beyond those and the prompt above:
 
 * **Images.** After a PNG render, does the client show the image to you, and
   can the agent describe it correctly? That tells you whether the image
@@ -306,9 +307,10 @@ diagnose-undefined  claude  http       pass     1/1     3
 The exit status is 0 when every row passes, 1 when a check failed, and 2
 when the billing guard stopped the run.
 
-**Budget.** Cases run one at a time. A full default run is 20 sessions
-(10 cases × 2 transports) and took 54 turns and 34 tool calls with
-`claude-sonnet-5-5`, about 4 minutes in all. Most cases take 2 or 3 turns,
+**Budget.** Cases run one at a time. A full default run is 22 sessions
+(11 cases × 2 transports). The first 20 (10 cases) took 54 turns and 34 tool
+calls with `claude-sonnet-5-5`, about 4 minutes in all; the
+`describe-capabilities` case was added later and not yet timed. Most cases take 2 or 3 turns,
 and the first prompt takes 7. It moved the Max 5x plan's five-hour
 utilization from 8 % to 10 %, while another session was using the same
 subscription. `--repeat N` multiplies all of that. To try a change,
