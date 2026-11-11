@@ -6,8 +6,8 @@
   },
   "obtained": "synthesized",
   "captured_on": "2026-11-10",
-  "how": "hand-written from the report in PSCatLabs/pscat-mcp#17: an HTTP client or hand-written integration that sends Accept: application/json and nothing else. Which real clients do this is not known yet (#17 collects reports)",
-  "note": "KNOWN FAILURE: today every request here gets HTTP 406. Each request's expect (the default: 2xx and a JSON-RPC result) is what it must do once #17 is fixed. The replay test fails when it starts passing, to remind whoever fixes #17 to delete known_failure from this file.",
+  "how": "hand-written from the report in PSCatLabs/pscat-mcp#17: an HTTP client or hand-written integration that sends Accept: application/json and nothing else. Which real clients do this is not known; the server answers them with JSON (the src/http.rs accept_json middleware adds text/event-stream)",
+  "note": "Fixed in #17: rmcp alone answers 406 to these requests; the server adds text/event-stream to a POST's Accept when it allows JSON, and answers with a JSON body. Each request meets the default expect (2xx and a JSON-RPC result).",
   "requests": [
     {
       "name": "initialize",
@@ -32,11 +32,6 @@
             "version": "1.0"
           }
         }
-      },
-      "known_failure": {
-        "issue": 17,
-        "status": 406,
-        "summary": "rmcp refuses a POST whose Accept lists only application/json; this server only ever answers JSON"
       }
     },
     {
@@ -55,11 +50,6 @@
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/list"
-      },
-      "known_failure": {
-        "issue": 17,
-        "status": 406,
-        "summary": "rmcp refuses a POST whose Accept lists only application/json; this server only ever answers JSON"
       }
     }
   ]

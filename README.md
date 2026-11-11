@@ -281,8 +281,9 @@ target/release/pscat-mcp-server serve-http            # 127.0.0.1:8080, endpoint
 ```
 
 * `POST /mcp`: MCP Streamable HTTP (stateless, JSON responses). Requires
-  `Authorization: Bearer <token>`. Clients must send
-  `Accept: application/json, text/event-stream`.
+  `Authorization: Bearer <token>`. Clients should send
+  `Accept: application/json, text/event-stream`; `application/json` alone,
+  `*/*` or no `Accept` also work (see Limitations).
 * `GET /healthz`: unauthenticated liveness check, `{"status":"ok"}`.
 
 Client configuration for a remote server:
@@ -503,8 +504,17 @@ control is enforced by PSCat and which by the server.
   or MCP Inspector. The guide prompts and resources are tested with the
   rmcp client and raw JSON-RPC only; how clients show them is from their
   docs and source, not tried in a client.
-* **`Accept` header.** HTTP clients must accept both `application/json` and
-  `text/event-stream`, as the spec requires. rmcp answers 406 otherwise.
+* **`Accept` header.** The spec asks an HTTP client to list both
+  `application/json` and `text/event-stream`, and rmcp alone answers 406 to a
+  POST that does not. This server always answers a POST with a JSON body, so
+  it adds the missing type for any POST whose `Accept` allows JSON:
+  `application/json` alone, `*/*`, `application/*` and no `Accept` header at
+  all are served (RFC 9110: no header, or `*/*`, accepts anything). A POST
+  whose `Accept` does not allow JSON (`text/html`, `text/event-stream` alone,
+  `application/json;q=0`) is still 406. `GET` and `DELETE` are unchanged (a stateless server has no stream to open:
+  `GET` is 405 whatever `Accept` says). Authentication, the Host and Origin
+  checks and the body limit run first, so a request without a valid token is
+  401 whatever it sends.
 
 ## Tests
 
@@ -539,9 +549,9 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client gets a task handle (render and `handwrite`), a plain one or one on a server without `--tasks` the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only |
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the PSCat checkout cargo resolves, and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
-| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
+| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
-| `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture records #17 as a known failure that fails the test when it is fixed. Also tests capture mode: no token, query string or unlisted header value reaches the file |
+| `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 
 ## Contributing
