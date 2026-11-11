@@ -544,6 +544,12 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture records #17 as a known failure that fails the test when it is fixed. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 
+## Contributing
+
+[`SDLC.md`](SDLC.md) describes how changes reach `main`: issues with
+`priority:`, `difficulty:` and `model:` labels, a branch per issue, the
+required CI checks, review, and squash merges.
+
 ## License
 
 MIT OR Apache-2.0. PSCat is (MIT OR Apache-2.0) AND OFL-1.1 AND LPPL-1.3c
