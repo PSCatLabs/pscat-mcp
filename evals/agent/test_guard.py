@@ -274,6 +274,18 @@ class Stream(unittest.TestCase):
         with self.assertRaises(guard.RateLimited):
             feed_all(self.rate_limit_variant(lambda i: i.__setitem__("status", "rejected")))
 
+    def test_allowed_warning_stops(self):
+        with self.assertRaises(guard.RateLimited):
+            feed_all(self.rate_limit_variant(lambda i: i.__setitem__("status", "allowed_warning")))
+
+    def test_a_window_warning_stops(self):
+        def warn(info):
+            info["unifiedWindows"]["seven_day"]["status"] = "allowed_warning"
+
+        with self.assertRaises(guard.RateLimited) as cm:
+            feed_all(self.rate_limit_variant(warn))
+        self.assertIn("seven_day", str(cm.exception))
+
     def test_non_first_party_usage_aborts(self):
         events = fixture_events()
         for e in events:

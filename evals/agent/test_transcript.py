@@ -320,6 +320,100 @@ class Recheck(unittest.TestCase):
         self.assertIn("FAIL loop render", out.getvalue())
 
 
+def _run(case_id, transport, status, turns=3, five=(0.1, 0.11)):
+    return {
+        "case": case_id,
+        "agent": "claude",
+        "transport": transport,
+        "status": status,
+        "num_turns": turns,
+        "calls": ["mcp__pscat-render__render_postscript"],
+        "duration_s": 10.0,
+        "usage": {"status": "allowed", "five_hour": list(five), "seven_day": [0.3, 0.3]},
+    }
+
+
+class Baseline(unittest.TestCase):
+    HEADER = {
+        "server_version": "0.1.0",
+        "pscat_version": "0.7.0-rc.4",
+        "pscat_revision": "df39114f1223",
+        "server_sha256": "abc",
+        "repo_commit": "0a6e4ec",
+        "clients": {"claude": "2.1.322 (Claude Code)"},
+        "model": "claude-sonnet-5-5",
+        "effort": None,
+        "stopped": None,
+    }
+
+    def write_run(self, d, runs, **header):
+        d.mkdir()
+        (d / "summary.json").write_text(json.dumps({"header": {**self.HEADER, **header}, "runs": runs, "rows": []}))
+        return d
+
+    def test_usage_of_rate_limit_events(self):
+        events = [
+            {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.07}, "seven_day": {"utilization": 0.35}}},
+            {"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.08}}},
+        ]
+        self.assertEqual(run.usage_of(events), {"status": "allowed", "five_hour": [0.07, 0.08], "seven_day": [0.35, 0.35]})
+        span = run.usage_span([_run("a", "stdio", "pass", five=(0.1, 0.12)), _run("a", "http", "pass", five=(0.12, 0.2))])
+        self.assertEqual(span["five_hour"], [0.1, 0.2])
+        self.assertIn("five_hour 10% -> 20%", run.format_usage(span))
+
+    def test_baseline_merges_runs_and_compare_flags_changes(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(
+                d / "a",
+                [_run("x", "stdio", "pass"), _run("x", "stdio", "fail"), _run("y", "stdio", "pass"), _run("z", "http", "fail")],
+            )
+            b = self.write_run(d / "b", [_run("w", "stdio", "pass", turns=5)])
+            rec = run.make_baseline([a, b], d / "out" / "base.json")
+            saved = json.loads((d / "out" / "base.json").read_text())
+        self.assertEqual(rec, saved)
+        self.assertEqual(rec["sessions"], 5)
+        self.assertEqual(rec["turns"], 17)
+        self.assertEqual(rec["server"]["commit"], "0a6e4ec")
+        rows = {(r["case"], r["transport"]): r for r in rec["rows"]}
+        self.assertEqual(rows[("x", "stdio")]["verdict"], "flaky")
+        self.assertEqual((rows[("x", "stdio")]["pass"], rows[("x", "stdio")]["runs"]), (1, 2))
+        now = run.summarize(
+            [_run("x", "stdio", "pass"), _run("y", "stdio", "fail"), _run("z", "http", "fail"), _run("new", "stdio", "pass")]
+        )
+        lines, regressions = run.compare(now, rec)
+        text = "\n".join(lines)
+        self.assertEqual(regressions, 1)
+        self.assertIn("regressions: 1\n  y/claude/stdio: pass 1/1 -> fail 0/1", text)
+        self.assertIn("improvements: 1\n  x/claude/stdio: flaky 1/2 -> pass 1/1", text)
+        self.assertIn("new/claude/stdio: pass 1/1 (not in the baseline)", text)
+
+    def test_baseline_refuses_mismatched_or_stopped_runs(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self.write_run(d / "a", [_run("x", "stdio", "pass")])
+            b = self.write_run(d / "b", [_run("y", "stdio", "pass")], model="claude-opus-5-5")
+            c = self.write_run(d / "c", [_run("y", "stdio", "pass")], stopped="RateLimited")
+            with self.assertRaises(SystemExit):
+                run.make_baseline([a, b], d / "o.json")
+            with self.assertRaises(SystemExit):
+                run.make_baseline([c], d / "o.json")
+
+    def test_session_cap_refuses_before_any_agent_starts(self):
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            status = run.main(["--repeat", "50", "--max-sessions", "120", "--server", "/nonexistent"])
+        self.assertEqual(status, 2)
+        self.assertIn("more than --max-sessions 120", err.getvalue())
+
+
 class HttpLog(unittest.TestCase):
     def test_post_count_reads_tower_http_lines(self):
         import tempfile
