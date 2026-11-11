@@ -123,9 +123,24 @@ impl From<ChalkFailure> for GenerateFailure {
                 GenerateErrorCode::PostscriptError
             },
             detail: f.code,
-            token: f.token,
-            message: f.message,
+            token: f.token.map(|t| bounded(&t, MAX_TOKEN_CHARS)),
+            message: bounded(&f.message, MAX_MESSAGE_CHARS),
         }
+    }
+}
+
+/// Longest generator error message kept. PSCat's config reader quotes the
+/// offending value (`got ...`), which a client controls, so a message is cut
+/// here to keep the reply small.
+const MAX_MESSAGE_CHARS: usize = 400;
+/// Longest token (a command or environment name) kept.
+const MAX_TOKEN_CHARS: usize = 100;
+
+/// `s` cut to `max` characters, with `…` when cut.
+fn bounded(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
     }
 }
 
@@ -167,8 +182,9 @@ impl GenerateJob {
                         ),
                     ));
                 }
-                let board = ChalkBoard::from_args(&p.board)
-                    .map_err(|m| RenderError::new(ErrorCode::InvalidRequest, m))?;
+                let board = ChalkBoard::from_args(&p.board).map_err(|m| {
+                    RenderError::new(ErrorCode::InvalidRequest, bounded(&m, MAX_MESSAGE_CHARS))
+                })?;
                 let (page_points, dpi) = board.page();
                 Ok(PagePlan {
                     page_points,
@@ -186,7 +202,7 @@ impl GenerateJob {
                     code: GenerateErrorCode::InvalidRequest,
                     detail: "config".into(),
                     token: None,
-                    message,
+                    message: bounded(&message, MAX_MESSAGE_CHARS),
                 })?;
                 let d = board.driver(&p.latex)?;
                 Ok(GeneratedProgram {
@@ -220,6 +236,22 @@ mod tests {
             latex: latex.into(),
             board: board.as_object().unwrap().clone(),
         })
+    }
+
+    #[test]
+    fn messages_quoting_the_input_are_bounded() {
+        let huge = "x".repeat(100_000);
+        let job = chalk("x", json!({"board": huge}));
+        let err = job.plan(&LimitsConfig::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(err.message.chars().count() <= MAX_MESSAGE_CHARS + 1);
+        assert!(err.message.ends_with('…'));
+        let fail = job.generate().unwrap_err();
+        assert!(fail.message.chars().count() <= MAX_MESSAGE_CHARS + 1);
+        let long_cmd = format!("mk-unsupported-command:\\{}", "a".repeat(5000));
+        let e = job.explain(&pscat::PsError::Undefined(long_cmd)).unwrap();
+        assert!(e.token.unwrap().chars().count() <= MAX_TOKEN_CHARS + 1);
+        assert!(e.message.chars().count() <= MAX_MESSAGE_CHARS + 1);
     }
 
     #[test]

@@ -316,6 +316,12 @@ async fn an_unsupported_command_is_a_postscript_error_naming_it() {
     assert!(!m.contains("mk-"), "no mathkit internals: {m}");
     assert!(s["error"].get("postscript").is_none(), "{s}");
 
+    let text = text_of(&r);
+    assert!(
+        text.contains(r"Input error: unsupported_command (\nosuchcommand)"),
+        "{text}"
+    );
+
     // A malformed display is caught while the rows are split.
     let r = call(&client, json!({"latex": r"\(x + 1"})).await;
     let s = assert_fails(&r, "postscript_error");
@@ -361,6 +367,15 @@ async fn a_bad_board_config_is_invalid_request() {
         let m = s["error"]["message"].as_str().unwrap();
         assert!(m.contains(needle), "{args}: {m}");
     }
+    // PSCat quotes a bad value back; a huge one does not make a huge reply.
+    let r = call(
+        &client,
+        json!({"latex": "x", "config": {"board": {"tone": "t".repeat(1_000_000)}}}),
+    )
+    .await;
+    let s = assert_fails(&r, "invalid_request");
+    assert!(s.to_string().len() < 2000, "{} bytes", s.to_string().len());
+    assert!(text_of(&r).len() < 2000);
     // Over the pixel limit, and an unknown format, use the render codes.
     let r = call(
         &client,

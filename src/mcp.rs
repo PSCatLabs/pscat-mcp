@@ -974,6 +974,12 @@ fn capabilities_failure(err: RenderError) -> CallToolResult {
 
 fn error_text(lead: &str, err: &RenderError) -> String {
     let mut text = format!("{lead} ({}): {}", code_name(err.code), err.message);
+    if let Some(input) = &err.input {
+        text.push_str(&format!("\nInput error: {}", input.code));
+        if let Some(token) = &input.token {
+            text.push_str(&format!(" ({token})"));
+        }
+    }
     if let Some(output) = &err.program_output {
         text.push_str("\nProgram output before the error:\n");
         text.push_str(output);
