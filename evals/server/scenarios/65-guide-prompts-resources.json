@@ -1,0 +1,103 @@
+{
+  "id": "guide-prompts-resources",
+  "title": "Guide resources and prompts: list, read PSCat's psviz skill verbatim after the server's note, get a chart prompt, and unknown names as MCP errors; no render runs",
+  "origin": "issue #39; examples/agent-scenarios.md section 10",
+  "steps": [
+    {
+      "label": "resources/list has the psviz skill as markdown",
+      "request": "resources/list",
+      "result": {
+        "response": {
+          "resources.0.uri": {"regex": "^pscat://guide/"},
+          "resources.0.mimeType": "text/markdown"
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "resources/read: the note, then PSCat's text unchanged",
+      "request": "resources/read",
+      "params": {"uri": "pscat://guide/psviz/SKILL.md"},
+      "result": {
+        "response": {
+          "contents.0.uri": "pscat://guide/psviz/SKILL.md",
+          "contents.0.mimeType": "text/markdown",
+          "contents.0.text": {
+            "regex": "^> \\*\\*Note from pscat-mcp\\*\\*",
+            "contains": [
+              "commit {{pscat_revision}}",
+              "MIT OR Apache-2.0",
+              "no `out_path`",
+              "`render_postscript`",
+              "{{file:guide/skills/psviz/SKILL.md}}"
+            ]
+          },
+          "contents.1": {"absent": true}
+        }
+      }
+    },
+    {
+      "label": "prompts/list offers diagram, generative_art and chart",
+      "request": "prompts/list",
+      "result": {
+        "response": {
+          "prompts.0.name": {"in": ["diagram", "generative_art", "chart"]},
+          "prompts.1.name": {"in": ["diagram", "generative_art", "chart"]},
+          "prompts.2.name": {"in": ["diagram", "generative_art", "chart"]},
+          "prompts.3": {"absent": true}
+        }
+      }
+    },
+    {
+      "label": "prompts/get chart: the task, then the psviz guide",
+      "request": "prompts/get",
+      "params": {"name": "chart", "arguments": {"kind": "bar", "data": "8 15 12 19"}},
+      "result": {
+        "response": {
+          "messages.0.role": "user",
+          "messages.0.content.type": "text",
+          "messages.0.content.text": {
+            "contains": [
+              "bar chart with PSCat's lib/dataviz.ps",
+              "The data: 8 15 12 19",
+              "pscat://guide/psviz/SKILL.md",
+              "{{file:guide/skills/psviz/SKILL.md}}"
+            ]
+          },
+          "messages.1": {"absent": true}
+        },
+        "renders_executed": 0
+      }
+    },
+    {
+      "label": "an unknown resource is resource_not_found (-32002)",
+      "request": "resources/read",
+      "params": {"uri": "pscat://guide/no-such.md"},
+      "result": {"protocol_error": {"code": -32002, "data.uri": "pscat://guide/no-such.md"}}
+    },
+    {
+      "label": "an unknown prompt is invalid_params (-32602)",
+      "request": "prompts/get",
+      "params": {"name": "no_such_prompt"},
+      "result": {"protocol_error": {"code": -32602, "message": {"contains": "no_such_prompt"}}}
+    },
+    {
+      "label": "a bad prompt argument is invalid_params (-32602)",
+      "request": "prompts/get",
+      "params": {"name": "chart", "arguments": {"kind": "radar"}},
+      "result": {"protocol_error": {"code": -32602, "data.argument": "kind"}}
+    },
+    {
+      "label": "the guide's bar chart renders here",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\n(lib/dataviz.ps) run\n0 24 72 320 468 170 setdvframe\nnewpath [8 15 12 19] 0.22 { pop dvcolor } barchart\nnewpath 4 4 5 dvaxes stroke\nshowpage\n"
+      },
+      "result": {
+        "content_types": ["image:image/png", "text"],
+        "structured": {"ok": true, "page_count": 1},
+        "renders_executed": 1
+      }
+    }
+  ]
+}

@@ -41,6 +41,16 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_MAX_HANDWRITE_BYTES", default_value_t = 64 * 1024)]
     pub max_handwrite_bytes: usize,
 
+    /// Longest value of one MCP prompt argument (`prompts/get` of the guide
+    /// prompts), in bytes; a longer one is `invalid_params`. Prompt
+    /// arguments are only copied into the prompt's text, never run.
+    #[arg(
+        long,
+        env = "PSCAT_MCP_MAX_PROMPT_ARGUMENT_BYTES",
+        default_value_t = 8192
+    )]
+    pub max_prompt_argument_bytes: usize,
+
     /// Wall-clock deadline for one render, in milliseconds. The worker
     /// process is killed (SIGKILL) when it passes; PSCat's own time limit is
     /// set a little below it so most runaways stop cleanly first.
@@ -133,6 +143,7 @@ impl Default for LimitsConfig {
             max_source_bytes: 256 * 1024,
             max_latex_bytes: 4096,
             max_handwrite_bytes: 64 * 1024,
+            max_prompt_argument_bytes: 8192,
             render_timeout_ms: 20_000,
             interp_time_limit_ms: None,
             max_steps: 5_000_000_000,
@@ -257,6 +268,9 @@ impl LimitsConfig {
         }
         if self.max_handwrite_bytes == 0 {
             return Err("max-handwrite-bytes must be positive".into());
+        }
+        if self.max_prompt_argument_bytes == 0 {
+            return Err("max-prompt-argument-bytes must be positive".into());
         }
         if self.render_timeout_ms == 0 {
             return Err("render-timeout-ms must be positive".into());

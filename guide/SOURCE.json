@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/PSCatLabs/pscat",
+  "tag": "v0.7.0-rc.4",
+  "version": "0.7.0-rc.4",
+  "commit": "df39114f1223cf475c0c2350c47d7475274c72ee",
+  "path": "plugin/skills",
+  "license": "MIT OR Apache-2.0",
+  "copyright": [
+    "Jerome Banks and the pscat contributors"
+  ],
+  "license_files": [
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "note": "Copied unchanged by scripts/vendor-guide.py from the PSCat commit above. Do not edit these files here; refresh them with that script.",
+  "files": [
+    "functional-postscript/SKILL.md",
+    "psart/SKILL.md",
+    "psart/references/board-math.md",
+    "psart/references/dry-media.md",
+    "psart/references/paint.md",
+    "psart/references/styles-and-type.md",
+    "pscat/SKILL.md",
+    "pscat/references/bands-profile.md",
+    "pscat/references/extensions.md",
+    "pscat/references/handwriting-chalk.md",
+    "pscat/references/mcp.md",
+    "pscat/references/sheets.md",
+    "pscat/references/typewriter.md",
+    "psviz/SKILL.md"
+  ]
+}

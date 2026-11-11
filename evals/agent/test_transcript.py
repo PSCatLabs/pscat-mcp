@@ -331,10 +331,22 @@ class CaseFiles(unittest.TestCase):
                 self.assertTrue(set(c["transports"]) <= {"stdio", "http"})
                 self.assertTrue("expect" in c or "expect_any_of" in c)
                 tx.expand(c["prompt"], CTX)
+                if "mcp_prompt" in c:
+                    self.assertIsInstance(c["mcp_prompt"]["name"], str)
+                    self.assertIsInstance(c["mcp_prompt"].get("arguments", {}), dict)
                 # Runs every matcher against an empty transcript: unknown
                 # operators or placeholders raise here.
                 checks = tx.evaluate_case(c, empty, SERVER, CTX, "stdio")
                 self.assertFalse(all(ch.ok for ch in checks))
+
+
+class McpPrompt(unittest.TestCase):
+    def test_prompt_text_comes_first_then_the_typed_text(self):
+        got = {"messages": [{"role": "user", "content": {"type": "text", "text": "Make a bar chart."}}]}
+        self.assertEqual(run.compose_prompt(got, "The data: 1 2 3"), "Make a bar chart.\n\nThe data: 1 2 3")
+        self.assertEqual(run.compose_prompt(None, "just this"), "just this")
+        with self.assertRaises(RuntimeError):
+            run.compose_prompt({"messages": []}, "x")
 
 
 class ParseCodex(unittest.TestCase):

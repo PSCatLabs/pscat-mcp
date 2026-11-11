@@ -11,7 +11,11 @@
 //! operators (`in`, `equals`, `equals_text`, `contains`, `not_contains`,
 //! `min`, `max`, `regex`, `absent`). The server layer adds `png` (size and
 //! pixel samples), `resource` (an SVG or PDF signature), `elapsed_ms` and
-//! `renders_executed`. See `docs/LOCAL_TESTING.md`, "Server-layer evals".
+//! `renders_executed`, and steps that send another MCP request instead of a
+//! tool call (`request`: `resources/list`, `resources/read`, `prompts/list`,
+//! ...; with `params`), checked with `response` (dotted paths into the
+//! JSON-RPC result) or `protocol_error` (into the JSON-RPC error). See
+//! `docs/LOCAL_TESTING.md`, "Server-layer evals".
 //!
 //! One test per target runs every scenario for that target, groups scenarios
 //! that need the same `server_env` (PSCAT_MCP_* variables, so stdio, HTTP and
@@ -44,7 +48,22 @@ const RENDER_MARK: &str = "render started";
 const KNOWN_TRANSPORTS: [&str; 3] = ["stdio", "http", "container"];
 /// Keys a step may have.
 const STEP_KEYS: &[&str] = &[
-    "label", "tool", "args", "result", "parallel", "outcomes", "delay_ms",
+    "label", "tool", "args", "request", "params", "result", "parallel", "outcomes", "delay_ms",
+];
+/// MCP requests a `request` step may send.
+const REQUESTS: &[&str] = &[
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "prompts/list",
+    "prompts/get",
+];
+/// Result keys of a `request` step.
+const REQUEST_RESULT_KEYS: &[&str] = &[
+    "response",
+    "protocol_error",
+    "elapsed_ms",
+    "renders_executed",
 ];
 /// Keys a step's `result` may have. Unknown keys are an error, so a typo
 /// cannot silently turn an assertion off.
@@ -159,9 +178,32 @@ fn validate_scenario(sc: &Scenario) -> Result<(), String> {
         if obj.contains_key("parallel") != obj.contains_key("outcomes") {
             return Err(format!("step {i}: parallel and outcomes go together"));
         }
+        if let Some(req) = obj.get("request") {
+            let req = req.as_str().unwrap_or("");
+            if !REQUESTS.contains(&req) {
+                return Err(format!("step {i}: unknown request {req:?}"));
+            }
+            if obj.contains_key("tool") || obj.contains_key("args") || obj.contains_key("parallel")
+            {
+                return Err(format!(
+                    "step {i}: a request step has no tool, args or parallel"
+                ));
+            }
+            if let Some(Value::Object(r)) = obj.get("result") {
+                for k in r.keys() {
+                    if !REQUEST_RESULT_KEYS.contains(&k.as_str()) {
+                        return Err(format!("step {i}: unknown request result key {k:?}"));
+                    }
+                }
+            }
+            continue;
+        }
+        if obj.contains_key("params") {
+            return Err(format!("step {i}: params go with request"));
+        }
         for c in calls {
             if c.get("tool").and_then(Value::as_str).is_none() {
-                return Err(format!("step {i}: a call needs a tool"));
+                return Err(format!("step {i}: a call needs a tool or a request"));
             }
             // A parallel call only has these; its result is the group's.
             if obj.contains_key("parallel")
@@ -1048,6 +1090,70 @@ async fn settle_render_count(server: &Server) {
     }
 }
 
+/// Send one non-tool MCP request. `Ok` is the JSON-RPC result, `Err(Ok)` the
+/// JSON-RPC error as `{code, message, data}`, `Err(Err)` anything else.
+async fn send_request(
+    client: &Client,
+    method: &str,
+    params: &Value,
+) -> Result<Value, Result<Value, String>> {
+    use rmcp::model::{GetPromptRequestParams, ReadResourceRequestParams};
+    fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Result<Value, String>> {
+        serde_json::from_value(v.clone()).map_err(|e| Err(format!("bad params: {e}")))
+    }
+    fn out<T: serde::Serialize>(
+        r: Result<T, rmcp::service::ServiceError>,
+    ) -> Result<Value, Result<Value, String>> {
+        match r {
+            Ok(v) => serde_json::to_value(v).map_err(|e| Err(e.to_string())),
+            Err(rmcp::service::ServiceError::McpError(e)) => Err(Ok(
+                json!({"code": e.code.0, "message": e.message, "data": e.data}),
+            )),
+            Err(e) => Err(Err(e.to_string())),
+        }
+    }
+    let fut = async {
+        match method {
+            "resources/list" => out(client.list_resources(None).await),
+            "resources/templates/list" => out(client.list_resource_templates(None).await),
+            "prompts/list" => out(client.list_prompts(None).await),
+            "resources/read" => out(client
+                .read_resource(parse::<ReadResourceRequestParams>(params)?)
+                .await),
+            "prompts/get" => out(client
+                .get_prompt(parse::<GetPromptRequestParams>(params)?)
+                .await),
+            other => Err(Err(format!("unknown request {other}"))),
+        }
+    };
+    tokio::time::timeout(CALL_TIMEOUT, fut)
+        .await
+        .map_err(|_| Err(format!("{method} timed out after {CALL_TIMEOUT:?}")))?
+}
+
+fn check_request(spec: &Value, outcome: &Result<Value, Value>) -> Vec<String> {
+    let mut problems = Vec::new();
+    match (outcome, spec.get("protocol_error")) {
+        (Ok(_), Some(_)) => problems.push("succeeded, want a protocol error".into()),
+        (Err(e), None) => problems.push(format!("protocol error {}", short(e))),
+        (Err(e), Some(want)) => {
+            for (path, s) in want.as_object().into_iter().flatten() {
+                if let Err(why) = match_value(s, dig(e, path)) {
+                    problems.push(format!("protocol_error {path}: {why}"));
+                }
+            }
+        }
+        (Ok(v), None) => {
+            for (path, s) in spec["response"].as_object().into_iter().flatten() {
+                if let Err(why) = match_value(s, dig(v, path)) {
+                    problems.push(format!("response {path}: {why}"));
+                }
+            }
+        }
+    }
+    problems
+}
+
 async fn run_step(server: &Server, step: &Value) -> Result<(u128, Vec<String>), String> {
     let spec = expand(step.get("result").unwrap_or(&json!({})))?;
     if spec.get("renders_executed").is_some() {
@@ -1115,6 +1221,37 @@ async fn run_step(server: &Server, step: &Value) -> Result<(u128, Vec<String>), 
         }
         problems.extend(check_result(
             &Value::Object(group),
+            &Observed {
+                result: &json!({}),
+                elapsed_ms: elapsed,
+                renders,
+            },
+        ));
+        return Ok((elapsed, problems));
+    }
+
+    if let Some(method) = step["request"].as_str() {
+        let params = expand(step.get("params").unwrap_or(&json!({})))?;
+        let outcome = match send_request(&server.client, method, &params).await {
+            Ok(v) => Ok(v),
+            Err(Ok(e)) => Err(e),
+            Err(Err(e)) => return Err(e),
+        };
+        let elapsed = started.elapsed().as_millis();
+        problems.extend(check_request(&spec, &outcome));
+        let renders = if let Some(want) = spec.get("renders_executed") {
+            Some(renders_since(server, base, want.as_u64().unwrap_or(0) as usize).await)
+        } else {
+            None
+        };
+        let mut timing = serde_json::Map::new();
+        for key in ["elapsed_ms", "renders_executed"] {
+            if let Some(v) = spec.get(key) {
+                timing.insert(key.into(), v.clone());
+            }
+        }
+        problems.extend(check_result(
+            &Value::Object(timing),
             &Observed {
                 result: &json!({}),
                 elapsed_ms: elapsed,
@@ -1456,4 +1593,37 @@ fn a_result_spec_catches_each_kind_of_difference() {
         let problems = check_result(&bad, &obs(&ok)).join("|");
         assert!(problems.contains(what), "{what}: {problems}");
     }
+}
+
+#[test]
+fn a_request_step_checks_the_response_or_the_protocol_error() {
+    let ok: Result<Value, Value> = Ok(json!({"contents": [{"uri": "pscat://guide/a.md"}]}));
+    let err: Result<Value, Value> = Err(json!({"code": -32002, "message": "no resource"}));
+    let want_ok = json!({"response": {"contents.0.uri": "pscat://guide/a.md"}});
+    let want_err = json!({"protocol_error": {"code": -32002}});
+    assert!(check_request(&want_ok, &ok).is_empty());
+    assert!(check_request(&want_err, &err).is_empty());
+    assert!(!check_request(&want_ok, &err).is_empty());
+    assert!(!check_request(&want_err, &ok).is_empty());
+    let wrong = json!({"response": {"contents.0.uri": "pscat://guide/b.md"}});
+    assert!(!check_request(&wrong, &ok).is_empty());
+    let wrong_code = json!({"protocol_error": {"code": -32602}});
+    assert!(!check_request(&wrong_code, &err).is_empty());
+    // A request step takes no tool, and a tool step no params.
+    let bad = |steps: Value| {
+        let sc: Scenario =
+            serde_json::from_value(json!({"id": "x", "title": "x", "steps": steps})).unwrap();
+        validate_scenario(&sc).is_err()
+    };
+    assert!(bad(
+        json!([{"request": "resources/read", "tool": "render_postscript"}])
+    ));
+    assert!(bad(json!([{"request": "tools/call"}])));
+    assert!(bad(json!([{"tool": "render_postscript", "params": {}}])));
+    assert!(bad(
+        json!([{"request": "prompts/list", "result": {"structured": {}}}])
+    ));
+    assert!(!bad(
+        json!([{"request": "prompts/list", "result": {"response": {}}}])
+    ));
 }

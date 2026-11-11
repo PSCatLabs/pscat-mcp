@@ -399,6 +399,166 @@ async fn legacy_protocol_clients_work_statelessly() {
     }
 }
 
+// ------------------------------------------------ guide prompts and resources
+
+/// The rmcp client over HTTP: capabilities, `resources/list` and `read`,
+/// `prompts/list` and `get`, and the error codes for unknown names. None of
+/// it starts a worker. `tests/guide.rs` covers the content over stdio.
+#[tokio::test(flavor = "multi_thread")]
+async fn rmcp_client_reads_guide_resources_and_prompts() {
+    use rmcp::model::{ErrorCode, GetPromptRequestParams, ReadResourceRequestParams};
+    use rmcp::service::ServiceError;
+
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(srv.mcp()).auth_header(TOKEN),
+    );
+    let client = ().serve(transport).await.expect("initialize");
+    let info = client.peer_info().expect("server info");
+    assert!(info.capabilities.prompts.is_some());
+    assert!(info.capabilities.resources.is_some());
+
+    let resources = client.list_all_resources().await.expect("resources/list");
+    assert_eq!(resources.len(), pscat_mcp::guide::files().len());
+    for r in &resources {
+        let read = client
+            .read_resource(ReadResourceRequestParams::new(r.uri.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", r.uri));
+        let v = serde_json::to_value(&read).unwrap();
+        let text = v["contents"][0]["text"].as_str().expect("text");
+        let path = r.uri.strip_prefix("pscat://guide/").unwrap();
+        let original = pscat_mcp::guide::files()
+            .iter()
+            .find(|(p, _)| *p == path)
+            .unwrap()
+            .1;
+        assert!(text.ends_with(original), "{}", r.uri);
+        assert_eq!(v["contents"][0]["mimeType"], "text/markdown");
+    }
+    let prompts = client.list_all_prompts().await.expect("prompts/list");
+    assert_eq!(prompts.len(), 3);
+    let got = client
+        .get_prompt(
+            GetPromptRequestParams::new("chart")
+                .with_arguments(json!({"kind": "line"}).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("prompts/get");
+    let text = &got.messages[0].content.as_text().unwrap().text;
+    assert!(
+        text.contains("line chart with PSCat's lib/dataviz.ps"),
+        "{text}"
+    );
+
+    let code = |e: ServiceError| match e {
+        ServiceError::McpError(d) => d.code,
+        other => panic!("not an MCP error: {other}"),
+    };
+    let e = client
+        .read_resource(ReadResourceRequestParams::new("pscat://guide/missing.md"))
+        .await
+        .unwrap_err();
+    assert_eq!(code(e), ErrorCode::RESOURCE_NOT_FOUND);
+    let e = client
+        .get_prompt(GetPromptRequestParams::new("missing"))
+        .await
+        .unwrap_err();
+    assert_eq!(code(e), ErrorCode::INVALID_PARAMS);
+    client.cancel().await.ok();
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+/// The same over raw stateless HTTP, at 2026-07-28 (sessionless, `_meta`,
+/// `Mcp-Method`/`Mcp-Name`) and at 2025-06-18.
+#[tokio::test(flavor = "multi_thread")]
+async fn guide_requests_work_statelessly_at_every_protocol_version() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let requests = [
+        ("resources/list", None, json!({})),
+        (
+            "resources/read",
+            Some("pscat://guide/psviz/SKILL.md"),
+            json!({"uri": "pscat://guide/psviz/SKILL.md"}),
+        ),
+        ("prompts/list", None, json!({})),
+        (
+            "prompts/get",
+            Some("diagram"),
+            json!({"name": "diagram", "arguments": {"format": "png"}}),
+        ),
+        (
+            "resources/read",
+            Some("pscat://guide/none.md"),
+            json!({"uri": "pscat://guide/none.md"}),
+        ),
+    ];
+    for (i, (method, name, params)) in requests.iter().enumerate() {
+        // 2026-07-28: no initialize; the request carries everything.
+        let mut p = params.clone();
+        p["_meta"] = meta.clone();
+        let body = json!({"jsonrpc": "2.0", "id": i + 10, "method": method, "params": p});
+        let mut req = reqwest::Client::new()
+            .post(srv.mcp())
+            .header("Content-Type", "application/json")
+            .header("Accept", ACCEPT)
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", *method);
+        if let Some(n) = name {
+            req = req.header("Mcp-Name", *n);
+        }
+        let r = req.body(body.to_string()).send().await.expect("request");
+        let status = r.status().as_u16();
+        let resp: Value = serde_json::from_str(&r.text().await.unwrap()).expect("json");
+        assert_eq!(status, 200, "{method}: {resp}");
+        // 2025-06-18: the same request on its own, after an initialize.
+        let (s, _, init) = post(
+            &srv.mcp(),
+            Some(TOKEN),
+            None,
+            &initialize_body("2025-06-18"),
+        )
+        .await;
+        assert_eq!(s, 200, "{init}");
+        let legacy = json!({"jsonrpc": "2.0", "id": i + 20, "method": method, "params": params});
+        let (s, _, old) = post(&srv.mcp(), Some(TOKEN), Some("2025-06-18"), &legacy).await;
+        assert_eq!(s, 200, "{method}: {old}");
+        // Resource not found is -32002 before 2026-07-28 and invalid params
+        // (-32602) from it on; rmcp maps the code per negotiated version.
+        for (resp, not_found) in [(&resp, -32602), (&old, -32002)] {
+            if name == &Some("pscat://guide/none.md") {
+                assert_eq!(resp["error"]["code"], not_found, "{resp}");
+                assert_eq!(resp["error"]["data"]["uri"], "pscat://guide/none.md");
+                continue;
+            }
+            let result = &resp["result"];
+            assert!(resp["error"].is_null(), "{method}: {resp}");
+            match *method {
+                "resources/list" => assert!(result["resources"].as_array().unwrap().len() > 10),
+                "resources/read" => assert!(
+                    result["contents"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("psviz")
+                ),
+                "prompts/list" => assert_eq!(result["prompts"].as_array().unwrap().len(), 3),
+                _ => assert!(
+                    result["messages"][0]["content"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("render_postscript")
+                ),
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------- F: concurrency
 
 /// Wraps the real backend, recording how many jobs run at once.

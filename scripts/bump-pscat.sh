@@ -9,7 +9,9 @@
 # The tag in Cargo.toml is the single place the PSCat version is chosen.
 # Cargo.lock records the exact commit, build.rs reports the version from
 # Cargo.lock, and every build uses `--locked`, so the binary, the image tag
-# (pscat-<version>) and get_renderer_info all agree.
+# (pscat-<version>) and get_renderer_info all agree. The PSCat plugin's
+# skills, which the server serves as MCP resources and prompts, are then
+# copied from the new pin into guide/ (scripts/vendor-guide.py).
 #
 # Refuses to move to an older tag unless --allow-downgrade is given. When
 # GITHUB_OUTPUT is set (GitHub Actions), writes changed/old_tag/new_tag/
@@ -87,7 +89,17 @@ if [[ "$new_tag" != "$old_tag" && $allow_downgrade -eq 0 ]]; then
   fi
 fi
 
-before="$(cat Cargo.toml Cargo.lock | git hash-object --stdin)"
+# Cargo.toml, Cargo.lock and every file under guide/ (names and contents).
+state_hash() {
+  {
+    cat Cargo.toml Cargo.lock
+    if [[ -d guide ]]; then
+      find guide -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s\n' "$f"; cat "$f"; done
+    fi
+  } | git hash-object --stdin
+}
+
+before="$(state_hash)"
 if [[ "$new_tag" == "$old_tag" ]]; then
   echo "PSCat is already pinned to $old_tag ($old_version)."
 else
@@ -116,8 +128,12 @@ open(p, "w").write(re.sub(r"(?m)^version = \".*\"", "version = \"%s\"" % v, s, c
   cargo metadata --format-version 1 >/dev/null   # refresh the root entry in Cargo.lock
 fi
 
+# The plugin skills of the pinned revision, byte for byte (tests/guide.rs
+# fails if guide/ and Cargo.lock disagree).
+python3 -I scripts/vendor-guide.py
+
 # "changed" means the files changed, whatever options were given.
-after="$(cat Cargo.toml Cargo.lock | git hash-object --stdin)"
+after="$(state_hash)"
 changed=false
 [[ "$before" == "$after" ]] || changed=true
 

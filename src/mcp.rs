@@ -25,6 +25,9 @@
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
 //!   [`CatalogSlice`] fields at the top level) plus the same slice as text.
 //! * `get_renderer_info` — a [`RendererInfo`] object.
+//!
+//! Prompts and resources (the PSCat plugin's skills) come from
+//! [`crate::guide`]; their handlers below only forward to it.
 
 use std::sync::Arc;
 
@@ -33,8 +36,10 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ResourceContents, ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams,
+    GetPromptResponse, Implementation, ListPromptsResult, ListResourcesResult,
+    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ResourceContents,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -47,6 +52,7 @@ use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{ChalkboardParams, GenerateJob};
+use crate::guide::{Guide, ServerFacts};
 use crate::handwrite::HandwriteParams;
 use crate::render::{
     DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, RenderError, RenderOutput, RenderRequest,
@@ -597,6 +603,7 @@ pub struct RendererInfo {
 pub struct PscatMcp {
     service: Arc<RenderService>,
     tool_router: ToolRouter<Self>,
+    guide: Arc<Guide>,
 }
 
 impl From<CapabilitiesArgs> for CatalogQuery {
@@ -693,9 +700,25 @@ impl PscatMcp {
                 strip_uint_formats(Arc::make_mut(schema));
             }
         }
+        let facts = ServerFacts {
+            tools: tool_router
+                .list_all()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect(),
+            render_arguments: tool_router
+                .get("render_postscript")
+                .and_then(|t| t.input_schema.get("properties"))
+                .and_then(Value::as_object)
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default(),
+            render_timeout_ms: limits.render_timeout_ms,
+            max_prompt_argument_bytes: limits.max_prompt_argument_bytes,
+        };
         PscatMcp {
             service,
             tool_router,
+            guide: Arc::new(Guide::new(&facts)),
         }
     }
 
@@ -1103,8 +1126,50 @@ impl ServerHandler for PscatMcp {
         })
     }
 
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult::with_all_items(self.guide.prompts()))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        self.guide
+            .prompt(&request.name, request.arguments.as_ref())
+            .map(GetPromptResponse::from)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(self.guide.resources()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        self.guide
+            .read(&request.uri)
+            .map(ReadResourceResponse::from)
+    }
+
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_prompts()
+                .enable_resources()
+                .enable_tools()
+                .build(),
+        )
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
                 "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
@@ -1113,7 +1178,9 @@ impl ServerHandler for PscatMcp {
                  labelled review sheet, \
                  and lists the fonts, palettes, page \
                  templates and procedures the interpreter has. Programs run in a sandbox with no file \
-                 writes, no network, and file reads limited to PSCat's built-in lib/.",
+                 writes, no network, and file reads limited to PSCat's built-in lib/. The PSCat \
+                 plugin's skills (guides to writing PSCat PostScript) are available as text/markdown \
+                 resources under pscat://guide/ and as the prompts diagram, generative_art and chart.",
             )
     }
 }

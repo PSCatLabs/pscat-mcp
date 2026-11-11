@@ -176,6 +176,9 @@ async fn lists_annotated_tools() {
     assert_eq!(server.name, "pscat-mcp");
     assert_eq!(server.version, env!("CARGO_PKG_VERSION"));
     assert!(info.capabilities.tools.is_some());
+    // The guide prompts and resources (tests/guide.rs).
+    assert!(info.capabilities.prompts.is_some());
+    assert!(info.capabilities.resources.is_some());
 
     let tools = tools(&client).await;
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();

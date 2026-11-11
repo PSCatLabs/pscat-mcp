@@ -35,9 +35,14 @@ It is a git dependency because crates.io only has 0.6.3, which lacks the
 `Interp::set_limits` and `Interp::set_read_roots` APIs this server relies on.
 `get_renderer_info` and every render result report the running version.
 
+The PSCat plugin's skills (`plugin/skills/` at the same commit) are vendored
+unchanged in [`guide/`](guide/), with the tag and commit in
+`guide/SOURCE.json`, and served as [prompts and resources](#prompts-and-resources).
+
 pscat-mcp makes a release after each PSCat release.
 
-* `scripts/bump-pscat.sh <tag>` or the **Bump PSCat** workflow moves the pin.
+* `scripts/bump-pscat.sh <tag>` or the **Bump PSCat** workflow moves the pin
+  and refreshes `guide/` from it (`scripts/vendor-guide.py`).
   The workflow runs daily and on demand, and opens a pull request.
 * Tagging `v<version>` publishes the image.
 
@@ -80,6 +85,57 @@ Failures are tool results with `isError: true` and
 `too_many_pixels`, `postscript_error`, `limit_exceeded`, `timeout`,
 `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
 `worker_failed`. A failed render never returns an image.
+
+## Prompts and resources
+
+PSCat's own plugin teaches an agent to write good PSCat PostScript with four
+skills: `pscat`, `psart`, `psviz` and `functional-postscript`. This server
+offers the same text through standard MCP features, for the client (or the
+user) to use when it chooses. The tool descriptions and server instructions
+stay neutral: they say the guides exist, not when to read them.
+
+* **Resources** (`resources/list`, `resources/read`): each of the 14 files of
+  PSCat's `plugin/skills/` is a `text/markdown` resource at
+  `pscat://guide/<path>`: `pscat://guide/pscat/SKILL.md`,
+  `pscat://guide/psart/references/paint.md`, and so on. The URIs mirror the
+  plugin's layout, so the relative links in the text resolve. The largest
+  read is about 18 KB. There are no resource templates or subscriptions.
+* **Prompts** (`prompts/list`, `prompts/get`), every argument optional:
+
+  | Prompt | Arguments | Attaches |
+  |---|---|---|
+  | `diagram` | `subject`, `format` (`png`\|`svg`\|`pdf`) | `pscat://guide/pscat/SKILL.md` |
+  | `generative_art` | `subject`, `palette` (an artkit palette name), `seed` (integer) | `pscat://guide/psart/SKILL.md` |
+  | `chart` | `kind` (`bar`, `line`, `area`, `scatter`, `pie`, `function`, `parametric`, `polar`, `surface`), `data` | `pscat://guide/psviz/SKILL.md` |
+
+  `prompts/get` returns one user message: a short task written by this
+  server (render with `render_postscript`, standard 35 fonts, refine after
+  looking), then the attached document as `resources/read` serves it.
+* **PSCat's text is not rewritten.** It was written for the plugin, which
+  runs the `pscat` command line on the user's machine, and it mentions things
+  this server doesn't have: `out_path`, the `pscat` CLI, `eval_postscript`,
+  the render jobs (`start_render` and the rest, #33), `bands`, `bbox`, and
+  reading the user's files. Each document is served as
+  a short note written by this server, then PSCat's text byte for byte. The
+  note gives the source (tag, commit, path, copyright, MIT OR Apache-2.0) and
+  what differs here. Its tool lists are computed from the running server's
+  own tools, so they stay true as tools are added.
+* An unknown URI is JSON-RPC error `-32002` (resource not found; `-32602`
+  for a 2026-07-28 client, as that version specifies); an unknown
+  prompt, an unknown argument or a bad argument value is `-32602` (invalid
+  params). Nothing here starts a worker.
+* Every library the guides name (`lib/artkit.ps`, `lib/graph.ps`,
+  `lib/dataviz.ps`, `lib/functional.ps`, the style packs, ...) loads in this
+  server's worker, and every runnable `postscript` block in them renders
+  (`tests/guide.rs`). Their examples that read a file, such as the JPEG
+  background in `psart`, fail here with `invalidfileaccess`.
+
+Which clients show prompts and resources, and how, is in
+[`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md#prompts-and-resources-in-each-client).
+In short: Claude Code shows prompts as slash commands and resources as `@`
+mentions, and its model can read resources itself; Codex's model can read
+resources but Codex has no prompts; Claude.ai lets the user attach both;
+ChatGPT appears to use neither.
 
 ## Build
 
@@ -213,6 +269,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_ALLOWED_ORIGINS` | empty (reject any `Origin`) | browser origins allowed |
 | `PSCAT_MCP_MAX_SOURCE_BYTES` | 262144 | largest program |
 | `PSCAT_MCP_MAX_LATEX_BYTES` | 4096 | largest `chalkboard_math` formula (`source_too_large`) |
+| `PSCAT_MCP_MAX_PROMPT_ARGUMENT_BYTES` | 8192 | longest value of one guide prompt argument (`invalid_params`); see [Prompts and resources](#prompts-and-resources) |
 | `PSCAT_MCP_MAX_HANDWRITE_BYTES` | 65536 | largest `handwrite` text (`source_too_large`); also raises the HTTP request-body limit if larger than the source limit |
 | `PSCAT_MCP_MAX_SHEET_CELLS` | 32 | cells (dpi items over all rows) in one `review_sheet` (the plugin's cap) |
 | `PSCAT_MCP_MAX_SHEET_SOURCE_BYTES` | `PSCAT_MCP_MAX_SOURCE_BYTES` | source bytes of one `review_sheet`, all entries together (each entry is also held to the source limit); also raises the HTTP request-body limit if larger than the source limit |
@@ -317,6 +374,11 @@ control is enforced by PSCat and which by the server.
   Labels in Korean, Japanese, Chinese or Thai need PSCat's `cjk-thai` font
   pack, which the worker's empty environment does not find with a standard
   install: they are drawn as `?`. A label is text only, never PostScript.
+* **The guides were written for the PSCat plugin.** They are served
+  unchanged, with a note on what differs here (see
+  [Prompts and resources](#prompts-and-resources)); an agent that follows a
+  `pscat --png` command or an `out_path` example literally has to map it
+  to a tool call.
 * **`validate_postscript` executes the program.** PSCat has no separate
   static checker beyond its tokenizer, so validation runs the program under
   the same limits.
@@ -327,7 +389,9 @@ control is enforced by PSCat and which by the server.
   Code 2.1.322 over HTTP (its traffic is recorded in
   `evals/server/fixtures/` and replayed in CI; it speaks 2026-07-28). Not
   yet tested with Codex (its fixture is synthesized), ChatGPT, Gemini, Muse
-  or MCP Inspector.
+  or MCP Inspector. The guide prompts and resources are tested with the
+  rmcp client and raw JSON-RPC only; how clients show them is from their
+  docs and source, not tried in a client.
 * **`Accept` header.** HTTP clients must accept both `application/json` and
   `text/event-stream`, as the spec requires. rmcp answers 406 otherwise.
 
@@ -361,9 +425,10 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 board (dark slate, bright chalk, same image twice), `board: false` transparent and an RGB board, SVG and PDF inline, the LaTeX size limit, an unsupported command as `postscript_error` naming it, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |
 | `tests/handwrite.rs` | `handwrite` over stdio: the tool's schema matches the plugin's arguments, a default 612×146 note with ink pixels in the ink colour, ink, size, width, dpi and `paper: ruled` (ruled lines and margin rule, none on plain paper), the same seed twice giving identical bytes, the text limit, a note too tall for the pixel cap or the side limit as a structured error (and a 500 000-line text refused, not killed) with the server serving the next call, the measuring pass under the step limit (and a limit hit inside a megabyte word keeping the reply small), argument errors through the envelope, and empty, whitespace-only, non-Latin and control-character text |
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
+| `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the PSCat checkout cargo resolves, and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
-| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot |
-| `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Exact assertions on `isError` and the error code, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
+| `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
+| `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture records #17 as a known failure that fails the test when it is fixed. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 
