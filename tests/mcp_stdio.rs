@@ -334,6 +334,50 @@ async fn tool_schemas_have_no_uint_formats() {
     client.cancel().await.ok();
 }
 
+/// The points reported are the page drawn: the US Letter default, the
+/// requested size at another dpi, and a size the program set with
+/// `setpagedevice` (PSCat's own check: the reported pixels agree with it).
+#[tokio::test]
+async fn reports_the_page_in_points_as_drawn() {
+    let client = start().await;
+    let pt = |r: &CallToolResult| {
+        let a = &structured(r)["artifacts"][0];
+        (
+            a["width_pt"].as_f64().unwrap(),
+            a["height_pt"].as_f64().unwrap(),
+            a["width_px"].as_u64().unwrap(),
+            a["height_px"].as_u64().unwrap(),
+        )
+    };
+
+    let r = call(&client, "render_postscript", json!({"source": "showpage"})).await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert_eq!(pt(&r), (612.0, 792.0, 612, 792));
+    assert!(text_of(&r).contains("612x792 pt = 612x792 px"));
+
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": "showpage", "width": 300, "height": 100, "dpi": 144}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert_eq!(pt(&r), (300.0, 100.0, 600, 200));
+    assert!(text_of(&r).contains("300x100 pt = 600x200 px"));
+
+    // A program's own page size replaces the default, and the points follow it.
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": "<< /PageSize [250 120] >> setpagedevice 0 0 moveto 10 10 rlineto stroke showpage",
+               "dpi": 144}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert_eq!(pt(&r), (250.0, 120.0, 500, 240));
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn renders_png_with_expected_pixels() {
     let client = start().await;
@@ -368,6 +412,9 @@ async fn renders_png_with_expected_pixels() {
     assert_eq!(s["page_count"], 1);
     assert_eq!(s["artifacts"][0]["width_px"], 200);
     assert_eq!(s["artifacts"][0]["height_px"], 100);
+    // At 72 dpi the points are the pixels.
+    assert_eq!(s["artifacts"][0]["width_pt"].as_f64(), Some(200.0));
+    assert_eq!(s["artifacts"][0]["height_pt"].as_f64(), Some(100.0));
     assert_eq!(s["artifacts"][0]["bytes"], bytes.len());
     assert_eq!(s["renderer"]["engine"], "pscat");
     assert!(

@@ -164,6 +164,9 @@ async fn writes_a_formula_on_the_default_board() {
     assert_eq!(s["page_count"], 1);
     assert_eq!(s["artifacts"][0]["width_px"], 1600);
     assert_eq!(s["artifacts"][0]["height_px"], 800);
+    // The board is 800x400 points at the default 144 dpi.
+    assert_eq!(s["artifacts"][0]["width_pt"].as_f64(), Some(800.0));
+    assert_eq!(s["artifacts"][0]["height_pt"].as_f64(), Some(400.0));
     let (w, h, px) = png_of(&r);
     assert_eq!((w, h), (1600, 800));
     // The slate is dark and opaque at the edges, where nothing is written.
@@ -180,6 +183,39 @@ async fn writes_a_formula_on_the_default_board() {
     // The same arguments draw the same image.
     let again = call(&client, json!({"latex": r"e^{i\pi} + 1 = 0"})).await;
     assert_eq!(png_of(&again).2, px);
+    client.cancel().await.ok();
+}
+
+/// The result states the board in points and in pixels (#78): a 400x200 pt
+/// board at the default 144 dpi is 800x400 px, in the envelope and in the
+/// text, so it is not read as "width and height were ignored".
+#[tokio::test]
+async fn reports_the_board_in_points_and_pixels() {
+    let client = start(&[]).await;
+    let r = call(&client, json!({"latex": "x", "width": 400, "height": 200})).await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let a = &structured(&r)["artifacts"][0];
+    assert_eq!(a["width_pt"].as_f64(), Some(400.0), "{a}");
+    assert_eq!(a["height_pt"].as_f64(), Some(200.0), "{a}");
+    assert_eq!(a["width_px"], 800);
+    assert_eq!(a["height_px"], 400);
+    assert!(
+        text_of(&r).contains("400x200 pt = 800x400 px"),
+        "{}",
+        text_of(&r)
+    );
+
+    // Another dpi changes the pixels, never the points.
+    let r = call(
+        &client,
+        json!({"latex": "x", "width": 400, "height": 200, "dpi": 72, "format": "pdf"}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let a = &structured(&r)["artifacts"][0];
+    assert_eq!(a["width_pt"].as_f64(), Some(400.0), "{a}");
+    assert_eq!(a["height_pt"].as_f64(), Some(200.0), "{a}");
+    assert_eq!(a["width_px"], 400);
     client.cancel().await.ok();
 }
 

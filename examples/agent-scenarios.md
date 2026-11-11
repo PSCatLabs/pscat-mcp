@@ -80,8 +80,8 @@ may be omitted (PNG is the default).
 - `content[0]`: `{"type": "image", "mimeType": "image/png", "data": "<base64>"}`
   — a 400×300 PNG: a red circle, a green rounded square with a blue ring, a
   gold star, and the caption "PSCat shapes".
-- `content[1]`: text such as `Rendered 1 page as PNG (400x300 px, … bytes) with PSCat 0.7.0-rc.4 in … ms.`
-- `structuredContent`: `{"ok": true, "format": "png", "mime_type": "image/png", "page_count": 1, "artifacts": [{"page": 1, "width_px": 400, "height_px": 300, "bytes": …, "mime_type": "image/png"}], …}`
+- `content[1]`: text such as `Rendered 1 page as PNG (400x300 pt = 400x300 px, … bytes) with PSCat 0.7.0-rc.4 in … ms.`
+- `structuredContent`: `{"ok": true, "format": "png", "mime_type": "image/png", "page_count": 1, "artifacts": [{"page": 1, "width_px": 400, "height_px": 300, "width_pt": 400, "height_pt": 300, "bytes": …, "mime_type": "image/png"}], …}`
 - The agent displays the image or describes it accurately.
 
 Variant: "…as a PDF" → `"format": "pdf"`; one `resource` block with

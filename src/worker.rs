@@ -156,6 +156,14 @@ pub struct Artifact {
     pub width_px: u32,
     /// Height in device pixels.
     pub height_px: u32,
+    /// Width in points of the page as drawn (after any default and any
+    /// `setpagedevice`); `None` where the size in points is not known (a
+    /// review sheet).
+    #[serde(default)]
+    pub width_pt: Option<f64>,
+    /// Height in points of the page as drawn; see `width_pt`.
+    #[serde(default)]
+    pub height_pt: Option<f64>,
     /// Base64 of the artifact bytes.
     pub data_base64: String,
     /// Length of the decoded bytes.
@@ -581,6 +589,8 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
             page: Some(1),
             width_px: report.width_px,
             height_px: report.height_px,
+            width_pt: None,
+            height_pt: None,
             byte_len: sheet.png.len(),
             data_base64: b64.encode(&sheet.png),
         }],
@@ -590,6 +600,24 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
         sheet: Some(report),
         ..WorkerResult::empty()
     }
+}
+
+/// The size in points of a page of `width_px` x `height_px` device pixels
+/// rendered at `dpi`, as `px * 72 / dpi` rounded to 0.01 pt.
+///
+/// Computed from the pixels and the dpi alone, so it is the page as drawn
+/// (after the default size and any `setpagedevice`). The pixel size is the
+/// point size times dpi / 72, rounded, so a fractional page size comes back
+/// as the rounded pixels converted back: 595.5 pt at 72 dpi is 596 px, and
+/// is reported as 596 pt.
+pub(crate) fn points_from_px(dpi: f64, width_px: u32, height_px: u32) -> (f64, f64) {
+    let pt = |px: u32| (f64::from(px) * 72.0 / dpi * 100.0).round() / 100.0;
+    (pt(width_px), pt(height_px))
+}
+
+fn points_of(job: &WorkerJob, width_px: u32, height_px: u32) -> (Option<f64>, Option<f64>) {
+    let (w, h) = points_from_px(job.dpi, width_px, height_px);
+    (Some(w), Some(h))
 }
 
 fn encode(
@@ -630,10 +658,13 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(shot.png.len())?;
+                let (width_pt, height_pt) = points_of(job, shot.width, shot.height);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: shot.width,
                     height_px: shot.height,
+                    width_pt,
+                    height_pt,
                     byte_len: shot.png.len(),
                     data_base64: b64.encode(&shot.png),
                 });
@@ -645,10 +676,13 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(png.len())?;
+                let (width_pt, height_pt) = points_of(job, page.width(), page.height());
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: page.width(),
                     height_px: page.height(),
+                    width_pt,
+                    height_pt,
                     byte_len: png.len(),
                     data_base64: b64.encode(&png),
                 });
@@ -672,10 +706,13 @@ fn encode(
             for (i, svg) in svgs.iter().enumerate() {
                 check(svg.len())?;
                 let (w, h) = pages.get(i).map_or((0, 0), |p| (p.width(), p.height()));
+                let (width_pt, height_pt) = points_of(job, w, h);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: w,
                     height_px: h,
+                    width_pt,
+                    height_pt,
                     byte_len: svg.len(),
                     data_base64: b64.encode(svg.as_bytes()),
                 });
@@ -687,10 +724,13 @@ fn encode(
             })?;
             check(pdf.len())?;
             let (w, h) = pages.first().map_or((0, 0), |p| (p.width(), p.height()));
+            let (width_pt, height_pt) = points_of(job, w, h);
             artifacts.push(Artifact {
                 page: None,
                 width_px: w,
                 height_px: h,
+                width_pt,
+                height_pt,
                 byte_len: pdf.len(),
                 data_base64: b64.encode(&pdf),
             });
@@ -702,6 +742,15 @@ fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_come_from_pixels_and_dpi() {
+        assert_eq!(points_from_px(144.0, 800, 400), (400.0, 200.0));
+        assert_eq!(points_from_px(300.0, 1000, 1000), (240.0, 240.0));
+        assert_eq!(points_from_px(72.0, 612, 792), (612.0, 792.0));
+        // Rounded to 0.01 pt: 827 px at 100 dpi is 595.44 pt.
+        assert_eq!(points_from_px(100.0, 827, 1), (595.44, 0.72));
+    }
     use crate::generate::GeneratedProgram;
 
     fn job() -> WorkerJob {
