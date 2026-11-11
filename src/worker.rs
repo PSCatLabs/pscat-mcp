@@ -109,6 +109,8 @@ pub struct InterpLimits {
     pub max_pages: usize,
     /// Most bytes of raw artifact data (all pages together).
     pub max_output_bytes: usize,
+    /// Most bytes of SVG (all pages together); at most `max_output_bytes`.
+    pub max_svg_bytes: usize,
     /// Most bytes of captured program stdout returned (the rest is cut).
     pub max_program_output_bytes: usize,
 }
@@ -209,6 +211,13 @@ pub enum WorkerFailure {
     /// Artifact bytes over `max_output_bytes`.
     OutputTooLarge {
         /// Bytes reached.
+        bytes: usize,
+        /// The limit.
+        max: usize,
+    },
+    /// SVG bytes over `max_svg_bytes`, found before any page is encoded.
+    SvgTooLarge {
+        /// Bytes of SVG, all pages together.
         bytes: usize,
         /// The limit.
         max: usize,
@@ -658,6 +667,15 @@ fn encode(
             let svgs = interp.svg_pages().ok_or_else(|| WorkerFailure::Encode {
                 message: "SVG recording was not enabled".into(),
             })?;
+            // The whole size first, so an SVG over its cap is never base64
+            // encoded, copied into a result or sent to the server.
+            let svg_total = svgs.iter().fold(0usize, |n, s| n.saturating_add(s.len()));
+            if svg_total > job.limits.max_svg_bytes {
+                return Err(WorkerFailure::SvgTooLarge {
+                    bytes: svg_total,
+                    max: job.limits.max_svg_bytes,
+                });
+            }
             for (i, svg) in svgs.iter().enumerate() {
                 check(svg.len())?;
                 let (w, h) = pages.get(i).map_or((0, 0), |p| (p.width(), p.height()));
@@ -708,6 +726,7 @@ mod tests {
                 max_page_pixels: 1,
                 max_pages: 1,
                 max_output_bytes: 1,
+                max_svg_bytes: 1,
                 max_program_output_bytes: 1,
             },
             generate: None,

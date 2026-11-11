@@ -1,6 +1,6 @@
 {
   "id": "chalkboard-math",
-  "title": "Scenario 7: a LaTeX formula on a chalkboard; SVG and PDF inline; TeX, config and limit errors",
+  "title": "Scenario 7: a LaTeX formula on a chalkboard; PDF inline, SVG over the SVG cap; TeX, config and limit errors",
   "origin": "examples/agent-scenarios.md section 7; tests/chalkboard.rs",
   "steps": [
     {
@@ -79,7 +79,7 @@
       }
     },
     {
-      "label": "svg inline for a small board",
+      "label": "a board's SVG runs to megabytes: over the default SVG cap, so output_too_large (see scenario 81)",
       "tool": "chalkboard_math",
       "args": {
         "latex": "\\frac{1}{2}",
@@ -89,22 +89,16 @@
         "dpi": 72
       },
       "result": {
-        "content_types": [
-          "resource:image/svg+xml",
-          "text"
-        ],
+        "is_error": true,
+        "error_code": "output_too_large",
         "forbid_content_types": [
-          "image"
+          "image",
+          "resource"
         ],
         "structured": {
-          "ok": true,
-          "format": "svg"
-        },
-        "resource": {
-          "mime": "image/svg+xml",
-          "contains": [
-            "<svg"
-          ]
+          "ok": false,
+          "error.input.code": "svg_bytes",
+          "error.input.limit_bytes": 262144
         },
         "renders_executed": 1
       }

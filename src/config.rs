@@ -10,6 +10,12 @@ use std::time::Duration;
 
 use clap::Args;
 
+/// The default inline SVG cap, in bytes. SVG is returned as text the model
+/// reads: Claude Code turned an 88 KB SVG resource into a saved file
+/// because it passed the tool-result token limit (PSCatLabs/pscat-mcp#31).
+/// 256 KiB is a few times that, and the server cannot see the client's
+/// own limit; raise it for a client that takes more.
+pub const DEFAULT_MAX_SVG_BYTES: usize = 256 * 1024;
 /// Hard per-side ceiling PSCat applies to every page.
 pub const PSCAT_MAX_SIDE_PX: u32 = 8000;
 /// The most pixels a review sheet can have: 8000 a side.
@@ -89,6 +95,14 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_MAX_OUTPUT_BYTES", default_value_t = 8 * 1024 * 1024)]
     pub max_output_bytes: usize,
 
+    /// Most bytes of SVG (all pages together) returned inline. SVG comes
+    /// back as text the model reads, and glyph outlines and gradients make
+    /// it large, so its cap is far below the output limit. Defaults to
+    /// 256 KiB, or the output limit if that is smaller; it may not exceed
+    /// the output limit.
+    #[arg(long, env = "PSCAT_MCP_MAX_SVG_BYTES")]
+    pub max_svg_bytes: Option<usize>,
+
     /// Most bytes of program stdout (`print`, `=`) returned.
     #[arg(long, env = "PSCAT_MCP_MAX_PROGRAM_OUTPUT_BYTES", default_value_t = 16 * 1024)]
     pub max_program_output_bytes: usize,
@@ -152,6 +166,7 @@ impl Default for LimitsConfig {
             max_pixels: 16_000_000,
             max_pages: 10,
             max_output_bytes: 8 * 1024 * 1024,
+            max_svg_bytes: None,
             max_program_output_bytes: 16 * 1024,
             max_concurrent_renders: None,
             queue_timeout_ms: 10_000,
@@ -178,6 +193,14 @@ impl LimitsConfig {
             Some(ms) => Some(Duration::from_millis(ms)),
             None => Some(below_with_margin(self.render_timeout_ms)),
         }
+    }
+
+    /// Most bytes of SVG (all pages together) returned inline: the
+    /// configured limit, or [`DEFAULT_MAX_SVG_BYTES`] held to the output
+    /// limit.
+    pub fn svg_bytes(&self) -> usize {
+        self.max_svg_bytes
+            .unwrap_or_else(|| DEFAULT_MAX_SVG_BYTES.min(self.max_output_bytes))
     }
 
     /// Most bytes of PostScript in one sheet.
@@ -282,6 +305,16 @@ impl LimitsConfig {
         }
         if self.max_pixels == 0 || self.max_pages == 0 || self.max_output_bytes == 0 {
             return Err("max-pixels, max-pages and max-output-bytes must be positive".into());
+        }
+        if self.max_svg_bytes == Some(0) {
+            return Err("max-svg-bytes must be positive".into());
+        }
+        if self.svg_bytes() > self.max_output_bytes {
+            return Err(format!(
+                "max-svg-bytes ({}) may not exceed max-output-bytes ({})",
+                self.svg_bytes(),
+                self.max_output_bytes
+            ));
         }
         if self.max_sheet_cells == 0
             || self.sheet_source_bytes() == 0
@@ -627,6 +660,41 @@ mod tests {
             ..LimitsConfig::default()
         };
         assert!(bad.check().is_err());
+    }
+
+    #[test]
+    fn the_svg_cap_defaults_below_the_output_cap_and_never_exceeds_it() {
+        let l = LimitsConfig::default();
+        assert_eq!(l.svg_bytes(), 256 * 1024);
+        assert!(l.check().is_ok());
+        // A small output cap pulls the default down with it.
+        let small = LimitsConfig {
+            max_output_bytes: 6000,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(small.svg_bytes(), 6000);
+        assert!(small.check().is_ok());
+        // An explicit cap above the output cap is refused, not clamped:
+        // the operator asked for something the server cannot do.
+        let over = LimitsConfig {
+            max_svg_bytes: Some(l.max_output_bytes + 1),
+            ..LimitsConfig::default()
+        };
+        let e = over.check().unwrap_err();
+        assert!(
+            e.contains("max-svg-bytes") && e.contains("max-output-bytes"),
+            "{e}"
+        );
+        let at = LimitsConfig {
+            max_svg_bytes: Some(l.max_output_bytes),
+            ..LimitsConfig::default()
+        };
+        assert!(at.check().is_ok());
+        let zero = LimitsConfig {
+            max_svg_bytes: Some(0),
+            ..LimitsConfig::default()
+        };
+        assert!(zero.check().is_err());
     }
 
     #[test]

@@ -33,7 +33,8 @@ It also offers the PSCat plugin's skills as `text/markdown` resources
 Every failure is `isError: true` with a text explanation and
 `structuredContent.error = {code, message, postscript?, program_output?, input?}`
 (`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error,
-`handwrite`'s `{code: "height"}` for a note too tall, and `review_sheet`'s
+`handwrite`'s `{code: "height"}` for a note too tall, the SVG cap's
+`{code: "svg_bytes", limit_bytes, reached_bytes}` on `output_too_large`, and `review_sheet`'s
 `{code}` naming the budget or argument that refused a sheet: `cells`,
 `sources`, `source`, `deadline`, `cell_side`, `cell_pixels`, `sheet_side`,
 `sheet_pixels`, `sheet_bytes`, `dpi`, `page`, `arguments`).
@@ -43,7 +44,7 @@ Every failure is `isError: true` with a text explanation and
 `worker_failed`.
 
 Values below assume the default limits (256 KiB source, 20 s timeout,
-16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output). Every result
+16,000,000 pixels, 8000 px per side, 10 pages, 8 MiB output, 256 KiB of SVG). Every result
 quoted was observed against the `pscat-mcp:smoke` container image (PSCat
 0.7.0-rc.4); timings and byte counts will vary.
 
@@ -410,9 +411,9 @@ agent against the container image.
   about 0.3 MB.
 - `board: false` gives chalk alone on a transparent page; `format: "svg"`
   or `"pdf"` comes back inline as an embedded resource, but the default
-  board's SVG (7 to 10 MB, depending on the formula) is near or over the
-  default output limit (`output_too_large`); a smaller board, or PDF (about
-  2.6 MB), fits.
+  board's SVG (7 to 10 MB, depending on the formula) is far over the
+  default SVG limit of 256 KiB (`output_too_large`, `error.input.code`
+  `svg_bytes`, with advice to use PNG); PNG, or PDF (about 2.6 MB), fits.
 - A command outside the subset, for example `\nosuchcommand{x}`, fails
   with `postscript_error`, a message naming the command, and
   `error.input: { "code": "unsupported_command", "token": "\\nosuchcommand" }`.

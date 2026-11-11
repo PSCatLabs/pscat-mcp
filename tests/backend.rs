@@ -32,6 +32,7 @@ fn limits() -> InterpLimits {
         max_page_pixels: 16_000_000,
         max_pages: 10,
         max_output_bytes: 8 * 1024 * 1024,
+        max_svg_bytes: 8 * 1024 * 1024,
         max_program_output_bytes: 16 * 1024,
     }
 }
@@ -302,6 +303,51 @@ async fn output_over_the_cap_is_refused() {
         result.failure
     );
     assert!(result.artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn svg_over_its_cap_is_refused_before_any_page_is_returned() {
+    let result = backend()
+        .execute(
+            job(
+                SCENE,
+                OutputFormat::Svg,
+                Some((200, 100)),
+                InterpLimits {
+                    max_svg_bytes: 100,
+                    ..limits()
+                },
+            ),
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("worker result");
+    assert!(
+        matches!(
+            result.failure,
+            Some(WorkerFailure::SvgTooLarge { max: 100, bytes }) if bytes > 100
+        ),
+        "{:?}",
+        result.failure
+    );
+    assert!(result.artifacts.is_empty());
+    // The same scene as PNG is not held to the SVG cap.
+    let result = backend()
+        .execute(
+            job(
+                SCENE,
+                OutputFormat::Png,
+                Some((200, 100)),
+                InterpLimits {
+                    max_svg_bytes: 100,
+                    ..limits()
+                },
+            ),
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("worker result");
+    assert_eq!(result.failure, None);
 }
 
 /// Many small marks: a large SVG (each rect becomes its own path).
