@@ -610,7 +610,9 @@ Async jobs are on over stdio; over HTTP only with `PSCAT_MCP_ASYNC_JOBS=true`
 - A `job_id` that is unknown, expired, or another client's (another bearer
   token over HTTP) is `unknown_job`. Over the per-client cap (4 unfinished
   jobs) or the server's (16), `start_render` is `server_busy`; when results
-  waiting to be fetched fill the memory budget, `results_budget_exceeded`.
+  waiting to be fetched fill the memory budget, or this client's share of it
+  (`error.input.code` `results_per_principal_bytes`),
+  `results_budget_exceeded`.
 
 This case is covered by `tests/jobs.rs` and
 `evals/server/scenarios/66-async-job.json`; the agent case is

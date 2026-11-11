@@ -683,6 +683,8 @@ pub struct JobsInfo {
     pub result_ttl_ms: u64,
     /// Bytes of results held, all jobs together.
     pub results_budget_bytes: usize,
+    /// Bytes of that budget one client may have reserved and held.
+    pub results_per_principal_bytes: usize,
 }
 
 /// Result of `get_renderer_info`.
@@ -967,6 +969,7 @@ impl PscatMcp {
                     max_jobs: c.max_jobs,
                     result_ttl_ms: c.job_result_ttl_ms,
                     results_budget_bytes: c.job_results_budget_bytes,
+                    results_per_principal_bytes: c.principal_share_bytes(l),
                 }
             },
             capabilities: vec![

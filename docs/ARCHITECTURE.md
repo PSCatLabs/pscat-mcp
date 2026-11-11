@@ -360,8 +360,24 @@ the budget binds before the total cap of 16): a job reserves the largest result 
 accepted, and once finished keeps what it holds (its base64 artifacts and
 stdout, or its error, plus 4 KiB); a job that does not fit is
 `results_budget_exceeded`, after results already fetched are dropped,
-oldest first. A finished job is kept for the result TTL after it finished;
-the store is swept on every access.
+oldest first. One principal may reserve and hold at most its share
+(`PSCAT_MCP_JOB_RESULTS_PER_PRINCIPAL_BYTES`), so it cannot fill the budget
+for the others. It is a separate setting, not a fraction, so an operator
+can state it in bytes beside the budget; by default it is the budget less
+one largest result (about 117 of 128 MiB), so another principal can always
+start a job while a single principal (stdio, one token) keeps nearly all
+of the budget; a budget under two largest results cannot protect a second
+principal whatever the share, so then it is the whole budget. A share
+must hold one largest result and be at most the budget (equal turns it
+off), checked at startup when jobs are on. A refusal names the limit in
+`error.input` (`code` `results_per_principal_bytes` or
+`results_budget_bytes`, `limit_bytes`, `reached_bytes`). Eviction order:
+the requester's own fetched results first, oldest first, then anyone
+else's; a principal over its share gives up only its own. A job that
+cannot fit even after every fetched result is dropped is refused before
+anything is dropped. Unfetched results and cancelled jobs' bookkeeping are
+never dropped early. A finished job is kept for the result TTL after it
+finished; the store is swept on every access.
 
 **States.** `queued`, `running`, `done`, `failed` (the render's own error:
 a PostScript error, a limit, the deadline), `cancelled`. In the Tasks
