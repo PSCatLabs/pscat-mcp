@@ -33,15 +33,8 @@
       "all": [
         "shw",
         "show"
-      ],
-      "any": [
-        [
-          "undefined"
-        ],
-        [
-          "line 4"
-        ]
       ]
     }
-  }
+  },
+  "notes": "The answer must name the misspelled operator and its fix. It need not repeat the error name or line from validate_postscript's result (#44 triage: two of four HTTP answers said only that `shw` should be `show`)."
 }

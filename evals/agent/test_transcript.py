@@ -218,6 +218,15 @@ class TriagedCases(unittest.TestCase):
         self.assertTrue(self.passes("diagram", [self.render(src)], "Here it is."))
         self.assertFalse(self.passes("diagram", [self.render("0 0 moveto (x) show")], "Here it is."))
 
+    def test_diagnose_undefined_needs_the_fix_not_the_error_name(self):
+        src = "%!PS\n/Helvetica findfont 24 scalefont setfont\n72 700 moveto\n(Hello) shw\n0 0 1 setrgbcolor\n72 600 200 50 rectfill\nshowpage\n"
+        report = {"ok": True, "valid": False, "execution_error": {"name": "undefined", "report": "OffendingCommand: shw; Line: 4"}}
+        c = tx.ToolCall("1", "mcp__pscat-render__validate_postscript", SERVER, "validate_postscript", {"source": src})
+        c.result = {"is_error": False, "text": json.dumps(report), "content_types": ["text"], "structured": report}
+        self.assertTrue(self.passes("diagnose-undefined", [c], "Changing `shw` to `show` fixes it."))
+        self.assertFalse(self.passes("diagnose-undefined", [c], "Line 4 has an undefined name."))
+        self.assertFalse(self.passes("diagnose-undefined", [self.render(src)], "`shw` should be `show`."))
+
     def test_huge_source_shortened_copy_must_be_disclosed(self):
         short = "%!PS\n" + "0 0 moveto 1 1 lineto stroke\n" * 10 + "showpage\n"
         told = "I rendered a shortened copy with 10 repeats, not the exact file."
