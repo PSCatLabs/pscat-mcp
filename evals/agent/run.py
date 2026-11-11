@@ -522,8 +522,18 @@ def make_baseline(run_dirs: list[Path], out: Path) -> dict:
 
 
 def repo_commit() -> str | None:
+    """The checkout's last server-source commit, "-dirty" when src/ or the
+    Cargo files have uncommitted changes. It names the binary only if the
+    binary was built from this checkout."""
     try:
-        rev = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True, timeout=10)
+        # The last commit that changed the server's source, so a branch
+        # commit that only touches evals/ or docs/ names the server it ran.
+        rev = subprocess.run(
+            ["git", "-C", str(REPO), "log", "-1", "--format=%h", "--abbrev=12", "--", "src", "Cargo.toml", "Cargo.lock"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         dirty = subprocess.run(
             ["git", "-C", str(REPO), "status", "--porcelain", "--", "src", "Cargo.toml", "Cargo.lock"],
             capture_output=True,
