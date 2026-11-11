@@ -445,6 +445,10 @@ impl JobsConfig {
         if self.tasks && !self.enabled {
             return Err("--tasks needs async jobs (--async-jobs over HTTP)".into());
         }
+        // Settings for jobs that are off cannot stop the server starting.
+        if !self.enabled {
+            return Ok(());
+        }
         if self.job_timeout_ms == 0
             || self.max_jobs_per_principal == 0
             || self.max_jobs == 0
@@ -734,6 +738,14 @@ mod tests {
         ] {
             assert!(bad.check(&l).is_err(), "{bad:?}");
         }
+        // With jobs off (HTTP by default) none of their settings matter,
+        // even with an output limit larger than the default budget.
+        let big_output = LimitsConfig {
+            max_output_bytes: 512 * 1024 * 1024,
+            ..l.clone()
+        };
+        assert!(JobsConfig::default().check(&big_output).is_ok());
+        assert!(j.check(&big_output).is_err());
         let one = LimitsConfig {
             max_concurrent_renders: Some(1),
             ..LimitsConfig::default()

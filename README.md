@@ -376,7 +376,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_JOBS_PER_PRINCIPAL` | 4 | queued or running jobs one client (token, or the stdio user) may have |
 | `PSCAT_MCP_MAX_JOBS` | 16 | queued or running jobs in all |
 | `PSCAT_MCP_JOB_RESULT_TTL_MS` | 3600000 | how long a finished job and its result are kept |
-| `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` | 134217728 | memory for job results, all jobs together; at least one largest result (`PSCAT_MCP_MAX_OUTPUT_BYTES` × 4/3 plus stdout and 4 KiB) |
+| `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` | 134217728 | memory for job results, all jobs together; at least one largest result (`PSCAT_MCP_MAX_OUTPUT_BYTES` × 4/3 plus stdout and 4 KiB); job settings are checked only when jobs are on |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level |
 | `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 

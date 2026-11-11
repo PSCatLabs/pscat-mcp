@@ -389,7 +389,7 @@ async fn an_expired_result_is_gone() {
     let svc = service(
         limits(),
         JobsConfig {
-            job_result_ttl_ms: 300,
+            job_result_ttl_ms: 1_500,
             ..jobs()
         },
         &tag(),
@@ -399,7 +399,7 @@ async fn an_expired_result_is_gone() {
     poll_until_finished(&client, &id).await;
     let r = call(&client, "render_result", json!({ "job_id": id })).await;
     assert_ne!(r["isError"], true, "{r}");
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
     for tool in ["render_status", "render_result", "cancel_render"] {
         let r = call(&client, tool, json!({ "job_id": id })).await;
         assert_eq!(r["isError"], true, "{tool}: {r}");
@@ -625,6 +625,10 @@ async fn a_tasks_client_gets_a_task_and_a_plain_client_a_result() {
         caps["extensions"]["io.modelcontextprotocol/tasks"].is_object(),
         "{caps}"
     );
+    // Prompts and resources (#55) are still advertised.
+    assert!(caps["prompts"].is_object(), "{caps}");
+    assert!(caps["resources"].is_object(), "{caps}");
+    assert!(caps["tools"].is_object(), "{caps}");
 
     // A program past the sync deadline completes as a task.
     let response = tasks
