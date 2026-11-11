@@ -114,6 +114,10 @@ pub struct WorkerJob {
     pub page_points: Option<(u32, u32)>,
     /// Resolution in dots per inch (72 = one pixel per point).
     pub dpi: f64,
+    /// Screen each PNG page like a mono laser printer (PNG only; the
+    /// request layer refuses it for other formats).
+    #[serde(default)]
+    pub halftone: bool,
     /// Interpreter limits.
     pub limits: InterpLimits,
 }
@@ -437,6 +441,25 @@ fn encode(
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut artifacts = Vec::new();
     match job.format {
+        OutputFormat::Png if job.halftone => {
+            // Screened here, in the worker, one page at a time so only one
+            // extra raster is alive at once.
+            for (i, shot) in
+                crate::pscat_extras::halftone_pngs(interp, (job.dpi / 72.0) as f32).enumerate()
+            {
+                let shot = shot.map_err(|e| WorkerFailure::Encode {
+                    message: e.to_string(),
+                })?;
+                check(shot.png.len())?;
+                artifacts.push(Artifact {
+                    page: Some(i + 1),
+                    width_px: shot.width,
+                    height_px: shot.height,
+                    byte_len: shot.png.len(),
+                    data_base64: b64.encode(&shot.png),
+                });
+            }
+        }
         OutputFormat::Png => {
             for (i, page) in pages.iter().enumerate() {
                 let png = page.to_png().map_err(|e| WorkerFailure::Encode {

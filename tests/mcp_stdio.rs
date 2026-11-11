@@ -140,6 +140,31 @@ fn png_pixel(png_bytes: &[u8], x: u32, y: u32) -> (u32, u32, [u8; 4]) {
     (info.width, info.height, px)
 }
 
+/// Every pixel of a PNG as RGBA, row by row from the top-left.
+fn png_pixels(png_bytes: &[u8]) -> (u32, u32, Vec<[u8; 4]>) {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().expect("png header");
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("PNG buffer size fits in memory")
+    ];
+    let info = reader.next_frame(&mut buf).expect("png frame");
+    let channels = info.color_type.samples();
+    let pixels = buf[..info.buffer_size()]
+        .chunks_exact(channels)
+        .map(|c| match channels {
+            4 => [c[0], c[1], c[2], c[3]],
+            3 => [c[0], c[1], c[2], 255],
+            2 => [c[0], c[0], c[0], c[1]],
+            _ => [c[0], c[0], c[0], 255],
+        })
+        .collect();
+    (info.width, info.height, pixels)
+}
+
 #[tokio::test]
 async fn lists_annotated_tools() {
     let client = start().await;
@@ -452,6 +477,14 @@ async fn argument_type_errors_get_the_structured_envelope() {
             "render_postscript",
             json!({"source": "showpage", "dpi": "high"}),
         ),
+        (
+            "render_postscript",
+            json!({"source": "showpage", "halftone": "yes"}),
+        ),
+        (
+            "render_postscript",
+            json!({"source": "showpage", "halftone": 1}),
+        ),
         ("render_postscript", json!({"format": "png"})),
         ("validate_postscript", json!({"source": 42})),
         ("describe_art_capabilities", json!({"names": "pgcard"})),
@@ -475,6 +508,176 @@ async fn argument_type_errors_get_the_structured_envelope() {
         assert!(text_of(&r).contains("invalid_request"), "{}", text_of(&r));
         assert_conforms(&output_schemas[tool], s);
     }
+    client.cancel().await.ok();
+}
+
+/// Half-grey on the left, black bottom-right, red top-right, white elsewhere.
+const GREYS: &str = "\
+0.5 setgray 0 0 100 100 rectfill
+0 setgray 100 0 100 50 rectfill
+1 0 0 setrgbcolor 100 50 100 50 rectfill
+showpage
+";
+
+fn first_png(r: &CallToolResult) -> Vec<u8> {
+    let image = r
+        .content
+        .iter()
+        .find_map(|c| c.as_image())
+        .expect("an image block");
+    base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .unwrap()
+}
+
+/// `halftone: true` screens the PNG in the worker: every pixel is pure black
+/// or white, grey becomes a dot pattern of about the same ink coverage, and
+/// the same program without the option keeps its grey and red.
+#[tokio::test]
+async fn halftone_screens_the_png_to_black_and_white() {
+    let client = start().await;
+    let args = json!({"source": GREYS, "width": 200, "height": 100});
+    let plain = call(&client, "render_postscript", args.clone()).await;
+    assert_eq!(plain.is_error, Some(false), "{}", text_of(&plain));
+    let (w, h, plain_px) = png_pixels(&first_png(&plain));
+    assert_eq!((w, h), (200, 100));
+    assert!(
+        plain_px
+            .iter()
+            .any(|p| p[0] == p[1] && p[1] == p[2] && p[0] > 100 && p[0] < 160),
+        "the normal render has mid grey"
+    );
+    assert!(plain_px.iter().any(|p| p[0] == 255 && p[1] == 0));
+
+    let mut with = args.clone();
+    with["halftone"] = json!(true);
+    let r = call(&client, "render_postscript", with).await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let bytes = first_png(&r);
+    let (w, h, px) = png_pixels(&bytes);
+    assert_eq!((w, h), (200, 100), "same size as the normal render");
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    assert!(
+        px.iter().all(|p| *p == black || *p == white),
+        "only pure black and white pixels"
+    );
+    // Left half is 50% grey: roughly half the pixels carry ink.
+    let left: Vec<_> = (0..h)
+        .flat_map(|y| (0..100).map(move |x| (y * w + x) as usize))
+        .map(|i| px[i])
+        .collect();
+    let ink = left.iter().filter(|p| **p == black).count() as f64 / left.len() as f64;
+    assert!(
+        (0.35..0.65).contains(&ink),
+        "grey keeps its tone: ink {ink}"
+    );
+    // Solid black stays black (bottom right: PS y 0..50 is PNG rows 50..100).
+    let bottom_right: Vec<_> = (50..100)
+        .flat_map(|y| (110..190).map(move |x| (y * w + x) as usize))
+        .map(|i| px[i])
+        .collect();
+    assert!(bottom_right.iter().filter(|p| **p == black).count() * 100 > bottom_right.len() * 95);
+    assert!(
+        px.iter().all(|p| p[0] == p[1] && p[1] == p[2]),
+        "red is screened to grey tones, no colour"
+    );
+    assert_ne!(
+        bytes,
+        first_png(&plain),
+        "different bytes from the normal PNG"
+    );
+
+    let s = structured(&r);
+    assert_eq!(s["ok"], true);
+    assert_eq!(s["format"], "png");
+    assert_eq!(s["artifacts"][0]["width_px"], 200);
+    assert_eq!(s["artifacts"][0]["bytes"], bytes.len());
+    let tools = tools(&client).await;
+    let render = tools
+        .iter()
+        .find(|t| t.name == "render_postscript")
+        .unwrap();
+    assert_conforms(render.output_schema.as_ref().unwrap(), s);
+    let schema = serde_json::to_value(&*render.input_schema).unwrap();
+    assert!(
+        schema["properties"]["halftone"]["type"]
+            .to_string()
+            .contains("boolean")
+    );
+    assert_eq!(schema["properties"]["halftone"]["default"], false);
+
+    // `halftone: false` is the normal render, byte for byte.
+    let mut off = args;
+    off["halftone"] = json!(false);
+    let r = call(&client, "render_postscript", off).await;
+    assert_eq!(first_png(&r), first_png(&plain));
+    client.cancel().await.ok();
+}
+
+/// Every page of a multi-page program is screened.
+#[tokio::test]
+async fn halftone_screens_every_page() {
+    let client = start().await;
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({
+            "source": "0.5 setgray 0 0 50 50 rectfill showpage 0.8 setgray 0 0 50 50 rectfill showpage",
+            "width": 50, "height": 50, "halftone": true
+        }),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let images: Vec<_> = r.content.iter().filter_map(|c| c.as_image()).collect();
+    assert_eq!(images.len(), 2);
+    let mut ink = Vec::new();
+    for image in images {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .unwrap();
+        let (_, _, px) = png_pixels(&bytes);
+        assert!(
+            px.iter()
+                .all(|p| *p == [0, 0, 0, 255] || *p == [255, 255, 255, 255])
+        );
+        ink.push(px.iter().filter(|p| p[0] == 0).count());
+    }
+    assert!(ink[1] < ink[0], "the lighter page has less ink: {ink:?}");
+    assert_eq!(structured(&r)["page_count"], 2);
+    client.cancel().await.ok();
+}
+
+/// `halftone` is a raster option: with svg or pdf the call is refused before
+/// anything runs, with the structured envelope.
+#[tokio::test]
+async fn halftone_with_svg_or_pdf_is_invalid_request() {
+    let client = start().await;
+    for format in ["svg", "pdf", "SVG"] {
+        let r = call(
+            &client,
+            "render_postscript",
+            json!({"source": SHAPES, "format": format, "halftone": true}),
+        )
+        .await;
+        assert_eq!(r.is_error, Some(true), "{format}");
+        assert_eq!(error_code(&r), "invalid_request", "{format}");
+        assert_eq!(structured(&r)["ok"], false);
+        assert!(!has_image(&r) && resources(&r).is_empty(), "{format}");
+        let message = structured(&r)["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("halftone") && message.contains("png"),
+            "{message}"
+        );
+    }
+    // `halftone: false` with svg is just an svg render.
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": SHAPES, "format": "svg", "halftone": false}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     client.cancel().await.ok();
 }
 

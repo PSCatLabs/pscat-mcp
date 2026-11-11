@@ -45,7 +45,7 @@ codes.
 PSCat is used as a **Rust library** (`pscat` crate, git dependency pinned
 to an exact commit, `default-features = false` so no window system is
 linked). The supported API (`Interp`, `Page`, `PsError`, `Limits`) does all
-rendering. Three `#[doc(hidden)]` PSCat modules are also used. All of them are
+rendering. Several `#[doc(hidden)]` PSCat modules are also used. All of them are
 called from `src/pscat_extras.rs` and nowhere else (a PSCat bump that breaks
 one is fixed in that file; upstream tracking issue
 [PSCatLabs/pscat#1098](https://github.com/PSCatLabs/pscat/issues/1098)). They
@@ -56,6 +56,12 @@ are the first thing to re-check when bumping the pin:
 * `pscat::gfx::PageSizeSource` — so a non-72-dpi default page still lets a
   program choose its size with `setpagedevice`, like `Interp::new()`
   (PSCatLabs/pscat#1097).
+* `pscat::halftone`, `pscat::png` and the page rasters of `pscat::gfx`
+  (`Interp::gfx`, `Gfx::pages`, `Gfx::pixmap`, `has_trailing_art`) — the screening behind
+  `render_postscript`'s `halftone` option (`pscat --halftone`). The flag travels
+  in the worker job (`WorkerJob.halftone`, PNG only: the request check refuses
+  it for SVG and PDF) and the worker screens each page and encodes it, so the
+  server process never touches the raster.
 * `pscat::capabilities` — the art catalog behind `describe_art_capabilities`.
   It runs no PostScript. It lists fonts by scanning font directories, so the
   worker computes it (`JobMode::Capabilities`): the worker's environment is
@@ -90,7 +96,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Control | Enforced by | Default |
 |---|---|---|
 | Source size | server, before execution | 256 KiB |
-| Format, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
+| Format, `halftone` only with PNG, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
 | Device pixels of the starting page | server, before execution | 16 M |
 | Pages created by `setpagedevice` | PSCat (`set_max_page_pixels`) | 16 M |
 | Interpreter steps | PSCat `Limits::max_steps` | 5·10⁹ |

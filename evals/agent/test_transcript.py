@@ -238,6 +238,41 @@ class Matchers(unittest.TestCase):
             tx.expand("{{nope}}", CTX)
 
 
+class RenderHalftone(unittest.TestCase):
+    """The halftone case can pass, and fails for the wrong call or answer."""
+
+    def transcript(self, args, answer="A halftone of the shapes: black and white dots."):
+        call = tx.ToolCall("1", f"mcp__{SERVER}__render_postscript", SERVER, "render_postscript", args)
+        call.result = {
+            "is_error": False,
+            "text": "",
+            "content_types": ["image", "text"],
+            "structured": {"ok": True, "format": "png"},
+        }
+        return tx.Transcript(
+            agent="claude", calls=[call], answer=answer, num_turns=2, completed=True, stop="success"
+        )
+
+    def failed(self, t):
+        checks = tx.evaluate_case(case("render-halftone"), t, SERVER, CTX, "stdio")
+        return [c.name for c in checks if not c.ok]
+
+    def source(self):
+        return tx.expand("{{file:examples/shapes.ps}}", CTX)
+
+    def test_passes_with_halftone_true(self):
+        t = self.transcript({"source": self.source(), "width": 400, "height": 300, "halftone": True})
+        self.assertEqual(self.failed(t), [])
+
+    def test_fails_without_halftone(self):
+        t = self.transcript({"source": self.source(), "width": 400, "height": 300})
+        self.assertTrue(self.failed(t))
+
+    def test_fails_with_svg(self):
+        t = self.transcript({"source": self.source(), "halftone": True, "format": "svg"})
+        self.assertTrue(self.failed(t))
+
+
 class CaseFiles(unittest.TestCase):
     def test_every_case_is_well_formed(self):
         cases = run.load_cases()

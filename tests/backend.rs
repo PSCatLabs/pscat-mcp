@@ -57,6 +57,7 @@ fn job(
         format,
         page_points: page,
         dpi: 72.0,
+        halftone: false,
         limits,
     }
 }
@@ -483,6 +484,7 @@ async fn the_worker_returns_the_art_catalog() {
         format: OutputFormat::Png,
         page_points: None,
         dpi: 72.0,
+        halftone: false,
         limits: limits(),
     };
     let started = Instant::now();
@@ -502,4 +504,56 @@ async fn the_worker_returns_the_art_catalog() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// The halftone flag in the job makes the worker screen every PNG page, and a
+/// job from an older server without the field still renders normally.
+#[tokio::test]
+async fn the_worker_halftones_png_pages_when_asked() {
+    let source = "0.5 setgray 0 0 60 60 rectfill showpage 0.5 setgray 0 0 60 60 rectfill showpage";
+    let mut plain = job(source, OutputFormat::Png, Some((60, 60)), limits());
+    let mut json = serde_json::to_value(&plain).unwrap();
+    json.as_object_mut().unwrap().remove("halftone");
+    plain = serde_json::from_value(json).expect("a job without halftone parses");
+    assert!(!plain.halftone);
+    // 144 dpi: both PNGs must record the same resolution (pHYs chunk).
+    plain.dpi = 144.0;
+    plain.page_points = Some((30, 30));
+    let mut screened = plain.clone();
+    screened.halftone = true;
+
+    let plain = backend()
+        .execute(plain, Duration::from_secs(20))
+        .await
+        .expect("worker result");
+    let screened = backend()
+        .execute(screened, Duration::from_secs(20))
+        .await
+        .expect("worker result");
+    assert_eq!(screened.failure, None, "{:?}", screened.ps_error);
+    assert_eq!(screened.artifacts.len(), 2);
+    for (a, b) in plain.artifacts.iter().zip(&screened.artifacts) {
+        assert_eq!((a.width_px, a.height_px), (b.width_px, b.height_px));
+        assert_eq!((a.width_px, a.height_px), (60, 60));
+        let (plain_png, screened_png) = (decode(&a.data_base64), decode(&b.data_base64));
+        assert_ne!(plain_png, screened_png);
+        let phys = |png: &[u8]| {
+            let at = png.windows(4).position(|w| w == b"pHYs").expect("pHYs chunk");
+            png[at + 4..at + 13].to_vec()
+        };
+        assert_eq!(phys(&plain_png), phys(&screened_png), "same resolution record");
+        let mut reader = png::Decoder::new(std::io::Cursor::new(decode(&b.data_base64)))
+            .read_info()
+            .expect("png header");
+        let mut buf = vec![0; reader.output_buffer_size().expect("buffer size")];
+        let info = reader.next_frame(&mut buf).expect("png frame");
+        let channels = info.color_type.samples();
+        for px in buf[..info.buffer_size()].chunks_exact(channels) {
+            let rgb = &px[..channels.min(3)];
+            assert!(
+                rgb.iter().all(|c| *c == 0) || rgb.iter().all(|c| *c == 255),
+                "{px:?}"
+            );
+        }
+    }
 }
