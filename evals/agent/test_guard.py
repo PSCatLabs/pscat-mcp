@@ -249,6 +249,27 @@ class Stream(unittest.TestCase):
         with self.assertRaises(guard.GuardError):
             feed_all(self.rate_limit_variant(lambda i: i.pop("isUsingOverage")))
 
+    def test_no_rate_limit_event_aborts_at_result(self):
+        events = [e for e in fixture_events() if e["type"] != "rate_limit_event"]
+        with self.assertRaises(guard.GuardError) as cm:
+            feed_all(events)
+        self.assertIn("rate_limit_event", str(cm.exception))
+
+    def test_no_rate_limit_event_aborts_at_end_of_stream(self):
+        events = [e for e in fixture_events() if e["type"] not in ("rate_limit_event", "result")]
+        sg = feed_all(events)
+        with self.assertRaises(guard.GuardError):
+            sg.finish()
+
+    def test_stream_without_init_fails_finish(self):
+        with self.assertRaises(guard.GuardError):
+            guard.StreamGuard(SERVER).finish()
+
+    def test_recorded_fixture_finishes_cleanly(self):
+        sg = feed_all(fixture_events())
+        self.assertTrue(sg.overage_checked)
+        sg.finish()
+
     def test_rate_limited_stops(self):
         with self.assertRaises(guard.RateLimited):
             feed_all(self.rate_limit_variant(lambda i: i.__setitem__("status", "rejected")))

@@ -19,8 +19,14 @@ unexpected event is a refusal, not a pass. Layers, in the order they run:
    ``system/init`` event must report ``apiKeySource: "none"`` (what a
    claude.ai login produces) before anything else happens; a
    ``rate_limit_event`` with ``isUsingOverage: true`` (extra usage, billed
-   per token) or a non-``allowed`` status stops the run; the final
-   ``result`` must attribute usage only to the ``firstParty`` provider.
+   per token) or a non-``allowed`` status stops the run; at least one
+   ``rate_limit_event`` with ``isUsingOverage: false`` must arrive before the
+   ``result`` (or the end of the stream); the final ``result`` must
+   attribute usage only to the ``firstParty`` provider.
+
+The stream checks detect overage; they cannot stop the request that
+triggered it from being billed. Turning extra usage off in the claude.ai
+account is what makes per-token billing impossible.
 
 ``total_cost_usd`` in the result event is not a billing signal: Claude Code
 reports a list-price estimate there for subscription sessions too.
@@ -168,6 +174,10 @@ class StreamGuard:
         self.model = model
         self.init: dict | None = None
         self.rate_limits: list[dict] = []
+        # Set once a rate_limit_event has shown isUsingOverage: false. Overage
+        # can only be seen in those events, so a session without one is not
+        # provably subscription-billed (see finish()).
+        self.overage_checked = False
         self.result_seen = False
 
     def feed(self, line: str) -> dict:
@@ -197,6 +207,21 @@ class StreamGuard:
             self._check_result(event)
             self.result_seen = True
         return event
+
+    def finish(self) -> None:
+        """Call when the stream ends (the child exited, not killed by a
+        timeout): the session must have shown init and a clean
+        rate-limit event."""
+        if self.init is None:
+            raise GuardError("stream ended without a system/init event")
+        self._require_overage_checked("the stream ended")
+
+    def _require_overage_checked(self, when: str) -> None:
+        if not self.overage_checked:
+            raise GuardError(
+                f"{when} without a rate_limit_event showing isUsingOverage: false; "
+                "overage (billed per token) could not be ruled out"
+            )
 
     def _check_init(self, init: dict) -> None:
         source = init.get("apiKeySource")
@@ -247,8 +272,10 @@ class StreamGuard:
                 f"subscription rate limit status {info.get('status')!r}"
                 f" ({info.get('rateLimitType')}, resets at {info.get('resetsAt')})"
             )
+        self.overage_checked = True
 
     def _check_result(self, event: dict) -> None:
+        self._require_overage_checked("result event arrived")
         usage = event.get("modelUsage") or {}
         if not isinstance(usage, dict):
             raise GuardError("result.modelUsage is not an object")

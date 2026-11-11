@@ -317,9 +317,21 @@ run one case: `--case first-prompt --transport stdio` takes 7 turns.
 ### The billing guard
 
 Claude usage must come only from the claude.ai (Max) subscription login,
-never from per-token API billing. The guard in `evals/agent/guard.py` fails
-closed: a missing field, an unparseable line or an unexpected event stops
-the run. It has five layers.
+never from per-token API billing.
+
+**First, turn off extra usage in your claude.ai account settings.** Extra
+usage (overage) lets a plan keep going past its limits at per-token rates.
+With it off, a session that reaches the plan's limit is refused rather than
+billed. That setting is the only thing that makes per-token billing
+impossible. The guard below can *detect* overage, but it can't prevent the
+request that triggered it from being billed: it sees the overage flag only
+in the stream, after that request was sent. Each `rate_limit_event` in a
+transcript shows the account's state. On the account these evals were
+built with, it read `"overageStatus": "rejected"` and
+`"overageDisabledReason": "org_level_disabled"`.
+
+The guard in `evals/agent/guard.py` fails closed: a missing field, an
+unparseable line or an unexpected event stops the run. It has five layers.
 
 1. **Parent environment.** The runner refuses to start when any of
    `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
@@ -355,6 +367,10 @@ the run. It has five layers.
      extra usage beyond the plan is billed per token. A status other than
      `allowed` or `allowed_warning` means the subscription's limit is
      reached, so the run stops instead of retrying;
+   * at least one such `rate_limit_event` must arrive before the `result`
+     event, or before the stream ends. Those events are the only place
+     overage shows up, so a session without one can't be shown to be on the
+     subscription. Every session in the runs so far had one;
    * the final `result` must attribute usage only to the `firstParty`
      provider.
 

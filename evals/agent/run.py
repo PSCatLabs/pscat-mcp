@@ -657,8 +657,8 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
             lines, rc, timed_out = run_child(
                 argv, prompt, env, workdir, timeout_s, sg.feed, out_path, err_path, http.token if http else None
             )
-            if not timed_out and sg.init is None:
-                raise guard.GuardError("stream ended without a system/init event")
+            if not timed_out:
+                sg.finish()
             t = tx.parse_claude_stream(lines)
         else:
             argv = codex_argv(codex, args.codex_model, workdir, binary, http if transport == "http" else None)
