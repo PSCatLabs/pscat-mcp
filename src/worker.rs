@@ -156,6 +156,14 @@ pub struct Artifact {
     pub width_px: u32,
     /// Height in device pixels.
     pub height_px: u32,
+    /// Width in points of the page as drawn (after any default and any
+    /// `setpagedevice`); `None` where the size in points is not known (a
+    /// review sheet).
+    #[serde(default)]
+    pub width_pt: Option<f64>,
+    /// Height in points of the page as drawn; see `width_pt`.
+    #[serde(default)]
+    pub height_pt: Option<f64>,
     /// Base64 of the artifact bytes.
     pub data_base64: String,
     /// Length of the decoded bytes.
@@ -581,6 +589,8 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
             page: Some(1),
             width_px: report.width_px,
             height_px: report.height_px,
+            width_pt: None,
+            height_pt: None,
             byte_len: sheet.png.len(),
             data_base64: b64.encode(&sheet.png),
         }],
@@ -590,6 +600,17 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
         sheet: Some(report),
         ..WorkerResult::empty()
     }
+}
+
+/// The size in points of a page of `px` device pixels, as `Some` pair.
+fn points_of(
+    interp: &pscat::Interp,
+    job: &WorkerJob,
+    width_px: u32,
+    height_px: u32,
+) -> (Option<f64>, Option<f64>) {
+    let (w, h) = crate::pscat_extras::page_points(interp, job.dpi, (width_px, height_px));
+    (Some(w), Some(h))
 }
 
 fn encode(
@@ -630,10 +651,13 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(shot.png.len())?;
+                let (width_pt, height_pt) = points_of(interp, job, shot.width, shot.height);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: shot.width,
                     height_px: shot.height,
+                    width_pt,
+                    height_pt,
                     byte_len: shot.png.len(),
                     data_base64: b64.encode(&shot.png),
                 });
@@ -645,10 +669,13 @@ fn encode(
                     message: e.to_string(),
                 })?;
                 check(png.len())?;
+                let (width_pt, height_pt) = points_of(interp, job, page.width(), page.height());
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: page.width(),
                     height_px: page.height(),
+                    width_pt,
+                    height_pt,
                     byte_len: png.len(),
                     data_base64: b64.encode(&png),
                 });
@@ -672,10 +699,13 @@ fn encode(
             for (i, svg) in svgs.iter().enumerate() {
                 check(svg.len())?;
                 let (w, h) = pages.get(i).map_or((0, 0), |p| (p.width(), p.height()));
+                let (width_pt, height_pt) = points_of(interp, job, w, h);
                 artifacts.push(Artifact {
                     page: Some(i + 1),
                     width_px: w,
                     height_px: h,
+                    width_pt,
+                    height_pt,
                     byte_len: svg.len(),
                     data_base64: b64.encode(svg.as_bytes()),
                 });
@@ -687,10 +717,13 @@ fn encode(
             })?;
             check(pdf.len())?;
             let (w, h) = pages.first().map_or((0, 0), |p| (p.width(), p.height()));
+            let (width_pt, height_pt) = points_of(interp, job, w, h);
             artifacts.push(Artifact {
                 page: None,
                 width_px: w,
                 height_px: h,
+                width_pt,
+                height_pt,
                 byte_len: pdf.len(),
                 data_base64: b64.encode(&pdf),
             });

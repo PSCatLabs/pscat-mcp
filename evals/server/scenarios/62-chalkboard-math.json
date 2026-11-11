@@ -4,6 +4,36 @@
   "origin": "examples/agent-scenarios.md section 7; tests/chalkboard.rs",
   "steps": [
     {
+      "label": "a 400x200 pt board at the default 144 dpi is 800x400 px, and the result says both (#78)",
+      "tool": "chalkboard_math",
+      "args": {
+        "latex": "x^2",
+        "width": 400,
+        "height": 200
+      },
+      "result": {
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "artifacts.0.width_pt": 400,
+          "artifacts.0.height_pt": 200,
+          "artifacts.0.width_px": 800,
+          "artifacts.0.height_px": 400
+        },
+        "text_contains": [
+          "400x200 pt = 800x400 px"
+        ],
+        "png": {
+          "width": 800,
+          "height": 400
+        },
+        "renders_executed": 1
+      }
+    },
+    {
       "label": "the default board: 1600x800, a dark slate",
       "tool": "chalkboard_math",
       "args": {
@@ -20,6 +50,8 @@
           "page_count": 1,
           "artifacts.0.width_px": 1600,
           "artifacts.0.height_px": 800,
+          "artifacts.0.width_pt": 800,
+          "artifacts.0.height_pt": 400,
           "artifacts.0.mime_type": "image/png",
           "renderer.engine": "pscat"
         },
