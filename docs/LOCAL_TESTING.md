@@ -281,7 +281,10 @@ scripts/agent-eval.sh              # every case, stdio and HTTP, once
 | `--agent codex` | Also run Codex (repeat `--agent claude --agent codex` for both). Codex uses OpenAI usage, so it is opt-in. |
 | `--include-expensive` | Also run cases tagged `expensive` (scenario 5c pastes about 285 KB of PostScript). |
 | `--server PATH` | Server binary. Default `target/release/pscat-mcp-server`. |
-| `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case. No agent runs. |
+| `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case, and write `RUN_DIR/recheck.json`. No agent runs. The HTTP POST check and an error (guard stop, timeout) keep their live result. |
+| `--max-sessions N` | Refuse to start when the plan has more than N agent sessions (default 120). The cap is per invocation; keep your own count across runs. |
+| `--compare BASELINE` | After the table, list the rows that regressed, improved or stayed the same against a baseline JSON (see below). Works with `--recheck` too. |
+| `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions, model and case files, and none may have stopped early. `--rechecked` takes each run's `recheck.json` instead; `--server-commit SHA` names the commit the binary was built from. |
 
 `python3 -I evals/agent/run.py` takes the same options. The runner uses
 the Python 3 standard library only, so it needs no virtualenv and no
@@ -301,20 +304,102 @@ model: claude-sonnet-5-5
 
 case                agent   transport  verdict  passed  turns
 ------------------  ------  ---------  -------  ------  -----
-diagnose-undefined  claude  http       pass     1/1     3
+diagnose-syntax     claude  http       pass     1/1     2
+
+1 session(s), 2 turn(s), 1 tool call(s), 6.4 s
+usage: five_hour 31% -> 31%, seven_day 38% -> 38%
 ```
 
+The `usage` line is the subscription windows' utilization from the
+`rate_limit_event`s of the first and last session. Each session's line
+also shows the five-hour figure as it runs. The summary records the
+SHA-256 of the server binary and the checkout's commit as well.
+
 The exit status is 0 when every row passes, 1 when a check failed, and 2
-when the billing guard stopped the run.
+when the billing guard stopped the run or the plan was over
+`--max-sessions`.
 
 **Budget.** Cases run one at a time. A full default run is 22 sessions
-(11 cases × 2 transports). The first 20 (10 cases) took 54 turns and 34 tool
-calls with `claude-sonnet-5-5`, about 4 minutes in all; the
-`describe-capabilities` case was added later and not yet timed. Most cases take 2 or 3 turns,
-and the first prompt takes 7. It moved the Max 5x plan's five-hour
-utilization from 8 % to 10 %, while another session was using the same
-subscription. `--repeat N` multiplies all of that. To try a change,
-run one case: `--case first-prompt --transport stdio` takes 7 turns.
+(11 cases × 2 transports). With `claude-sonnet-5-5` and Claude Code
+2.1.322 it takes about 62 turns, 40 tool calls and 4 to 5 minutes. Most
+cases take 2 or 3 turns, `describe-capabilities` takes 4 and the first
+prompt 7. The baseline below, three full runs (66 sessions) and
+`huge-source` once, moved the Max 5x plan's five-hour utilization from
+20 % to 27 % and the seven-day one from 36 % to 37 %, while the owner was
+also using the subscription. So a full run costs about 2 % of the
+five-hour window. `--repeat N` multiplies all of that. To try a change,
+run only the affected cases, and keep a count of the sessions across
+runs: `--max-sessions` caps one invocation, not the total.
+
+### Baseline and comparing runs
+
+`evals/agent/baseline/<date>.json` is a committed record of one or more
+runs: per case × agent × transport the verdict, the pass count and the
+turns, plus the server, PSCat, Claude Code and model versions, the
+sessions, turns and tool calls used, and the usage seen. Transcripts stay
+in the git-ignored run directory. Make one from finished runs, then
+compare a later run (or a recheck) with it:
+
+```bash
+python3 -I evals/agent/run.py --write-baseline evals/agent/baseline/2026-11-10.json \
+  --from-run evals/agent-runs/A --from-run evals/agent-runs/B
+scripts/agent-eval.sh --case render-shapes --repeat 3 --compare evals/agent/baseline/2026-11-10.json
+```
+
+`--compare` lists regressions (a worse verdict, or a lower pass rate
+between two `flaky` rows), improvements and unchanged rows. With one or
+three runs per row, a single changed row is not evidence on its own;
+repeat the case before you act on it.
+
+The baseline's verdicts hold for the case files named by its
+`cases_sha256`. Runs and rechecks record that hash too, and an offline
+test fails when the newest baseline doesn't match the case files. The
+committed 2026-11-10 baseline was rechecked under the case files it ships
+with, so the #44 case edits don't show up as improvements. When you edit
+a case, rebuild the baseline the same way from its archived run
+directories rather than compare across different case files:
+
+```bash
+python3 -I evals/agent/run.py --recheck RUN_DIR      # once per run directory
+python3 -I evals/agent/run.py --write-baseline evals/agent/baseline/<date>.json \
+  --rechecked --server-commit <sha> --from-run RUN_DIR [--from-run RUN_DIR ...]
+```
+
+### Current agent behaviour
+
+From the 2026-11-10 baseline (`claude-sonnet-5-5`, Claude Code 2.1.322,
+server 0.1.0 at `0a6e4ec`, PSCat 0.7.0-rc.4) and the runs that followed:
+
+* **Tool choice is reliable.** The model picks `validate_postscript` to
+  diagnose a program (first, in all 16 runs of the two diagnose cases),
+  `get_renderer_info` for versions, and `describe_art_capabilities` for
+  names. The first full run, in #43, had once diagnosed with
+  `render_postscript` over stdio; that didn't recur.
+* **Pasted programs lose their comments.** In all 28 runs of
+  `render-shapes` and `render-shapes-pdf` (both transports), the model
+  passed `examples/shapes.ps` with every ordinary `%` comment removed. It
+  kept the code token for token, and usually the DSC header. The render is
+  the same, but the source isn't verbatim, so these cases fail. A
+  factual sentence in the `source` description ("passed to the
+  interpreter unchanged: comments and DSC lines included. DSC comments
+  such as `%%BoundingBox` do not set the page size") made it keep the DSC
+  header every time (12 of 12, against 13 of 16 without it), but it still
+  dropped the other comments (0 of 12 verbatim, as before). So it was
+  reverted.
+* **Limits are handled, not fought.** An infinite loop is reported after
+  one call and isn't retried. An oversized page is either refused with the
+  limit named, or rendered at a lower `dpi` that fits. A JPEG request gets
+  `unsupported_format`, or the model offers PNG.
+* **A huge pasted source is shortened, not sent.** In the one
+  `huge-source` run, the model rendered 10 lines of the 9,500 and said so;
+  `source_too_large` was never reached.
+* **Answers are sometimes terse.** Two of four HTTP runs of
+  `diagnose-undefined` said only that `shw` should be `show`, without the
+  error name or line. The case now accepts that.
+* **The output schemas no longer warn.** Before #44, Claude Code printed
+  `unknown format "uint32" ignored in schema ...` (also `uint`, `uint64`)
+  on stderr, 978 lines over the baseline's 66 sessions. The server now
+  drops those formats, and the final run's stderr was empty.
 
 ### The billing guard
 
@@ -366,9 +451,10 @@ unparseable line or an unexpected event stops the run. It has five layers.
      claude.ai login produces (observed with Claude Code 2.1.322; an API
      key or `apiKeyHelper` produces another value);
    * every `rate_limit_event` must carry `"isUsingOverage": false`, because
-     extra usage beyond the plan is billed per token. A status other than
-     `allowed` or `allowed_warning` means the subscription's limit is
-     reached, so the run stops instead of retrying;
+     extra usage beyond the plan is billed per token. Any status other
+     than `allowed`, in the event or in any of its `unifiedWindows`, stops
+     the run instead of retrying: `allowed_warning` means the plan is close
+     to a limit, and anything else means it was reached;
    * at least one such `rate_limit_event` must arrive before the `result`
      event, or before the stream ends. Those events are the only place
      overage shows up, so a session without one can't be shown to be on the

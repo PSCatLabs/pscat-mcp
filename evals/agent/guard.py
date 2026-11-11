@@ -19,7 +19,9 @@ unexpected event is a refusal, not a pass. Layers, in the order they run:
    ``system/init`` event must report ``apiKeySource: "none"`` (what a
    claude.ai login produces) before anything else happens; a
    ``rate_limit_event`` with ``isUsingOverage: true`` (extra usage, billed
-   per token) or a non-``allowed`` status stops the run; at least one
+   per token) or any status other than ``allowed`` (``allowed_warning``
+   included, for the event and for each of its ``unifiedWindows``) stops
+   the run; at least one
    ``rate_limit_event`` with ``isUsingOverage: false`` must arrive before the
    ``result`` (or the end of the stream); the final ``result`` must
    attribute usage only to the ``firstParty`` provider.
@@ -86,7 +88,10 @@ EXPECTED_AUTH = {
 # with Claude Code 2.1.322.
 SUBSCRIPTION_API_KEY_SOURCE = "none"
 
-RATE_LIMIT_OK = ("allowed", "allowed_warning")
+# Only a plain "allowed" lets a session go on. "allowed_warning" means the
+# plan is close to a limit; the run stops there rather than use up the
+# rest of the window (issue #44).
+RATE_LIMIT_OK = ("allowed",)
 
 
 class GuardError(RuntimeError):
@@ -272,6 +277,15 @@ class StreamGuard:
                 f"subscription rate limit status {info.get('status')!r}"
                 f" ({info.get('rateLimitType')}, resets at {info.get('resetsAt')})"
             )
+        windows = info.get("unifiedWindows")
+        if isinstance(windows, dict):
+            for name, window in windows.items():
+                status = window.get("status") if isinstance(window, dict) else None
+                if status is not None and status not in RATE_LIMIT_OK:
+                    raise RateLimited(
+                        f"subscription {name} window status {status!r}"
+                        f" (utilization {window.get('utilization')}, resets at {window.get('resetsAt')})"
+                    )
         self.overage_checked = True
 
     def _check_result(self, event: dict) -> None:
