@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use rmcp::RoleClient;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
+
+mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -16,23 +17,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// A client on a server started with the extra `PSCAT_MCP_*` variables.
 async fn start(env: &[(&str, &str)]) -> Client {
-    let env: Vec<(String, String)> = env
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server")).configure(|c| {
-        c.arg("serve-stdio")
-            .env("PSCAT_MCP_LOG_FORMAT", "pretty")
-            .env("RUST_LOG", "warn");
-        for (k, v) in &env {
-            c.env(k, v);
-        }
-    });
-    let transport = TokioChildProcess::new(cmd).expect("spawn server");
-    tokio::time::timeout(CALL_TIMEOUT, ().serve(transport))
-        .await
-        .expect("initialize timed out")
-        .expect("initialize")
+    common::start_stdio(env!("CARGO_BIN_EXE_pscat-mcp-server"), env).await
 }
 
 async fn call(client: &Client, args: Value) -> CallToolResult {

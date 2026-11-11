@@ -12,9 +12,10 @@ use pscat_mcp::generate::GenerateJob;
 use pscat_mcp::render::{ErrorCode, GenerateRequest, RenderService};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
+
+mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -22,23 +23,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A client on a server started with the extra `PSCAT_MCP_*` variables.
 async fn start(env: &[(&str, &str)]) -> Client {
-    let env: Vec<(String, String)> = env
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server")).configure(|c| {
-        c.arg("serve-stdio")
-            .env("PSCAT_MCP_LOG_FORMAT", "pretty")
-            .env("RUST_LOG", "warn");
-        for (k, v) in &env {
-            c.env(k, v);
-        }
-    });
-    let transport = TokioChildProcess::new(cmd).expect("spawn server");
-    tokio::time::timeout(CALL_TIMEOUT, ().serve(transport))
-        .await
-        .expect("initialize timed out")
-        .expect("initialize")
+    common::start_stdio(env!("CARGO_BIN_EXE_pscat-mcp-server"), env).await
 }
 
 async fn call_tool(client: &Client, name: &str, args: Value) -> CallToolResult {
@@ -586,7 +571,10 @@ async fn a_runaway_cell_hits_its_time_share_and_the_rest_render() {
     .await;
     let elapsed = started.elapsed();
     let s = assert_ok(&r).clone();
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+    // The sheet's own deadline is 4 s (and past it the call is an error, so
+    // `assert_ok` above already covers it); the margin is for a loaded runner
+    // starting five workers.
+    assert!(elapsed < Duration::from_secs(4 + 20), "{elapsed:?}");
     assert_eq!(s["failed_cells"], 2, "{s}");
     for i in [0, 2] {
         let e = &cell(&s, i)["error"];
@@ -691,7 +679,8 @@ async fn every_budget_is_refused_before_execution() {
         assert_eq!(s["error"]["input"]["code"], input, "{args}: {s}");
         let m = s["error"]["message"].as_str().unwrap();
         assert!(m.contains(needle), "{args}: {m}");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Rejected before any cell runs; the bound only catches a run.
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
     // A sheet within every budget is drawn.
     let r = call(

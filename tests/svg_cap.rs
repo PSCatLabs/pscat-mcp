@@ -4,11 +4,12 @@
 
 use std::time::Duration;
 
+use rmcp::RoleClient;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::service::RunningService;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
+
+mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -25,23 +26,7 @@ const TWO_PAGES: &str = "1 srand \
 const SHAPES: &str = "1 0 0 setrgbcolor 0 0 100 100 rectfill showpage";
 
 async fn start(env: &[(&str, &str)]) -> Client {
-    let env: Vec<(String, String)> = env
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server")).configure(|c| {
-        c.arg("serve-stdio")
-            .env("PSCAT_MCP_LOG_FORMAT", "pretty")
-            .env("RUST_LOG", "warn");
-        for (k, v) in &env {
-            c.env(k, v);
-        }
-    });
-    let transport = TokioChildProcess::new(cmd).expect("spawn server");
-    tokio::time::timeout(CALL_TIMEOUT, ().serve(transport))
-        .await
-        .expect("initialize timed out")
-        .expect("initialize")
+    common::start_stdio(env!("CARGO_BIN_EXE_pscat-mcp-server"), env).await
 }
 
 async fn render(client: &Client, source: &str, format: &str) -> CallToolResult {

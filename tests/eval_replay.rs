@@ -520,7 +520,18 @@ async fn record_rmcp_client_traffic() {
             .expect("tools/call");
     }
     client.cancel().await.ok();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The capture file is written by the server; wait until the last call is
+    // in it rather than for a fixed time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !std::fs::read_to_string(&path)
+        .is_ok_and(|t| t.ends_with('\n') && t.contains("tools/call"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no tools/call in the capture file"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     let records = read_capture(&path);
     let methods: Vec<String> = records

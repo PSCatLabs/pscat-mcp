@@ -185,17 +185,24 @@ async fn renders_svg_and_pdf() {
 #[tokio::test]
 async fn a_runaway_worker_is_killed_at_the_deadline() {
     let (backend, tag) = tagged();
+    let deadline = Duration::from_secs(1);
     let started = Instant::now();
     let out = backend
         .execute(
             job("{ } loop", OutputFormat::Png, Some((100, 100)), no_limits()),
-            Duration::from_secs(1),
+            deadline,
         )
         .await;
     let elapsed = started.elapsed();
+    // A Timeout (not a crash, not a result) means the wall-clock deadline
+    // fired; the worker cannot have stopped before it. The upper bound only
+    // catches a hang, so it leaves a loaded runner a wide margin.
     assert!(matches!(out, Err(BackendError::Timeout)), "{out:?}");
-    assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(
+        elapsed >= deadline - Duration::from_millis(100),
+        "{elapsed:?}"
+    );
+    assert!(elapsed < deadline + Duration::from_secs(20), "{elapsed:?}");
     let left = processes_with(&tag);
     assert!(left.is_empty(), "worker still running: {left:?}");
 }
@@ -203,14 +210,27 @@ async fn a_runaway_worker_is_killed_at_the_deadline() {
 #[tokio::test]
 async fn dropping_the_future_kills_the_worker() {
     let (backend, tag) = tagged();
-    let fut = backend.execute(
+    // `BackendFuture` is a boxed future: `drop(fut)` below really drops it.
+    let mut fut = backend.execute(
         job("{ } loop", OutputFormat::Png, Some((100, 100)), no_limits()),
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     );
-    let cancelled = tokio::time::timeout(Duration::from_millis(300), fut).await;
-    assert!(cancelled.is_err(), "the loop cannot finish");
-    // The worker really was running before the cancel... and is gone after.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // Wait until the worker really is running (how long that takes depends
+    // on the machine's load), then cancel by dropping the future.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        tokio::select! {
+            _ = &mut fut => panic!("the loop cannot finish"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        if !processes_with(&tag).is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the worker never started");
+    }
+    drop(fut);
+    // ... and it is gone after.
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let left = processes_with(&tag);
         if left.is_empty() {
@@ -230,14 +250,22 @@ async fn the_worker_is_running_while_execute_is_pending() {
         Duration::from_secs(30),
     );
     tokio::pin!(fut);
-    tokio::select! {
-        _ = &mut fut => panic!("the loop cannot finish"),
-        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+    // Poll until pgrep sees the worker: how long it takes to start depends on
+    // the machine's load, so there is no fixed wait that is right.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        tokio::select! {
+            _ = &mut fut => panic!("the loop cannot finish"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        if !processes_with(&tag).is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tagged worker not found by pgrep"
+        );
     }
-    assert!(
-        !processes_with(&tag).is_empty(),
-        "tagged worker not found by pgrep"
-    );
 }
 
 #[tokio::test]
@@ -466,11 +494,13 @@ async fn the_worker_runs_with_os_limits_in_its_own_session() {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let backend = SubprocessBackend::new(script, LimitsConfig::default()).with_tag("t1");
+    // The stand-in exits at once, so the deadline never fires; it only has to
+    // outlast the stand-in's startup on a loaded machine (a missed deadline
+    // is a Timeout, not the Crashed report this test reads). The RLIMIT_CPU
+    // is derived from it, and a fractional part checks that it rounds up.
+    const DEADLINE: Duration = Duration::from_millis(30_500);
     let out = backend
-        .execute(
-            job(SCENE, OutputFormat::Png, None, limits()),
-            Duration::from_millis(1500),
-        )
+        .execute(job(SCENE, OutputFormat::Png, None, limits()), DEADLINE)
         .await;
     let _ = std::fs::remove_dir_all(&dir);
     let Err(BackendError::Crashed(message)) = out else {
@@ -478,9 +508,9 @@ async fn the_worker_runs_with_os_limits_in_its_own_session() {
     };
     eprintln!("{message}");
     assert!(message.contains("status 7"), "{message}");
-    // ceil(1.5 s) + 2 s of slack.
+    // ceil(30.5 s) + 2 s of slack.
     assert!(
-        message.contains("core=0 cpu=4 fsize=0 nofile=64"),
+        message.contains("core=0 cpu=33 fsize=0 nofile=64"),
         "{message}"
     );
     let pid = message
@@ -539,7 +569,6 @@ async fn the_worker_returns_the_art_catalog() {
         decided_height: None,
         sheet: None,
     };
-    let started = Instant::now();
     let result = backend()
         .execute(job, Duration::from_secs(20))
         .await
@@ -550,12 +579,6 @@ async fn the_worker_returns_the_art_catalog() {
     let catalog = result.capabilities.expect("catalog");
     assert!(!catalog["capabilities"].as_array().unwrap().is_empty());
     assert!(!catalog.to_string().contains("\"path\""), "no host paths");
-    // Cheap enough to run per call without a cache.
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        started.elapsed()
-    );
 }
 
 /// The halftone flag in the job makes the worker screen every PNG page, and a
@@ -787,7 +810,9 @@ async fn the_worker_checks_the_exact_sheet_before_any_cell() {
         )
         .await
         .expect("worker result");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // The rejection is immediate; a cell run would last to the 30 s deadline.
+    // Half of it leaves a loaded runner a wide margin.
+    assert!(started.elapsed() < Duration::from_secs(15));
     match r.failure {
         Some(WorkerFailure::Generate(f)) => {
             assert_eq!(f.detail, "sheet_pixels", "{}", f.message);

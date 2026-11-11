@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use rmcp::RoleClient;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents, Tool};
 use rmcp::service::RunningService;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
+
+mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -54,16 +55,7 @@ async fn start() -> Client {
 
 /// A client on a server started from the executable at `exe`.
 async fn start_with(exe: impl AsRef<std::ffi::OsStr>) -> Client {
-    let cmd = tokio::process::Command::new(exe).configure(|c| {
-        c.arg("serve-stdio")
-            .env("PSCAT_MCP_LOG_FORMAT", "pretty")
-            .env("RUST_LOG", "warn");
-    });
-    let transport = TokioChildProcess::new(cmd).expect("spawn server");
-    tokio::time::timeout(CALL_TIMEOUT, ().serve(transport))
-        .await
-        .expect("initialize timed out")
-        .expect("initialize")
+    common::start_stdio(exe, &[]).await
 }
 
 async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
