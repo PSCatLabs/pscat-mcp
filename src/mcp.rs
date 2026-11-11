@@ -12,6 +12,8 @@
 //!   with `ok: false` and `error` set; never an image.
 //! * `chalkboard_math` — the same content blocks and [`RenderToolOutput`]
 //!   envelope as `render_postscript`, for the one board it draws.
+//! * `handwrite` — the same content blocks and [`RenderToolOutput`] envelope,
+//!   for the one PNG note it draws.
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
@@ -39,6 +41,7 @@ use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{ChalkboardParams, GenerateJob};
+use crate::handwrite::HandwriteParams;
 use crate::render::{
     DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, RenderError, RenderOutput, RenderRequest,
     RenderService, ValidationReport,
@@ -195,6 +198,52 @@ impl ChalkboardArgs {
     }
 }
 
+/// Arguments of `handwrite`. Names, defaults and ranges are those of the
+/// PSCat plugin's tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct HandwriteArgs {
+    /// The note to write. Newlines force line breaks.
+    pub text: String,
+    /// Font size in points. Default 36.
+    #[schemars(range(min = 0, max = 2000))]
+    pub size: Option<f64>,
+    /// Page width in points. Default 612.
+    #[schemars(range(min = 1, max = 8000))]
+    pub width: Option<u32>,
+    /// Paper style: "plain" (the default) or "ruled".
+    #[schemars(extend("enum" = ["plain", "ruled"], "default" = "plain"))]
+    pub paper: Option<String>,
+    /// Ink colour as "R,G,B", each from 0 to 1. Default "0.13,0.14,0.34".
+    pub ink: Option<String>,
+    /// Ink wobble in glyph units; 0 is calm. Default 16.
+    #[schemars(range(min = 0, max = 10000))]
+    pub jitter: Option<f64>,
+    /// Random seed; the same seed gives the same note. Default 1985.
+    #[schemars(range(min = -2147483648_i64, max = 2147483647_i64))]
+    pub seed: Option<i64>,
+    /// Resolution in dots per inch, 9 to 1200. Default 72.
+    pub dpi: Option<f64>,
+}
+
+impl HandwriteArgs {
+    /// The generate request: a PNG note.
+    fn into_request(self) -> GenerateRequest {
+        GenerateRequest {
+            job: GenerateJob::Handwrite(HandwriteParams {
+                text: self.text,
+                size: self.size,
+                width: self.width,
+                paper: self.paper,
+                ink: self.ink,
+                jitter: self.jitter,
+                seed: self.seed,
+                dpi: self.dpi,
+            }),
+            format: None,
+        }
+    }
+}
+
 /// Arguments of `validate_postscript`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ValidateArgs {
@@ -332,6 +381,8 @@ pub struct LimitsInfo {
     pub max_source_bytes: usize,
     /// Largest `chalkboard_math` LaTeX accepted, in bytes.
     pub max_latex_bytes: usize,
+    /// Largest `handwrite` text accepted, in bytes.
+    pub max_handwrite_bytes: usize,
     /// Wall-clock deadline for one render, in milliseconds.
     pub render_timeout_ms: u64,
     /// Most device pixels on one page (width x height).
@@ -421,6 +472,17 @@ impl PscatMcp {
                 .into(),
             );
         }
+        if let Some(route) = tool_router.map.get_mut("handwrite") {
+            let base = route.attr.description.clone().unwrap_or_default();
+            route.attr.description = Some(
+                format!(
+                    "{base} Limits on this server: text up to {} bytes; at most {} pixels per \
+                     note and {PSCAT_MAX_SIDE_PX} pixels a side; {} ms per note.",
+                    limits.max_handwrite_bytes, limits.max_pixels, limits.render_timeout_ms
+                )
+                .into(),
+            );
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -468,6 +530,7 @@ impl PscatMcp {
             limits: LimitsInfo {
                 max_source_bytes: l.max_source_bytes,
                 max_latex_bytes: l.max_latex_bytes,
+                max_handwrite_bytes: l.max_handwrite_bytes,
                 render_timeout_ms: l.render_timeout_ms,
                 max_pixels: l.max_pixels,
                 max_side_px: PSCAT_MAX_SIDE_PX,
@@ -615,6 +678,47 @@ impl PscatMcp {
     }
 
     #[tool(
+        name = "handwrite",
+        title = "Handwriting-style note",
+        description = "Writes text as a handwriting-style note: a hand-drawn script with \
+                       per-letter variation, word-wrapped to `width`, on a page whose height \
+                       fits the text. Returns the note as a PNG image. These are hand-drawn \
+                       styles for notes, cards and art, not for imitating a specific person's \
+                       handwriting or presenting writing as someone else's. The script has \
+                       the letters a to z (capitals are written as lowercase), the digits 0 to \
+                       9, and . , - ' ! ?; other characters leave a gap. Newlines force line \
+                       breaks. `paper` ruled adds ruled lines and a margin rule. The same \
+                       arguments give the same image. The default note is 612 points wide at \
+                       72 dpi, 36 point type in dark blue ink; a one-line note is 146 points \
+                       tall and each further line adds 54 points. A note whose height would \
+                       pass the pixel or side limit fails with too_many_pixels or \
+                       invalid_dimensions, before it is drawn. The input is text only, never \
+                       PostScript.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
+        annotations(
+            title = "Handwriting-style note",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn handwrite(
+        &self,
+        Parameters(args): Parameters<HandwriteArgs>,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        let outcome = tokio::select! {
+            r = self.service.generate(args.into_request()) => r,
+            () = ct.cancelled() => Err(cancelled()),
+        };
+        match outcome {
+            Ok(out) => render_success(out),
+            Err(err) => failure_with("Handwrite failed", err),
+        }
+    }
+
+    #[tool(
         name = "validate_postscript",
         title = "Validate PostScript",
         description = "Checks a PostScript program without returning an image. It runs a \
@@ -753,7 +857,8 @@ impl ServerHandler for PscatMcp {
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
                 "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
-                 validates programs without rendering, writes LaTeX formulas on a chalkboard, \
+                 validates programs without rendering, writes LaTeX formulas on a chalkboard, writes text \
+                 as a handwriting-style note, \
                  and lists the fonts, palettes, page \
                  templates and procedures the interpreter has. Programs run in a sandbox with no file \
                  writes, no network, and file reads limited to PSCat's built-in lib/.",
@@ -952,6 +1057,7 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
     match tool {
         "render_postscript" => render_failure(err),
         "chalkboard_math" => failure_with("Chalkboard failed", err),
+        "handwrite" => failure_with("Handwrite failed", err),
         "validate_postscript" => validate_failure(err),
         "describe_art_capabilities" => capabilities_failure(err),
         _ => result,

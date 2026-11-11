@@ -60,6 +60,7 @@ fn job(
         halftone: false,
         limits,
         generate: None,
+        decided_height: None,
     }
 }
 
@@ -488,6 +489,7 @@ async fn the_worker_returns_the_art_catalog() {
         halftone: false,
         limits: limits(),
         generate: None,
+        decided_height: None,
     };
     let started = Instant::now();
     let result = backend()
@@ -564,5 +566,93 @@ async fn the_worker_halftones_png_pages_when_asked() {
                 "{px:?}"
             );
         }
+    }
+}
+
+/// A `handwrite` generate job for `text`, with the given page and budget.
+fn note_job(
+    text: &str,
+    page_points: Option<(u32, u32)>,
+    decided_height: Option<pscat_mcp::generate::DecidedHeight>,
+) -> WorkerJob {
+    use pscat_mcp::generate::GenerateJob;
+    use pscat_mcp::handwrite::HandwriteParams;
+    let params: HandwriteParams =
+        serde_json::from_value(serde_json::json!({"text": text})).expect("handwrite parameters");
+    WorkerJob {
+        mode: JobMode::Generate,
+        source: String::new(),
+        format: OutputFormat::Png,
+        page_points,
+        dpi: 72.0,
+        halftone: false,
+        limits: limits(),
+        generate: Some(GenerateJob::Handwrite(params)),
+        decided_height,
+    }
+}
+
+fn budget(width_points: u32, max_pixels: u64) -> pscat_mcp::generate::DecidedHeight {
+    pscat_mcp::generate::DecidedHeight {
+        width_points,
+        max_pixels,
+        max_side_px: 8000,
+    }
+}
+
+async fn run_job(job: WorkerJob) -> WorkerResult {
+    backend()
+        .execute(job, Duration::from_secs(20))
+        .await
+        .expect("worker result")
+}
+
+/// The worker lays the note out, sizes the page within the budget, and
+/// counts the layout pass's steps in the result.
+#[tokio::test]
+async fn a_decided_height_is_laid_out_and_drawn_within_the_budget() {
+    let r = run_job(note_job("hello\nthere", None, Some(budget(612, 1_000_000)))).await;
+    assert_eq!(r.failure, None, "{:?}", r.ps_error);
+    assert_eq!(r.artifacts.len(), 1);
+    assert_eq!(
+        (r.artifacts[0].width_px, r.artifacts[0].height_px),
+        (612, 200)
+    );
+    assert!(r.steps_used > 0);
+}
+
+/// An over-tall note is refused with the structured failure, from the
+/// layout, before a page is allocated or drawn.
+#[tokio::test]
+async fn a_note_over_the_budget_is_refused_before_it_is_drawn() {
+    use pscat_mcp::generate::GenerateErrorCode;
+    let text = "line\n".repeat(50);
+    // 612 x 2700 = 1.65 M pixels is the note; the budget is 1 M.
+    let r = run_job(note_job(&text, None, Some(budget(612, 1_000_000)))).await;
+    let Some(WorkerFailure::Generate(f)) = r.failure else {
+        panic!("expected a generator failure, got {:?}", r.failure);
+    };
+    assert_eq!(f.code, GenerateErrorCode::TooManyPixels);
+    assert!(f.message.contains("50 lines"), "{}", f.message);
+    assert!(r.artifacts.is_empty());
+}
+
+/// The page must meet the plan: a width that differs from the budget's, or
+/// a job that states both a page and a budget (or neither), is a bad job.
+#[tokio::test]
+async fn a_generated_page_that_misses_the_plan_is_a_bad_job() {
+    for job in [
+        note_job("hi", None, Some(budget(400, 1_000_000))),
+        note_job("hi", Some((612, 146)), Some(budget(612, 1_000_000))),
+        note_job("hi", Some((612, 146)), None),
+        note_job("hi", None, None),
+    ] {
+        let r = run_job(job).await;
+        assert!(
+            matches!(r.failure, Some(WorkerFailure::BadJob { .. })),
+            "{:?}",
+            r.failure
+        );
+        assert!(r.artifacts.is_empty());
     }
 }

@@ -11,8 +11,8 @@
 //!   `render-worker` process per job and kills it at the deadline.
 //! * [`worker`] — the only code that executes PostScript (inside the child).
 //! * [`generate`] — tools whose input is not PostScript (LaTeX for
-//!   `chalkboard_math`): checked in the server, turned into a program in the
-//!   worker.
+//!   `chalkboard_math`, text for `handwrite`; the latter in [`handwrite`]):
+//!   checked in the server, turned into a program in the worker.
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
@@ -24,6 +24,7 @@ pub mod capture;
 pub mod catalog;
 pub mod config;
 pub mod generate;
+pub mod handwrite;
 pub mod http;
 pub mod mcp;
 pub mod pscat_extras;

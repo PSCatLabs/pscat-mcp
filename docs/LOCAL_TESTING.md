@@ -36,8 +36,8 @@ apart:
 * `get_renderer_info` exists only on this server. It reports
   `server_version`, the limits in force, and a `renderer` block with the
   PSCat version and git revision.
-* Both servers have `chalkboard_math`. Here SVG and PDF come back inline
-  and there is no `out_path`.
+* Both servers have `chalkboard_math` and `handwrite`. Here SVG and PDF
+  come back inline and there is no `out_path`; `handwrite` is PNG only on both.
 
 ## 3. stdio
 
@@ -706,12 +706,14 @@ cases. A scenario runs on every target (stdio, http, container) unless
   slot.
 * **Placeholders:** `{{file:PATH}}`, `{{server_version}}`,
   `{{pscat_version}}`, `{{pscat_revision}}` (from `Cargo.lock`),
-  `{{huge_source}}` and `{{pages:N}}`.
+  `{{huge_source}}`, `{{pages:N}}`, `{{huge_note}}` (a `handwrite` text over
+  its 64 KiB limit) and `{{lines:N}}` (`N` short lines of text).
 * Unknown keys are an error, so a typo cannot turn an assertion off.
 
 What is covered: the first prompt in section 5 (the runaway loop is
 `runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 6 of
-`agent-scenarios.md` (including 6, the catalog tool), and every error code in its list except `cancelled`
+`agent-scenarios.md` (including 6, the catalog tool, 7, the chalkboard, and 8,
+the handwritten note), and every error code in its list except `cancelled`
 (`tests/mcp_cancel.rs` covers it: an rmcp client's cancellation kills the
 worker). Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
 lines: `%` starts a comment that runs to the end of the line.

@@ -30,6 +30,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ("chalkboard_math", "Chalkboard math"),
     ("describe_art_capabilities", "List art capabilities"),
     ("get_renderer_info", "PSCat renderer info"),
+    ("handwrite", "Handwriting-style note"),
     ("render_postscript", "Render PostScript"),
     ("validate_postscript", "Validate PostScript"),
 ];
@@ -548,6 +549,9 @@ async fn argument_type_errors_get_the_structured_envelope() {
         ("render_postscript", json!({"format": "png"})),
         ("validate_postscript", json!({"source": 42})),
         ("chalkboard_math", json!({"latex": "x", "dpi": "high"})),
+        ("handwrite", json!({"text": "hi", "size": "big"})),
+        ("handwrite", json!({"text": "hi", "width": -5})),
+        ("handwrite", json!({"size": 36})),
         ("describe_art_capabilities", json!({"names": "pgcard"})),
         ("describe_art_capabilities", json!({"offset": -1})),
         (

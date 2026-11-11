@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::generate::{GenerateFailure, GenerateJob};
+use crate::generate::{
+    DecidedHeight, GenerateContext, GenerateError, GenerateFailure, GenerateJob, Spent,
+};
 
 /// Output format the worker can produce. These are the three formats PSCat's
 /// library supports (`Page::to_png`, `Interp::svg_pages`,
@@ -83,8 +85,10 @@ pub enum JobMode {
     Capabilities,
     /// Write a program from non-PostScript input (`generate` in the job, for
     /// example a LaTeX formula), then render it like [`JobMode::Render`].
-    /// `source` is ignored; `page_points` and `dpi` are the page the server
-    /// checked, which the generated program must match.
+    /// `source` is ignored. The page the server checked is `page_points` and
+    /// `dpi`, which the generated program must match; or, when the generator
+    /// decides the height (`decided_height`), the width and `dpi`, with a
+    /// height within the budget.
     Generate,
 }
 
@@ -130,6 +134,11 @@ pub struct WorkerJob {
     /// What to generate ([`JobMode::Generate`] only).
     #[serde(default)]
     pub generate: Option<GenerateJob>,
+    /// For a [`JobMode::Generate`] job whose generator decides the page
+    /// height from the input: the width and the budget the height must fit.
+    /// `page_points` is `None` then; the generated program's page is used.
+    #[serde(default)]
+    pub decided_height: Option<DecidedHeight>,
 }
 
 /// One rendered artifact.
@@ -302,6 +311,33 @@ pub fn syntax_scan(source: &[u8]) -> SyntaxScan {
     crate::pscat_extras::syntax_scan(source)
 }
 
+/// Put the interpreter limits and the sandbox on a fresh `interp`: the step,
+/// time and memory limits, reads confined to PSCat's compiled-in `lib/`, no
+/// writes, the page-pixel cap, captured stdout and silenced stderr. Every
+/// program the worker runs, a generator's measuring pass included, gets
+/// them.
+pub(crate) fn apply_limits(interp: &mut pscat::Interp, l: &InterpLimits) -> Result<(), String> {
+    let mut limits = pscat::Limits::none();
+    if let Some(steps) = l.max_steps {
+        limits = limits.with_max_steps(steps);
+    }
+    if let Some(ms) = l.max_time_ms {
+        limits = limits.with_max_time(Duration::from_millis(ms));
+    }
+    if let Some(bytes) = l.max_memory_bytes {
+        limits = limits.with_max_memory(bytes);
+    }
+    interp.set_limits(limits).map_err(|e| e.to_string())?;
+    // An empty slice confines reads to the copy of lib/ compiled into PSCat.
+    interp.set_read_roots::<&str>(&[])?;
+    interp.set_write_roots::<&str>(&[])?;
+    interp.set_max_write_bytes(Some(0));
+    interp.set_max_page_pixels(Some(l.max_page_pixels));
+    interp.capture_stdout();
+    interp.quiet_stderr();
+    Ok(())
+}
+
 fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
     let scale = (job.dpi / 72.0) as f32;
     let mut interp = match job.page_points {
@@ -322,25 +358,7 @@ fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
             interp
         }
     };
-    let l = &job.limits;
-    let mut limits = pscat::Limits::none();
-    if let Some(steps) = l.max_steps {
-        limits = limits.with_max_steps(steps);
-    }
-    if let Some(ms) = l.max_time_ms {
-        limits = limits.with_max_time(Duration::from_millis(ms));
-    }
-    if let Some(bytes) = l.max_memory_bytes {
-        limits = limits.with_max_memory(bytes);
-    }
-    interp.set_limits(limits).map_err(|e| e.to_string())?;
-    // An empty slice confines reads to the copy of lib/ compiled into PSCat.
-    interp.set_read_roots::<&str>(&[])?;
-    interp.set_write_roots::<&str>(&[])?;
-    interp.set_max_write_bytes(Some(0));
-    interp.set_max_page_pixels(Some(l.max_page_pixels));
-    interp.capture_stdout();
-    interp.quiet_stderr();
+    apply_limits(&mut interp, &job.limits)?;
     if matches!(job.mode, JobMode::Render | JobMode::Generate) {
         match job.format {
             OutputFormat::Svg => interp.enable_svg(),
@@ -367,7 +385,18 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
     }
     let generated = match generate(job) {
         Ok(generated) => generated,
-        Err(failure) => return WorkerResult::fail(failure),
+        Err(failed) => return *failed,
+    };
+    // A generator may have run programs of its own (a measuring pass): the
+    // render gets what is left of the step and time limits, and the page the
+    // generator chose.
+    let adjusted;
+    let (job, spent) = match &generated {
+        Some((_, g)) => {
+            adjusted = render_job(job, g);
+            (&adjusted, g.spent)
+        }
+        None => (job, Spent::default()),
     };
     let source = generated
         .as_ref()
@@ -387,8 +416,8 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
 
     let started = Instant::now();
     let run = interp.run_source(source);
-    result.elapsed_ms = started.elapsed().as_millis() as u64;
-    result.steps_used = interp.steps_used();
+    result.elapsed_ms = started.elapsed().as_millis() as u64 + spent.elapsed_ms;
+    result.steps_used = interp.steps_used() + spent.steps;
 
     let stdout = interp.captured_stdout();
     let cap = job.limits.max_program_output_bytes;
@@ -452,29 +481,75 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
     result
 }
 
+/// The job the render pass runs: `job` with the page the generator chose
+/// and the step and time limits less what the generator spent.
+fn render_job(job: &WorkerJob, g: &crate::generate::GeneratedProgram) -> WorkerJob {
+    let mut adjusted = job.clone();
+    adjusted.page_points = Some(g.page_points);
+    let l = &mut adjusted.limits;
+    l.max_steps = l.max_steps.map(|n| n.saturating_sub(g.spent.steps).max(1));
+    l.max_time_ms = l
+        .max_time_ms
+        .map(|ms| ms.saturating_sub(g.spent.elapsed_ms).max(1));
+    adjusted
+}
+
 /// For a [`JobMode::Generate`] job, the generator and the program it wrote,
 /// checked against the page the server validated. `None` for other modes.
+/// `Err` is the finished result of a job that cannot go on.
 fn generate(
     job: &WorkerJob,
-) -> Result<Option<(&GenerateJob, crate::generate::GeneratedProgram)>, WorkerFailure> {
+) -> Result<Option<(&GenerateJob, crate::generate::GeneratedProgram)>, Box<WorkerResult>> {
     if job.mode != JobMode::Generate {
         return Ok(None);
     }
     let Some(gen_job) = &job.generate else {
-        return Err(WorkerFailure::BadJob {
+        return Err(Box::new(WorkerResult::fail(WorkerFailure::BadJob {
             message: "a generate job needs `generate`".into(),
-        });
+        })));
     };
-    let program = gen_job.generate().map_err(WorkerFailure::Generate)?;
-    // The server checked the page against the pixel limits; the program
-    // must draw on that page and no other.
-    if Some(program.page_points) != job.page_points || program.dpi != job.dpi {
-        return Err(WorkerFailure::BadJob {
+    let cx = GenerateContext {
+        limits: &job.limits,
+        decided: job.decided_height.as_ref(),
+    };
+    let program = match gen_job.generate(&cx) {
+        Ok(program) => program,
+        Err(GenerateError::Input(f)) => {
+            return Err(Box::new(WorkerResult::fail(WorkerFailure::Generate(f))));
+        }
+        Err(GenerateError::PostScript(diag)) => {
+            // A generator's own program passed a limit or raised an error:
+            // reported as a render's PostScript failure would be.
+            let mut result = WorkerResult::fail(WorkerFailure::PostScript);
+            result.ps_error = Some(*diag);
+            return Err(Box::new(result));
+        }
+        Err(GenerateError::Internal(message)) => {
+            return Err(Box::new(WorkerResult::fail(WorkerFailure::BadJob {
+                message,
+            })));
+        }
+    };
+    // The server checked the page, or the width and the budget of the
+    // height, against the pixel limits; the program must draw on a page
+    // that meets them and no other.
+    let page_ok = match (job.page_points, &job.decided_height) {
+        (Some(page), None) => program.page_points == page && program.dpi == job.dpi,
+        (None, Some(budget)) => {
+            program.page_points.0 == budget.width_points
+                && program.dpi == job.dpi
+                && budget.admits(program.page_points.1, job.dpi).is_ok()
+        }
+        _ => false,
+    };
+    if !page_ok {
+        return Err(Box::new(WorkerResult::fail(WorkerFailure::BadJob {
             message: format!(
-                "the generated page {:?} at {} dpi is not the checked page {:?} at {} dpi",
-                program.page_points, program.dpi, job.page_points, job.dpi
+                "the generated page {:?} at {} dpi is not the checked page {:?} (height budget \
+                 {:?}) at {} dpi",
+                program.page_points, program.dpi, job.page_points, job.decided_height, job.dpi
             ),
-        });
+        })));
     }
     Ok(Some((gen_job, program)))
 }
@@ -573,4 +648,65 @@ fn encode(
         }
     }
     Ok((artifacts, pages.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate::GeneratedProgram;
+
+    fn job() -> WorkerJob {
+        WorkerJob {
+            mode: JobMode::Generate,
+            source: String::new(),
+            format: OutputFormat::Png,
+            page_points: None,
+            dpi: 72.0,
+            halftone: false,
+            limits: InterpLimits {
+                max_steps: Some(1000),
+                max_time_ms: Some(500),
+                max_memory_bytes: None,
+                max_page_pixels: 1,
+                max_pages: 1,
+                max_output_bytes: 1,
+                max_program_output_bytes: 1,
+            },
+            generate: None,
+            decided_height: None,
+        }
+    }
+
+    fn program(steps: u64, elapsed_ms: u64) -> GeneratedProgram {
+        GeneratedProgram {
+            source: String::new(),
+            page_points: (10, 20),
+            dpi: 72.0,
+            transparent: false,
+            spent: Spent { steps, elapsed_ms },
+        }
+    }
+
+    /// What a generator's own programs used is not available to the render.
+    #[test]
+    fn the_render_gets_what_the_generator_left_of_the_limits() {
+        let j = render_job(&job(), &program(400, 120));
+        assert_eq!(j.page_points, Some((10, 20)));
+        assert_eq!(j.limits.max_steps, Some(600));
+        assert_eq!(j.limits.max_time_ms, Some(380));
+        // Never to zero, which would read as "no time at all" differently
+        // from a limit; one step or millisecond is a limit that is hit.
+        let j = render_job(&job(), &program(5000, 9000));
+        assert_eq!(
+            (j.limits.max_steps, j.limits.max_time_ms),
+            (Some(1), Some(1))
+        );
+        // A disabled limit stays disabled.
+        let mut unlimited = job();
+        unlimited.limits.max_steps = None;
+        assert_eq!(
+            render_job(&unlimited, &program(400, 0)).limits.max_steps,
+            None
+        );
+    }
 }

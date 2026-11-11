@@ -14,19 +14,21 @@ is also checked without a model by the server-layer scenarios in
 [`evals/server/scenarios/`](../evals/server/scenarios/), which run in CI; see
 [Server-layer evals](../docs/LOCAL_TESTING.md#10-server-layer-evals).
 
-The server exposes five tools:
+The server exposes six tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `chalkboard_math` | `latex` (required), `size`, `irregular`, `slope`, `jitter`, `align`, `color`, `board`, `ghosting`, `seed`, `width`, `height` (points, default 800×400), `dpi` (default 144), `format`, `config` | The board as `render_postscript` returns a page, with the same envelope |
+| `handwrite` | `text` (required), `size` (points, default 36), `width` (points, default 612), `paper` (`plain` default, `ruled`), `ink` (`"R,G,B"` in 0–1, default `0.13,0.14,0.34`), `jitter` (default 16), `seed` (default 1985), `dpi` (default 72) | The note as a PNG, with the same envelope as `render_postscript`; the page height is fitted to the text |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
 Every failure is `isError: true` with a text explanation and
 `structuredContent.error = {code, message, postscript?, program_output?, input?}`
-(`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error).
+(`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error,
+and `handwrite`'s `{code: "height"}` for a note too tall).
 `code` is one of: `invalid_request`, `source_too_large`, `unsupported_format`,
 `invalid_dimensions`, `too_many_pixels`, `postscript_error`, `limit_exceeded`,
 `timeout`, `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
@@ -418,6 +420,48 @@ agent against the container image.
 
 ---
 
+## 8. Write a handwritten note
+
+**Prompt**
+
+> Write "see you at the lake on saturday!" as a handwritten note on ruled
+> paper, in green ink.
+
+**Expected tool calls**
+
+```json
+{ "name": "handwrite", "arguments": { "text": "see you at the lake on saturday!", "paper": "ruled", "ink": "0.1,0.5,0.2" } }
+```
+
+**Expected result**
+
+- One PNG image: a line of hand-drawn green letters on pale blue ruled
+  lines with a red margin rule, 612×146 pixels (612 points wide at 72 dpi;
+  the height is fitted to the wrapped text, 146 points for one line and 54
+  for each further one). `ok: true`, `format: "png"`, a few KB. The same
+  arguments give the same bytes.
+- The face has `a` to `z` (capitals come out as lowercase), digits and
+  `. , - ' ! ?`; other characters leave a gap. A text with none of them,
+  an empty text and a text of only whitespace are `invalid_request`.
+- A text that lays out taller than the limits is refused before it is drawn:
+  `too_many_pixels` past `PSCAT_MCP_MAX_PIXELS`, `invalid_dimensions` past
+  8000 pixels (or points) a side (about 148 lines at the defaults), with
+  `error.input.code` `"height"` and a message with the line count and the
+  size it would have been. The agent shortens the text, widens the note
+  or lowers `size`.
+- A text over `PSCAT_MCP_MAX_HANDWRITE_BYTES` is `source_too_large`; a bad
+  `paper`, `ink`, `size`, `jitter` or `seed` is `invalid_request`; `dpi` or
+  `width` out of range is `invalid_dimensions`.
+- The styles are hand-drawn faces for notes, cards and art, not for
+  imitating a specific person's handwriting.
+
+This case is covered by `tests/handwrite.rs` and
+`evals/server/scenarios/63-handwrite.json`; the agent case is
+`evals/agent/cases/80-handwrite.json` (unbaselined). It has not been run
+through an agent against the container image.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -432,3 +476,4 @@ agent against the container image.
 | 5c | Huge source | `render_postscript` | `source_too_large` (or HTTP 413) |
 | 6 | Real names | `describe_art_capabilities` then `render_postscript` | Catalog lists templates and palettes; render uses a listed template and its `load` line |
 | 7 | Chalkboard | `chalkboard_math` | PNG 1600×800 board with yellow chalk; an unsupported command is `postscript_error` naming it |
+| 8 | Handwritten note | `handwrite` | PNG 612×146 on ruled paper in green ink; a note too tall for the limits is `invalid_dimensions` or `too_many_pixels` |

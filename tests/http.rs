@@ -656,6 +656,7 @@ async fn host_and_origin_checks_reject_after_auth() {
 async fn body_limit_lets_slightly_large_sources_reach_the_tool() {
     let srv = start(real_service(LimitsConfig {
         max_source_bytes: 1024,
+        max_handwrite_bytes: 1024,
         ..LimitsConfig::default()
     }))
     .await;
@@ -685,6 +686,63 @@ async fn body_limit_lets_slightly_large_sources_reach_the_tool() {
     let (status, _, _) = post(&srv.mcp(), None, None, &render_call(3, &huge, 10, 10)).await;
     assert_eq!(status, 401);
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
+/// The body limit follows the largest text a tool takes, so a `handwrite`
+/// text past what the source limit would let through still gets a structured
+/// answer, not a 413.
+#[tokio::test(flavor = "multi_thread")]
+async fn body_limit_follows_the_handwrite_text_limit() {
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        max_handwrite_bytes: 100 * 1024,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    let note = |id: u64, text: String| {
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "handwrite", "arguments": { "text": text } }
+        })
+    };
+    // Past the source limit's body limit (1024 * 6 + 64 KiB), under the text
+    // limit's: a note that is read and answered (here: too tall).
+    let (status, _, resp) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &note(1, "hi ".repeat(30 * 1024)),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        error_code(&resp["result"]),
+        Some("invalid_dimensions"),
+        "{resp}"
+    );
+    // Over the text limit, under the body limit: structured.
+    let (status, _, resp) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &note(2, "hi ".repeat(40 * 1024)),
+    )
+    .await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        error_code(&resp["result"]),
+        Some("source_too_large"),
+        "{resp}"
+    );
+    // Far over the body limit (100 KiB * 6 + 64 KiB): 413 before rmcp.
+    let (status, _, _) = post(
+        &srv.mcp(),
+        Some(TOKEN),
+        None,
+        &note(3, "hi ".repeat(300 * 1024)),
+    )
+    .await;
+    assert_eq!(status, 413);
 }
 
 // ------------------------------------------- cancellation and chunked bodies
@@ -794,6 +852,7 @@ async fn post_chunked(base: &str, body: &[u8]) -> u16 {
 async fn chunked_body_over_the_limit_is_413_and_never_renders() {
     let srv = start(real_service(LimitsConfig {
         max_source_bytes: 1024,
+        max_handwrite_bytes: 1024,
         ..LimitsConfig::default()
     }))
     .await;
@@ -818,6 +877,7 @@ async fn chunked_body_over_the_limit_is_413_and_never_renders() {
 async fn oversized_bodies_get_a_clean_413_every_time() {
     let srv = start(real_service(LimitsConfig {
         max_source_bytes: 1024,
+        max_handwrite_bytes: 1024,
         ..LimitsConfig::default()
     }))
     .await;
@@ -844,6 +904,7 @@ async fn rejected_large_bodies_get_a_clean_401_every_time() {
     // Body limit 1024 * 6 + 64 KiB, about 71 KB; the body is 2 MB.
     let srv = start(real_service(LimitsConfig {
         max_source_bytes: 1024,
+        max_handwrite_bytes: 1024,
         ..LimitsConfig::default()
     }))
     .await;

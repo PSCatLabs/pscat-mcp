@@ -21,6 +21,7 @@ boundaries are, and where to extend it.
                            • validate_request: size, format, dpi, page px, pixel cap
                            • validate_generate: generate.rs plan (input size, board
                              config), then the same format/page/pixel checks
+                             (for a note: its width; the worker checks the height)
                            • semaphore: bounded concurrent renders + queue timeout
                            • maps worker/backend failures to stable ErrorCodes
                                │  WorkerJob (JSON)
@@ -40,7 +41,9 @@ boundaries are, and where to extend it.
 ```
 
 On HTTP the `/mcp` stack, outermost first, is: request id and tracing,
-authentication, the body limit, the optional capture layer (`capture.rs`,
+authentication, the body limit (six times the larger of the source and
+`handwrite` text limits, plus 64 KiB, so an input a little over its limit
+still gets a structured error), the optional capture layer (`capture.rs`,
 off unless `--capture-file` is set; it records each authenticated request
 just before rmcp sees it, without tokens), then rmcp. `render.rs` logs one
 `render started` line per job it hands to a worker; the server-layer evals
@@ -110,9 +113,38 @@ Each kind has three hooks:
 
 | Hook | Runs in | Does |
 |---|---|---|
-| `plan` | server, before a slot is taken | checks what needs no parsing of the untrusted input (its byte size; for a board, the board config) and returns the page in points and the dpi. `validate_generate` then applies the render's format, dpi, side and pixel checks to that page. A failure is a rejection like any other: no slot, no worker, counted in `rejected`. |
-| `generate` | worker | writes the program and its page. The worker refuses a page that is not the one the server checked (`worker_failed`), then runs the program through the ordinary render path: PNG, SVG or PDF encoding, the page and byte caps, and every interpreter and OS limit. |
+| `plan` | server, before a slot is taken | checks what needs no parsing of the untrusted input (its byte size; for a board, the board config) and returns a `PagePlan`: the dpi and either the whole page in points or only its width (see below). `validate_generate` then applies the render's format, dpi, side and pixel checks to what is known. A failure is a rejection like any other: no slot, no worker, counted in `rejected`. |
+| `generate` | worker | writes the program and its page. The worker refuses a page that does not meet the plan (`worker_failed`), then runs the program through the ordinary render path: PNG, SVG or PDF encoding, the page and byte caps, and every interpreter and OS limit. |
 | `explain` | worker | maps a PostScript error from the generated program to the input error it stands for (mathkit raises `undefined` naming `mk-unsupported-command:\foo`). Limit errors are never explained. |
+
+**The page is a contract.** A plan promises one of two things
+(`PlannedPage`), and the worker holds the generated program to it:
+
+* `Fixed`: the whole page is known before the input is read (a chalkboard's
+  size is its config). The server checks the page against the pixel limits;
+  the worker refuses a program on any other page.
+* `FixedWidth`: the width and dpi are fixed, and the height is decided by
+  laying out the untrusted input (a note's height is its line count), so the
+  server cannot know it. The server checks the width's pixels against the
+  side limit and the pixel cap, and puts a `DecidedHeight` budget in the job
+  (`WorkerJob.decided_height`: the width, the most pixels, the most pixels a
+  side). The generator lays the input out, computes the height, and calls
+  `DecidedHeight::admits` **before anything is allocated**; a page over the
+  budget is a structured `too_many_pixels` (the area) or `invalid_dimensions`
+  (the side limit), with `error.input.code` `height` and a message with the
+  line count and the size it would have had. The worker then checks the
+  returned page against the budget again (`worker_failed` if a generator ever
+  let one through) and only then builds the render's interpreter, so the
+  raster of an over-tall note is never allocated.
+
+A generator may run PostScript of its own before the render (`handwrite`'s
+measuring pass). That pass gets the render's whole sandbox
+(`worker::apply_limits`: step, time and memory limits, reads confined to
+`lib/`, no writes). A limit it hits is reported as the render's
+`limit_exceeded`, with the same `postscript` diagnostic. What it spent
+(`GeneratedProgram.spent`) is taken off the render's step and time limits,
+and added to the result's `steps_used` and `elapsed_ms`, so the two programs
+together stay within the limits instead of each getting all of them.
 
 A generator failure travels back as `WorkerFailure::Generate`, with an
 `ErrorCode` (`invalid_request` for input that is wrong before anything runs,
@@ -129,9 +161,27 @@ or `limit_exceeded`. Deeply nested LaTeX ends in PSCat's
 `execstackoverflow` (`postscript_error`), a long one in `timeout`; either
 way only the worker is involved (`tests/chalkboard.rs`).
 
-To add a kind (`handwrite`, `review_sheet`): a `GenerateJob` variant with its
-three arms, its hidden PSCat calls in `pscat_extras`, and a tool in `mcp.rs`
-that builds a `GenerateRequest` and calls `RenderService::generate`. A
+For `handwrite` (`src/handwrite.rs`) the plugin's tool runs `pscat handwrite`,
+a subcommand of the `pscat` binary and not of the library; this server does
+what it does from public pieces. `plan` checks the text's byte size
+(`PSCAT_MCP_MAX_HANDWRITE_BYTES`, 64 KiB; the plugin's is 1 MiB) and every argument
+(`HandwriteParams::check`: ranges, `paper`, and `ink`, which is three plain
+decimals in 0 to 1 and can carry no code), and returns a `FixedWidth` plan.
+`generate` runs `hs-linecount` from `lib/handscript.ps` on a default page
+(the measuring pass), computes the height as the plugin does (two margins,
+a first line of 1.05 em, 1.5 em for each further line), checks the budget,
+and writes the program: the library, an options dictionary, `hs-write
+showpage`. The text is lowercased, escaped for a string literal, and reaches
+only the options dictionary; no hidden PSCat item is needed
+(`(lib/handscript.ps) run` is within the read confinement). The render uses
+a fresh interpreter, like the plugin's, so the same seed gives the same
+bytes. A text with no drawable character, or only whitespace, is refused in
+`plan`. There is no `explain` arm: the library raises no input errors.
+
+To add a kind (`review_sheet`): a `GenerateJob` variant with its three arms,
+its hidden PSCat calls in `pscat_extras`, a `PlannedPage` that says what is
+fixed, and a tool in `mcp.rs` that builds a `GenerateRequest` and calls
+`RenderService::generate`. A
 generator whose output is pages rather than a program (a contact sheet of
 several renders) would add a second output shape next to
 `GeneratedProgram`, handled by the same worker branch.
@@ -159,6 +209,8 @@ the same binary). A pre-forked pool is a possible later optimisation.
 |---|---|---|
 | Source size | server, before execution | 256 KiB |
 | `chalkboard_math` LaTeX size | server, before execution | 4 KiB |
+| `handwrite` text size | server, before execution | 64 KiB |
+| `handwrite` note height | worker, after layout, before the page is allocated: side limit, then pixel cap | — |
 | Format, `halftone` only with PNG, dpi (9–1200), page ≤ 8000 px a side | server, before execution | — |
 | Device pixels of the starting page | server, before execution | 16 M |
 | Pages created by `setpagedevice` | PSCat (`set_max_page_pixels`) | 16 M |
