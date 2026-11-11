@@ -27,6 +27,7 @@ showpage
 /// one row here (and its own behavioural test); the listing test checks the
 /// annotations, descriptions and output schema of every row.
 const EXPECTED_TOOLS: &[(&str, &str)] = &[
+    ("chalkboard_math", "Chalkboard math"),
     ("describe_art_capabilities", "List art capabilities"),
     ("get_renderer_info", "PSCat renderer info"),
     ("render_postscript", "Render PostScript"),
@@ -546,6 +547,7 @@ async fn argument_type_errors_get_the_structured_envelope() {
         ),
         ("render_postscript", json!({"format": "png"})),
         ("validate_postscript", json!({"source": 42})),
+        ("chalkboard_math", json!({"latex": "x", "dpi": "high"})),
         ("describe_art_capabilities", json!({"names": "pgcard"})),
         ("describe_art_capabilities", json!({"offset": -1})),
         (

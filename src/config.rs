@@ -25,6 +25,12 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_MAX_SOURCE_BYTES", default_value_t = 256 * 1024)]
     pub max_source_bytes: usize,
 
+    /// Largest LaTeX formula `chalkboard_math` accepts, in bytes. Checked
+    /// before execution. About forty rows of a derivation; a board that full
+    /// is already crowded.
+    #[arg(long, env = "PSCAT_MCP_MAX_LATEX_BYTES", default_value_t = 4096)]
+    pub max_latex_bytes: usize,
+
     /// Wall-clock deadline for one render, in milliseconds. The worker
     /// process is killed (SIGKILL) when it passes; PSCat's own time limit is
     /// set a little below it so most runaways stop cleanly first.
@@ -81,6 +87,7 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         LimitsConfig {
             max_source_bytes: 256 * 1024,
+            max_latex_bytes: 4096,
             render_timeout_ms: 20_000,
             interp_time_limit_ms: None,
             max_steps: 5_000_000_000,
@@ -157,6 +164,9 @@ impl LimitsConfig {
     pub fn check(&self) -> Result<(), String> {
         if self.max_source_bytes == 0 {
             return Err("max-source-bytes must be positive".into());
+        }
+        if self.max_latex_bytes == 0 {
+            return Err("max-latex-bytes must be positive".into());
         }
         if self.render_timeout_ms == 0 {
             return Err("render-timeout-ms must be positive".into());

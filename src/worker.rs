@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::generate::{GenerateFailure, GenerateJob};
+
 /// Output format the worker can produce. These are the three formats PSCat's
 /// library supports (`Page::to_png`, `Interp::svg_pages`,
 /// `Interp::pdf_document`).
@@ -79,6 +81,11 @@ pub enum JobMode {
     /// Run no program: return PSCat's art catalog (`capabilities` in the
     /// result). Every other job field is ignored.
     Capabilities,
+    /// Write a program from non-PostScript input (`generate` in the job, for
+    /// example a LaTeX formula), then render it like [`JobMode::Render`].
+    /// `source` is ignored; `page_points` and `dpi` are the page the server
+    /// checked, which the generated program must match.
+    Generate,
 }
 
 /// Interpreter-level limits applied inside the worker by PSCat itself.
@@ -120,6 +127,9 @@ pub struct WorkerJob {
     pub halftone: bool,
     /// Interpreter limits.
     pub limits: InterpLimits,
+    /// What to generate ([`JobMode::Generate`] only).
+    #[serde(default)]
+    pub generate: Option<GenerateJob>,
 }
 
 /// One rendered artifact.
@@ -198,6 +208,9 @@ pub enum WorkerFailure {
         /// What was wrong.
         message: String,
     },
+    /// A generator refused its input, or the generated program raised an
+    /// error that stands for an input error ([`JobMode::Generate`]).
+    Generate(GenerateFailure),
 }
 
 /// The worker's answer.
@@ -328,7 +341,7 @@ fn configure(job: &WorkerJob) -> Result<pscat::Interp, String> {
     interp.set_max_page_pixels(Some(l.max_page_pixels));
     interp.capture_stdout();
     interp.quiet_stderr();
-    if job.mode == JobMode::Render {
+    if matches!(job.mode, JobMode::Render | JobMode::Generate) {
         match job.format {
             OutputFormat::Svg => interp.enable_svg(),
             OutputFormat::Pdf => interp.enable_pdf(),
@@ -352,13 +365,28 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
     if job.mode == JobMode::Validate {
         result.syntax = Some(syntax_scan(job.source.as_bytes()));
     }
+    let generated = match generate(job) {
+        Ok(generated) => generated,
+        Err(failure) => return WorkerResult::fail(failure),
+    };
+    let source = generated
+        .as_ref()
+        .map_or(job.source.as_bytes(), |(_, g)| g.source.as_bytes());
     let mut interp = match configure(job) {
         Ok(interp) => interp,
         Err(message) => return WorkerResult::fail(WorkerFailure::BadJob { message }),
     };
+    if let Some((_, g)) = &generated {
+        if g.transparent {
+            crate::pscat_extras::set_transparent_background(&mut interp);
+        }
+        if job.format == OutputFormat::Pdf {
+            crate::pscat_extras::set_pdf_info_from_source(&mut interp, source);
+        }
+    }
 
     let started = Instant::now();
-    let run = interp.run_source(job.source.as_bytes());
+    let run = interp.run_source(source);
     result.elapsed_ms = started.elapsed().as_millis() as u64;
     result.steps_used = interp.steps_used();
 
@@ -397,9 +425,20 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
         return result;
     }
 
-    if run.is_err() {
+    if let Err(err) = &run {
         // Never return a partial page as if it were the requested render.
         result.failure = Some(WorkerFailure::PostScript);
+        // A generated program's error may stand for an input error (an
+        // unsupported TeX command): report that instead of the PostScript
+        // report, which names the generator's internals. A limit error is
+        // always reported as one.
+        if err.limit().is_none()
+            && let Some((gen_job, _)) = &generated
+            && let Some(failure) = gen_job.explain(err)
+        {
+            result.failure = Some(WorkerFailure::Generate(failure));
+            result.ps_error = None;
+        }
         return result;
     }
 
@@ -411,6 +450,33 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
         Err(failure) => result.failure = Some(failure),
     }
     result
+}
+
+/// For a [`JobMode::Generate`] job, the generator and the program it wrote,
+/// checked against the page the server validated. `None` for other modes.
+fn generate(
+    job: &WorkerJob,
+) -> Result<Option<(&GenerateJob, crate::generate::GeneratedProgram)>, WorkerFailure> {
+    if job.mode != JobMode::Generate {
+        return Ok(None);
+    }
+    let Some(gen_job) = &job.generate else {
+        return Err(WorkerFailure::BadJob {
+            message: "a generate job needs `generate`".into(),
+        });
+    };
+    let program = gen_job.generate().map_err(WorkerFailure::Generate)?;
+    // The server checked the page against the pixel limits; the program
+    // must draw on that page and no other.
+    if Some(program.page_points) != job.page_points || program.dpi != job.dpi {
+        return Err(WorkerFailure::BadJob {
+            message: format!(
+                "the generated page {:?} at {} dpi is not the checked page {:?} at {} dpi",
+                program.page_points, program.dpi, job.page_points, job.dpi
+            ),
+        });
+    }
+    Ok(Some((gen_job, program)))
 }
 
 fn encode(

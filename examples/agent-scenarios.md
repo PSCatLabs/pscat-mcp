@@ -14,17 +14,19 @@ is also checked without a model by the server-layer scenarios in
 [`evals/server/scenarios/`](../evals/server/scenarios/), which run in CI; see
 [Server-layer evals](../docs/LOCAL_TESTING.md#10-server-layer-evals).
 
-The server exposes four tools:
+The server exposes five tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
+| `chalkboard_math` | `latex` (required), `size`, `irregular`, `slope`, `jitter`, `align`, `color`, `board`, `ghosting`, `seed`, `width`, `height` (points, default 800×400), `dpi` (default 144), `format`, `config` | The board as `render_postscript` returns a page, with the same envelope |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
 Every failure is `isError: true` with a text explanation and
-`structuredContent.error = {code, message, postscript?, program_output?}`.
+`structuredContent.error = {code, message, postscript?, program_output?, input?}`
+(`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error).
 `code` is one of: `invalid_request`, `source_too_large`, `unsupported_format`,
 `invalid_dimensions`, `too_many_pixels`, `postscript_error`, `limit_exceeded`,
 `timeout`, `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
@@ -378,6 +380,43 @@ agent against the container image.
 
 ---
 
+## 7. Write a formula on a chalkboard
+
+**Prompt**
+
+> Write Euler's identity on a chalkboard for me, in yellow chalk.
+
+**Expected tool calls**
+
+```json
+{ "name": "chalkboard_math", "arguments": { "latex": "e^{i\\pi} + 1 = 0", "color": "yellow" } }
+```
+
+**Expected result**
+
+- One PNG image of 1600×800 pixels (the default board, 800×400 points at
+  144 dpi): a dark slate with hand-drawn yellow chalk strokes, eraser marks
+  and faint ghosts of earlier formulas. `ok: true`, `format: "png"`,
+  about 0.3 MB.
+- `board: false` gives chalk alone on a transparent page; `format: "svg"`
+  or `"pdf"` comes back inline as an embedded resource, but the default
+  board's SVG (about 10 MB) is over the default output limit
+  (`output_too_large`); a smaller board, or PDF (about 2.6 MB), fits.
+- A command outside the subset, for example `\nosuchcommand{x}`, fails
+  with `postscript_error`, a message naming the command, and
+  `error.input: { "code": "unsupported_command", "token": "\\nosuchcommand" }`.
+  The agent rewrites the formula with supported commands instead of
+  switching to PostScript.
+- A bad board setting (`color: "red"`, `size: 0`) is `invalid_request`
+  naming the argument, before anything runs.
+
+This case is covered by `tests/chalkboard.rs` and
+`evals/server/scenarios/62-chalkboard-math.json`; the agent case is
+`evals/agent/cases/70-chalkboard-math.json`. It has not been run through an
+agent against the container image.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -391,3 +430,4 @@ agent against the container image.
 | 5b | 10000×10000 page | `render_postscript` | `invalid_dimensions` (5000×5000: `too_many_pixels`) |
 | 5c | Huge source | `render_postscript` | `source_too_large` (or HTTP 413) |
 | 6 | Real names | `describe_art_capabilities` then `render_postscript` | Catalog lists templates and palettes; render uses a listed template and its `load` line |
+| 7 | Chalkboard | `chalkboard_math` | PNG 1600×800 board with yellow chalk; an unsupported command is `postscript_error` naming it |

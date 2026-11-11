@@ -59,6 +59,7 @@ fn job(
         dpi: 72.0,
         halftone: false,
         limits,
+        generate: None,
     }
 }
 
@@ -486,6 +487,7 @@ async fn the_worker_returns_the_art_catalog() {
         dpi: 72.0,
         halftone: false,
         limits: limits(),
+        generate: None,
     };
     let started = Instant::now();
     let result = backend()

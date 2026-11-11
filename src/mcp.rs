@@ -10,6 +10,8 @@
 //!   is a [`RenderToolOutput`] envelope without the artifact bytes. On
 //!   failure, `isError: true`, a text explanation, and the same envelope
 //!   with `ok: false` and `error` set; never an image.
+//! * `chalkboard_math` — the same content blocks and [`RenderToolOutput`]
+//!   envelope as `render_postscript`, for the one board it draws.
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
@@ -30,14 +32,16 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
+use crate::generate::{ChalkboardParams, GenerateJob};
 use crate::render::{
-    DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest, RenderService,
-    ValidationReport,
+    DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, RenderError, RenderOutput, RenderRequest,
+    RenderService, ValidationReport,
 };
 use crate::worker::OutputFormat;
 
@@ -66,6 +70,129 @@ pub struct RenderArgs {
     /// the call fails with invalid_request. Default false.
     #[schemars(extend("default" = false))]
     pub halftone: Option<bool>,
+}
+
+/// Arguments of `chalkboard_math`. Defaults, ranges and the way the board
+/// arguments combine are PSCat's (`pscat chalk`, the plugin's tool).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ChalkboardArgs {
+    /// The formula, as typed in a LaTeX document (single backslashes).
+    pub latex: String,
+    /// Writing size in points, before any shrink to fit the board. Default 64.
+    #[schemars(extend("exclusiveMinimum" = 0, "maximum" = 1000))]
+    pub size: Option<f64>,
+    /// How far the layout departs from clean TeX: 0 clean and level, 1 a
+    /// steady hand (default), up to 5.
+    #[schemars(range(min = 0, max = 5))]
+    pub irregular: Option<f64>,
+    /// Baseline tilt in degrees. Default: a small one picked from the seed.
+    #[schemars(range(min = -45, max = 45))]
+    pub slope: Option<f64>,
+    /// Each glyph's wobble as a fraction of the size. Default 0.016.
+    #[schemars(range(min = 0, max = 0.5))]
+    pub jitter: Option<f64>,
+    /// Where the lines sit across the board. Default "center".
+    #[schemars(extend("enum" = ["center", "left"]))]
+    pub align: Option<String>,
+    /// Chalk colour. Default "white".
+    #[schemars(extend("enum" = ["white", "yellow", "pink", "blue", "green", "orange"]))]
+    pub color: Option<String>,
+    /// The board: true (a slate, the default), false (chalk alone on a
+    /// transparent page), "slate", "greenboard", [r, g, b] in 0..1, or an
+    /// object of board keys (tone, haze, ghosting, swipes, wipes, smudges,
+    /// ledge).
+    #[serde(default)]
+    #[schemars(schema_with = "board_schema")]
+    pub board: Option<Value>,
+    /// How much of an earlier lecture's erased writing shows, 0 to 1
+    /// (default 0.4); false for none. Needs a board.
+    #[serde(default)]
+    #[schemars(schema_with = "ghosting_schema")]
+    pub ghosting: Option<Value>,
+    /// Seed for the layout, the chalk and the board; the same seed gives the
+    /// same image. Default 1.
+    #[schemars(range(min = -1_000_000_000, max = 1_000_000_000))]
+    pub seed: Option<i64>,
+    /// Board width in points. Default 800.
+    #[schemars(range(min = 1, max = 8000))]
+    pub width: Option<u32>,
+    /// Board height in points. Default 400.
+    #[schemars(range(min = 1, max = 8000))]
+    pub height: Option<u32>,
+    /// Resolution in dots per inch, 9 to 1200. Default 144 (the default
+    /// board is 1600x800 pixels).
+    pub dpi: Option<f64>,
+    /// Output format: "png" (the default), "svg" or "pdf".
+    #[schemars(extend("enum" = ["png", "svg", "pdf"], "default" = "png"))]
+    pub format: Option<String>,
+    /// The full board config, as `pscat chalk --json` takes it: groups
+    /// `layout` (size, irregular, slope, jitter, align, margin, width, height,
+    /// dpi), `chalk` (color, strength, pressure, tilt, dust, width), `board`
+    /// (or false) and `seed`. The arguments above are laid over it.
+    pub config: Option<serde_json::Map<String, Value>>,
+}
+
+fn board_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "The board: true (a slate, the default), false (chalk alone on a \
+                        transparent page), \"slate\", \"greenboard\", [r, g, b] in 0..1, or an \
+                        object of board keys (tone, haze, ghosting, swipes, wipes, smudges, ledge).",
+        "anyOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["slate", "greenboard"] },
+            {
+                "type": "array",
+                "items": { "type": "number", "minimum": 0, "maximum": 1 },
+                "minItems": 3,
+                "maxItems": 3
+            },
+            { "type": "object" }
+        ]
+    })
+}
+
+fn ghosting_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "How much of an earlier lecture's erased writing shows, 0 to 1 \
+                        (default 0.4); false for none. Needs a board.",
+        "anyOf": [
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "boolean" }
+        ]
+    })
+}
+
+impl ChalkboardArgs {
+    /// The generate request: the LaTeX, the format, and every board
+    /// argument that was given, as the JSON PSCat's config reader takes.
+    fn into_request(self) -> GenerateRequest {
+        let mut board = serde_json::Map::new();
+        let mut put = |key: &str, value: Option<Value>| {
+            if let Some(v) = value.filter(|v| !v.is_null()) {
+                board.insert(key.to_string(), v);
+            }
+        };
+        put("size", self.size.map(Value::from));
+        put("irregular", self.irregular.map(Value::from));
+        put("slope", self.slope.map(Value::from));
+        put("jitter", self.jitter.map(Value::from));
+        put("align", self.align.map(Value::from));
+        put("color", self.color.map(Value::from));
+        put("board", self.board);
+        put("ghosting", self.ghosting);
+        put("seed", self.seed.map(Value::from));
+        put("width", self.width.map(Value::from));
+        put("height", self.height.map(Value::from));
+        put("dpi", self.dpi.map(Value::from));
+        put("config", self.config.map(Value::Object));
+        GenerateRequest {
+            job: GenerateJob::ChalkboardMath(ChalkboardParams {
+                latex: self.latex,
+                board,
+            }),
+            format: self.format,
+        }
+    }
 }
 
 /// Arguments of `validate_postscript`.
@@ -203,6 +330,8 @@ pub struct FormatInfo {
 pub struct LimitsInfo {
     /// Largest PostScript source accepted, in bytes.
     pub max_source_bytes: usize,
+    /// Largest `chalkboard_math` LaTeX accepted, in bytes.
+    pub max_latex_bytes: usize,
     /// Wall-clock deadline for one render, in milliseconds.
     pub render_timeout_ms: u64,
     /// Most device pixels on one page (width x height).
@@ -277,6 +406,21 @@ impl PscatMcp {
                 .into(),
             );
         }
+        if let Some(route) = tool_router.map.get_mut("chalkboard_math") {
+            let base = route.attr.description.clone().unwrap_or_default();
+            route.attr.description = Some(
+                format!(
+                    "{base} Limits on this server: latex up to {} bytes; at most {} pixels per \
+                     board and {PSCAT_MAX_SIDE_PX} pixels a side; output up to {} bytes; {} ms \
+                     per board.",
+                    limits.max_latex_bytes,
+                    limits.max_pixels,
+                    limits.max_output_bytes,
+                    limits.render_timeout_ms
+                )
+                .into(),
+            );
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -323,6 +467,7 @@ impl PscatMcp {
                 .collect(),
             limits: LimitsInfo {
                 max_source_bytes: l.max_source_bytes,
+                max_latex_bytes: l.max_latex_bytes,
                 render_timeout_ms: l.render_timeout_ms,
                 max_pixels: l.max_pixels,
                 max_side_px: PSCAT_MAX_SIDE_PX,
@@ -427,6 +572,45 @@ impl PscatMcp {
         match outcome {
             Ok(out) => render_success(out),
             Err(err) => render_failure(err),
+        }
+    }
+
+    #[tool(
+        name = "chalkboard_math",
+        title = "Chalkboard math",
+        description = "Writes a LaTeX formula on a chalkboard in hand-drawn chalk strokes, with \
+                       eraser marks and the ghost of earlier writing, and returns the board as a \
+                       PNG image (default), an SVG document or a PDF document. `latex` is typed \
+                       as in a LaTeX document, with single backslashes: `\\\\` breaks rows, `&` \
+                       aligns them, and an align or equation wrapper or $...$ is accepted. The \
+                       TeX subset is PSCat mathkit's (fractions, roots, sums, integrals, Greek \
+                       letters, matrices, cases, accents); a command outside it fails with \
+                       postscript_error naming it, and a bad board setting with invalid_request. \
+                       The default board is 800x400 points at 144 dpi (1600x800 pixels). SVG \
+                       and PDF keep every chalk grain as a vector mark: the default board is \
+                       about 0.3 MB as PNG, 2.6 MB as PDF and 10 MB as SVG. The same arguments \
+                       give the same image. The input is LaTeX only, never PostScript.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
+        annotations(
+            title = "Chalkboard math",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn chalkboard_math(
+        &self,
+        Parameters(args): Parameters<ChalkboardArgs>,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        let outcome = tokio::select! {
+            r = self.service.generate(args.into_request()) => r,
+            () = ct.cancelled() => Err(cancelled()),
+        };
+        match outcome {
+            Ok(out) => render_success(out),
+            Err(err) => failure_with("Chalkboard failed", err),
         }
     }
 
@@ -569,7 +753,8 @@ impl ServerHandler for PscatMcp {
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
                 "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
-                 validates programs without rendering, and lists the fonts, palettes, page \
+                 validates programs without rendering, writes LaTeX formulas on a chalkboard, \
+                 and lists the fonts, palettes, page \
                  templates and procedures the interpreter has. Programs run in a sandbox with no file \
                  writes, no network, and file reads limited to PSCat's built-in lib/.",
             )
@@ -587,12 +772,7 @@ pub async fn serve_stdio(service: Arc<RenderService>) -> anyhow::Result<()> {
 }
 
 fn cancelled() -> RenderError {
-    RenderError {
-        code: ErrorCode::Cancelled,
-        message: "the request was cancelled".into(),
-        postscript: None,
-        program_output: None,
-    }
+    RenderError::new(ErrorCode::Cancelled, "the request was cancelled")
 }
 
 fn code_name(code: ErrorCode) -> String {
@@ -697,7 +877,12 @@ fn success_text(out: &RenderOutput, renderer: &RendererIdentity) -> String {
 }
 
 fn render_failure(err: RenderError) -> CallToolResult {
-    let text = error_text("Render failed", &err);
+    failure_with("Render failed", err)
+}
+
+/// The [`RenderToolOutput`] failure envelope, with `lead` starting the text.
+fn failure_with(lead: &str, err: RenderError) -> CallToolResult {
+    let text = error_text(lead, &err);
     let envelope = RenderToolOutput {
         ok: false,
         format: None,
@@ -758,16 +943,15 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
         Some((cut, _)) => format!("{}…", &detail[..cut]),
         None => detail.to_string(),
     };
-    let err = RenderError {
-        code: ErrorCode::InvalidRequest,
-        message: format!("invalid arguments: {detail}"),
-        postscript: None,
-        program_output: None,
-    };
+    let err = RenderError::new(
+        ErrorCode::InvalidRequest,
+        format!("invalid arguments: {detail}"),
+    );
     // A new tool that takes arguments needs an arm here, or its argument
     // errors come back as rmcp's bare text result, without the envelope.
     match tool {
         "render_postscript" => render_failure(err),
+        "chalkboard_math" => failure_with("Chalkboard failed", err),
         "validate_postscript" => validate_failure(err),
         "describe_art_capabilities" => capabilities_failure(err),
         _ => result,
