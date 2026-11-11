@@ -588,8 +588,8 @@ impl PscatMcp {
                        postscript_error naming it, and a bad board setting with invalid_request. \
                        The default board is 800x400 points at 144 dpi (1600x800 pixels). SVG \
                        and PDF keep every chalk grain as a vector mark: the default board is \
-                       about 0.3 MB as PNG, 2.6 MB as PDF and 10 MB as SVG. The same arguments \
-                       give the same image. The input is LaTeX only, never PostScript.",
+                       about 0.3 MB as PNG, 2.6 MB as PDF and 7 to 10 MB as SVG. The same \
+                       arguments give the same image. The input is LaTeX only, never PostScript.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
         annotations(
             title = "Chalkboard math",

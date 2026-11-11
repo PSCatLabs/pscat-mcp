@@ -1,0 +1,48 @@
+{
+  "id": "chalkboard-math",
+  "title": "Scenario 7: Euler's identity on a chalkboard in yellow chalk, with chalkboard_math",
+  "origin": "examples/agent-scenarios.md section 7",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, write Euler's identity on a chalkboard in yellow chalk, and tell me what came back.\n",
+  "expect": {
+    "tools_required": [
+      "chalkboard_math"
+    ],
+    "calls": [
+      {
+        "tool": "chalkboard_math",
+        "args": {
+          "latex": {
+            "regex": "\\\\pi"
+          },
+          "color": "yellow",
+          "format": {
+            "in": [
+              "png",
+              null
+            ]
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "png"
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "chalkboard",
+          "board",
+          "slate"
+        ]
+      ]
+    }
+  }
+}

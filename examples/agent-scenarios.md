@@ -400,8 +400,9 @@ agent against the container image.
   about 0.3 MB.
 - `board: false` gives chalk alone on a transparent page; `format: "svg"`
   or `"pdf"` comes back inline as an embedded resource, but the default
-  board's SVG (about 10 MB) is over the default output limit
-  (`output_too_large`); a smaller board, or PDF (about 2.6 MB), fits.
+  board's SVG (7 to 10 MB, depending on the formula) is near or over the
+  default output limit (`output_too_large`); a smaller board, or PDF (about
+  2.6 MB), fits.
 - A command outside the subset, for example `\nosuchcommand{x}`, fails
   with `postscript_error`, a message naming the command, and
   `error.input: { "code": "unsupported_command", "token": "\\nosuchcommand" }`.

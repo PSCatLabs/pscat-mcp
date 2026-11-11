@@ -271,19 +271,24 @@ async fn svg_and_pdf_come_back_inline() {
         .decode(blob)
         .unwrap();
     assert!(bytes.starts_with(b"%PDF-"));
-    // The default board's SVG (every chalk grain a vector mark) is over the
-    // default 8 MiB output limit; the advice is not "use svg".
-    let big = call(&client, json!({"latex": r"\frac{1}{2}", "format": "svg"})).await;
-    let s = assert_fails(&big, "output_too_large");
-    let m = s["error"]["message"].as_str().unwrap();
-    assert!(m.contains("use png") && !m.contains("use svg"), "{m}");
-
     // The title comes from the generated program's DSC header, as with
     // `pscat chalk --pdf`.
     assert!(
         bytes.windows(10).any(|w| w == b"Chalkboard"),
         "PDF carries the board's title"
     );
+    client.cancel().await.ok();
+}
+
+/// A board's SVG keeps every chalk grain as a vector mark (megabytes); over
+/// the output limit it is `output_too_large`, and the advice is not "use svg".
+#[tokio::test]
+async fn svg_over_the_output_limit_is_output_too_large() {
+    let client = start(&[("PSCAT_MCP_MAX_OUTPUT_BYTES", "1000000")]).await;
+    let r = call(&client, json!({"latex": r"\frac{1}{2}", "format": "svg"})).await;
+    let s = assert_fails(&r, "output_too_large");
+    let m = s["error"]["message"].as_str().unwrap();
+    assert!(m.contains("use png") && !m.contains("use svg"), "{m}");
     client.cancel().await.ok();
 }
 

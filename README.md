@@ -280,7 +280,7 @@ control is enforced by PSCat and which by the server.
   is not used), which with a standard install are the compiled-in ones.
 * **Chalkboard vector output is large.** A board's SVG and PDF keep every
   chalk grain as a vector mark: the default board is about 0.3 MB as PNG,
-  2.6 MB as PDF and 10 MB as SVG, so its SVG is over the default
+  2.6 MB as PDF and 7 to 10 MB as SVG, near or over the default
   `PSCAT_MCP_MAX_OUTPUT_BYTES` (`output_too_large`). An inline SVG reaches a
   model as text. A LaTeX formula near `PSCAT_MCP_MAX_LATEX_BYTES` can take
   several seconds; one that does not finish in the render timeout is
