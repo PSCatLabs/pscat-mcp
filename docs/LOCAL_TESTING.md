@@ -156,7 +156,7 @@ a known result.
 Use only the pscat-render MCP server for this (not the pscat plugin's tools).
 
 1. Call get_renderer_info and tell me the pscat-mcp server version and the PSCat version and revision.
-2. Render this program as a PNG at 300×200 points, show me the image, and describe what you see:
+2. Render this program as a PNG at 300×200 points and describe the image you got back:
 
 %!PS
 0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill
@@ -165,7 +165,7 @@ Use only the pscat-render MCP server for this (not the pscat plugin's tools).
 showpage
 
 3. Render the same program as SVG, then as PDF, and tell me what kind of content block each came back as.
-4. Validate this program and tell me the error name, the offending command and the line:
+4. Validate this program exactly as written (the typo is deliberate; don't correct it) and tell me the error name, the offending command and the line:
 
 %!PS
 100 100 moveto
@@ -183,16 +183,17 @@ A pass looks like this:
 
 | Step | Expected |
 |---|---|
-| Every step | Tool names start with `mcp__pscat-render__` in Claude Code. Over HTTP, the server's log shows a `POST /mcp` for each call. |
+| Every step | In Claude Code, tool names start with `mcp__pscat-render__` (or `mcp__pscat-render-http__`). Over HTTP, the server's log shows a `POST /mcp` for each call. |
 | 1 | The pscat-mcp version, then the PSCat version and revision, matching the pin in `Cargo.toml` and `Cargo.lock`. |
-| 2 | An image of a dark blue background, an orange-red circle in the middle, and "pscat-render" in white at the bottom left. |
+| 2 | The agent describes a dark blue background, an orange-red circle in the middle, and "pscat-render" in white at the bottom left. Separately, note whether the client showed you the image. |
 | 3 | SVG returns an embedded `image/svg+xml` resource, and PDF an `application/pdf` resource, not images. |
-| 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. |
+| 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. If it comes back valid, check whether the agent corrected the typo in the source it sent. |
 | 5 | `limit_exceeded` ("stopped at the time limit") after about 20 s, or `timeout`. |
 
-If step 2 shows no image, or the agent's description doesn't match, note
-which client it was. The image content block didn't reach the model or
-wasn't displayed.
+In step 2, the description is the test. A wrong or vague description means
+the image didn't reach the model. Whether the image appears on screen only
+shows how that client displays images from tool results; record it either
+way.
 
 ## 6. What else to try
 
