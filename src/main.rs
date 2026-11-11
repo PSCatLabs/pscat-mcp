@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use pscat_mcp::capture::CaptureConfig;
-use pscat_mcp::config::{HttpConfig, LimitsConfig, WorkerConfig};
+use pscat_mcp::config::{HttpConfig, JobsConfig, LimitsConfig, WorkerConfig};
 use pscat_mcp::telemetry::{self, LogFormat};
 
 // PSCat's memory limit needs its counting allocator. Each render runs in its
@@ -37,6 +37,8 @@ enum Command {
         #[command(flatten)]
         worker: WorkerConfig,
         #[command(flatten)]
+        jobs: JobsConfig,
+        #[command(flatten)]
         capture: CaptureConfig,
         /// Log format.
         #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Json)]
@@ -48,6 +50,8 @@ enum Command {
         limits: LimitsConfig,
         #[command(flatten)]
         worker: WorkerConfig,
+        #[command(flatten)]
+        jobs: JobsConfig,
         /// Log format (logs go to stderr).
         #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
         log_format: LogFormat,
@@ -73,10 +77,16 @@ fn main() -> std::process::ExitCode {
             http,
             limits,
             worker,
+            jobs,
             capture,
             log_format,
         } => run(log_format, async move {
-            let service = pscat_mcp::build_service(limits, &worker)?;
+            // In-memory jobs need one long-lived instance: opt-in over HTTP.
+            let jobs = JobsConfig {
+                enabled: http.async_jobs,
+                ..jobs
+            };
+            let service = pscat_mcp::build_service_with_jobs(limits, jobs, &worker)?;
             let capture = match &capture.capture_file {
                 Some(path) => {
                     pscat_mcp::http::check_capture_bind(&http)?;
@@ -96,9 +106,11 @@ fn main() -> std::process::ExitCode {
         Command::ServeStdio {
             limits,
             worker,
+            jobs,
             log_format,
         } => run(log_format, async move {
-            let service = pscat_mcp::build_service(limits, &worker)?;
+            // One long-lived process and one local user: jobs are always on.
+            let service = pscat_mcp::build_service_with_jobs(limits, jobs.enabled(), &worker)?;
             pscat_mcp::mcp::serve_stdio(service).await
         }),
     }

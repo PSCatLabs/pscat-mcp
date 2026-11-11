@@ -11,11 +11,15 @@
 //! operators (`in`, `equals`, `equals_text`, `contains`, `not_contains`,
 //! `min`, `max`, `regex`, `absent`). The server layer adds `png` (size and
 //! pixel samples), `resource` (an SVG or PDF signature), `elapsed_ms` and
-//! `renders_executed`, and steps that send another MCP request instead of a
+//! `renders_executed`; steps that send another MCP request instead of a
 //! tool call (`request`: `resources/list`, `resources/read`, `prompts/list`,
 //! ...; with `params`), checked with `response` (dotted paths into the
-//! JSON-RPC result) or `protocol_error` (into the JSON-RPC error). See
-//! `docs/LOCAL_TESTING.md`, "Server-layer evals".
+//! JSON-RPC result) or `protocol_error` (into the JSON-RPC error); and for
+//! async jobs two step keys: `save` (a map of names to dotted
+//! `structuredContent` paths, kept for the scenario's later steps as
+//! `{{saved:NAME}}`) and `poll_ms` (repeat the call until its `result`
+//! matches, for at most that long). See `docs/LOCAL_TESTING.md`,
+//! "Server-layer evals".
 //!
 //! One test per target runs every scenario for that target, groups scenarios
 //! that need the same `server_env` (PSCAT_MCP_* variables, so stdio, HTTP and
@@ -49,6 +53,7 @@ const KNOWN_TRANSPORTS: [&str; 3] = ["stdio", "http", "container"];
 /// Keys a step may have.
 const STEP_KEYS: &[&str] = &[
     "label", "tool", "args", "request", "params", "result", "parallel", "outcomes", "delay_ms",
+    "save", "poll_ms",
 ];
 /// MCP requests a `request` step may send.
 const REQUESTS: &[&str] = &[
@@ -201,6 +206,20 @@ fn validate_scenario(sc: &Scenario) -> Result<(), String> {
         if obj.contains_key("params") {
             return Err(format!("step {i}: params go with request"));
         }
+        if obj.contains_key("parallel") && (obj.contains_key("save") || obj.contains_key("poll_ms"))
+        {
+            return Err(format!("step {i}: save and poll_ms are for a single call"));
+        }
+        if let Some(save) = obj.get("save")
+            && !save
+                .as_object()
+                .is_some_and(|m| m.values().all(Value::is_string))
+        {
+            return Err(format!("step {i}: save maps names to structured paths"));
+        }
+        if obj.get("poll_ms").is_some_and(|v| v.as_u64().is_none()) {
+            return Err(format!("step {i}: poll_ms is a number of milliseconds"));
+        }
         for c in calls {
             if c.get("tool").and_then(Value::as_str).is_none() {
                 return Err(format!("step {i}: a call needs a tool or a request"));
@@ -266,11 +285,45 @@ fn placeholder(key: &str) -> Result<String, String> {
             let n: usize = k[6..].parse().map_err(|_| format!("bad {{{{{k}}}}}"))?;
             Ok("showpage\n".repeat(n))
         }
+        // Filled in from an earlier step (`save`) before expansion; left as
+        // it is here.
+        k if k.starts_with("saved:") => Ok(format!("{{{{{k}}}}}")),
         k if k.starts_with("file:") => {
             let path = repo().join(&k[5..]);
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
         }
         _ => Err(format!("unknown placeholder {{{{{key}}}}}")),
+    }
+}
+
+/// Replace `{{saved:NAME}}` with what an earlier step saved.
+fn fill_saved(v: &Value, saved: &BTreeMap<String, String>) -> Result<Value, String> {
+    match v {
+        Value::String(s) => {
+            let mut out = s.clone();
+            while let Some(i) = out.find("{{saved:") {
+                let Some(j) = out[i..].find("}}") else {
+                    break;
+                };
+                let name = out[i + 8..i + j].trim().to_string();
+                let value = saved
+                    .get(&name)
+                    .ok_or_else(|| format!("nothing saved as {name:?}"))?;
+                out.replace_range(i..i + j + 2, value);
+            }
+            Ok(Value::String(out))
+        }
+        Value::Array(a) => Ok(Value::Array(
+            a.iter()
+                .map(|v| fill_saved(v, saved))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Object(o) => Ok(Value::Object(
+            o.iter()
+                .map(|(k, v)| Ok((k.clone(), fill_saved(v, saved)?)))
+                .collect::<Result<_, String>>()?,
+        )),
+        other => Ok(other.clone()),
     }
 }
 
@@ -1154,8 +1207,15 @@ fn check_request(spec: &Value, outcome: &Result<Value, Value>) -> Vec<String> {
     problems
 }
 
-async fn run_step(server: &Server, step: &Value) -> Result<(u128, Vec<String>), String> {
-    let spec = expand(step.get("result").unwrap_or(&json!({})))?;
+async fn run_step(
+    server: &Server,
+    step: &Value,
+    saved: &mut BTreeMap<String, String>,
+) -> Result<(u128, Vec<String>), String> {
+    let spec = expand(&fill_saved(
+        step.get("result").unwrap_or(&json!({})),
+        saved,
+    )?)?;
     if spec.get("renders_executed").is_some() {
         settle_render_count(server).await;
     }
@@ -1262,33 +1322,58 @@ async fn run_step(server: &Server, step: &Value) -> Result<(u128, Vec<String>), 
     }
 
     let tool = step["tool"].as_str().unwrap_or("");
-    let args = expand(step.get("args").unwrap_or(&json!({})))?;
-    let result = call_tool(&server.client, tool, &args).await?;
-    let elapsed = started.elapsed().as_millis();
-    let renders = if let Some(want) = spec.get("renders_executed") {
-        let want = want.as_u64().unwrap_or(0) as usize;
-        Some(renders_since(server, base, want).await)
-    } else {
-        None
+    let args = expand(&fill_saved(step.get("args").unwrap_or(&json!({})), saved)?)?;
+    let poll = step["poll_ms"].as_u64().map(Duration::from_millis);
+    let (result, elapsed, step_problems) = loop {
+        let result = call_tool(&server.client, tool, &args).await?;
+        let elapsed = started.elapsed().as_millis();
+        let renders = if let Some(want) = spec.get("renders_executed") {
+            let want = want.as_u64().unwrap_or(0) as usize;
+            Some(renders_since(server, base, want).await)
+        } else {
+            None
+        };
+        let found = check_result(
+            &spec,
+            &Observed {
+                result: &result,
+                elapsed_ms: elapsed,
+                renders,
+            },
+        );
+        match poll {
+            Some(limit) if !found.is_empty() && started.elapsed() < limit => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            _ => break (result, elapsed, found),
+        }
     };
-    problems.extend(check_result(
-        &spec,
-        &Observed {
-            result: &result,
-            elapsed_ms: elapsed,
-            renders,
-        },
-    ));
+    problems.extend(step_problems);
+    if let Some(Value::Object(save)) = step.get("save") {
+        for (name, path) in save {
+            let path = path.as_str().unwrap_or("");
+            match dig(&result["structuredContent"], path) {
+                Some(Value::String(v)) => {
+                    saved.insert(name.clone(), v.clone());
+                }
+                Some(v) => {
+                    saved.insert(name.clone(), v.to_string());
+                }
+                None => problems.push(format!("nothing at structured.{path} to save")),
+            }
+        }
+    }
     Ok((elapsed, problems))
 }
 
 async fn run_scenario(server: &Server, sc: &Scenario, rows: &mut Vec<StepRow>) {
+    let mut saved = BTreeMap::new();
     for (i, step) in sc.steps.iter().enumerate() {
         let label = step["label"]
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| format!("step {}", i + 1));
-        let (ok, elapsed_ms, detail) = match run_step(server, step).await {
+        let (ok, elapsed_ms, detail) = match run_step(server, step, &mut saved).await {
             Ok((ms, problems)) => (problems.is_empty(), ms, problems.join("; ")),
             Err(e) => (false, 0, e),
         };

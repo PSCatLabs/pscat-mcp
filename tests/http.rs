@@ -37,6 +37,7 @@ fn http_config(bind: IpAddr) -> HttpConfig {
         allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
         allowed_origins: vec![],
         shutdown_grace_secs: 2,
+        async_jobs: false,
     }
 }
 

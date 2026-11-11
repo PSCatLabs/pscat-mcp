@@ -304,6 +304,193 @@ impl LimitsConfig {
     }
 }
 
+/// Async render jobs: `start_render` and its companions, and the MCP Tasks
+/// extension (see `src/jobs.rs`). The store is in memory, in the server
+/// process: on for stdio, opt-in for HTTP (`--async-jobs`), where it only
+/// works on a single, always-running instance.
+#[derive(Debug, Clone, Args)]
+pub struct JobsConfig {
+    /// Whether async jobs are served. Set by the transport, not a flag:
+    /// always on for stdio, `--async-jobs` for HTTP.
+    #[arg(skip)]
+    pub enabled: bool,
+
+    /// Wall-clock deadline of one async job, in milliseconds, counted from
+    /// when its worker starts (time queued is not counted). The worker is
+    /// killed when it passes; PSCat's own time limit sits a little below it.
+    /// 10 minutes: thirty times the sync deadline, enough for a dense
+    /// 1200-dpi page, while one job holds one render slot and up to the
+    /// memory limit. The PSCat plugin's is an hour; raise it to match.
+    #[arg(long, env = "PSCAT_MCP_JOB_TIMEOUT_MS", default_value_t = 600_000)]
+    pub job_timeout_ms: u64,
+
+    /// Async jobs running at once; more wait queued. They share the render
+    /// slots with every other call, so this stays below
+    /// `--max-concurrent-renders` and synchronous calls always have a slot.
+    /// Defaults to half the render slots, at least 1. With a single render
+    /// slot it must be 1, and a running job then makes synchronous calls
+    /// wait for it (and fail with `server_busy` after the queue timeout).
+    #[arg(long, env = "PSCAT_MCP_MAX_RUNNING_JOBS")]
+    pub max_running_jobs: Option<usize>,
+
+    /// PSCat's step limit for an async job. Unset: 25,000,000,000 (PSCat's
+    /// own default for untrusted programs, the plugin's), or
+    /// `--max-steps` if that is larger; 0 when `--max-steps` is 0. The sync
+    /// step limit would stop a job long before its deadline.
+    #[arg(long, env = "PSCAT_MCP_JOB_MAX_STEPS")]
+    pub job_max_steps: Option<u64>,
+
+    /// Unfinished (queued or running) jobs one principal (one bearer token,
+    /// or the local user over stdio) may have.
+    #[arg(long, env = "PSCAT_MCP_MAX_JOBS_PER_PRINCIPAL", default_value_t = 4)]
+    pub max_jobs_per_principal: usize,
+
+    /// Unfinished jobs on the whole server. The PSCat plugin keeps 16.
+    #[arg(long, env = "PSCAT_MCP_MAX_JOBS", default_value_t = 16)]
+    pub max_jobs: usize,
+
+    /// How long a finished job and its result are kept, in milliseconds,
+    /// counted from when it finished. The PSCat plugin's is an hour.
+    #[arg(long, env = "PSCAT_MCP_JOB_RESULT_TTL_MS", default_value_t = 3_600_000)]
+    pub job_result_ttl_ms: u64,
+
+    /// Bytes of job results held in memory, all jobs together. A job
+    /// reserves its largest possible result when it starts and keeps what
+    /// it really produced once it finishes; a job that does not fit is
+    /// refused with `results_budget_exceeded`. Must hold at least one
+    /// largest result (`--max-output-bytes` as base64, plus stdout).
+    #[arg(long, env = "PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES", default_value_t = 128 * 1024 * 1024)]
+    pub job_results_budget_bytes: usize,
+
+    /// Serve the MCP Tasks extension (SEP-2663, `io.modelcontextprotocol/tasks`)
+    /// on top of the async jobs: a client that declares the extension on a
+    /// `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
+    /// gets a task handle and the job deadline; one that does not gets the
+    /// synchronous result. Off by default: no client we have tested sends
+    /// the capability on `tools/call`. Needs async jobs.
+    #[arg(long, env = "PSCAT_MCP_TASKS", default_value_t = false)]
+    pub tasks: bool,
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        JobsConfig {
+            enabled: false,
+            job_timeout_ms: 600_000,
+            job_max_steps: None,
+            max_running_jobs: None,
+            max_jobs_per_principal: 4,
+            max_jobs: 16,
+            job_result_ttl_ms: 3_600_000,
+            job_results_budget_bytes: 128 * 1024 * 1024,
+            tasks: false,
+        }
+    }
+}
+
+impl JobsConfig {
+    /// The same settings, with async jobs on.
+    pub fn enabled(mut self) -> Self {
+        self.enabled = true;
+        self
+    }
+
+    /// The deadline of one job.
+    pub fn job_timeout(&self) -> Duration {
+        Duration::from_millis(self.job_timeout_ms)
+    }
+
+    /// How long a finished job is kept.
+    pub fn result_ttl(&self) -> Duration {
+        Duration::from_millis(self.job_result_ttl_ms)
+    }
+
+    /// Jobs running at once, given `limits`' render slots.
+    pub fn running_jobs(&self, limits: &LimitsConfig) -> usize {
+        self.max_running_jobs
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| (limits.concurrency() / 2).max(1))
+    }
+
+    /// The largest result one job can hold: its artifacts as base64, its
+    /// stdout, and [`JOB_MIN_CHARGE_BYTES`] for the rest.
+    pub fn max_result_bytes(limits: &LimitsConfig) -> usize {
+        (limits.max_output_bytes / 3 + 1)
+            .saturating_mul(4)
+            .saturating_add(limits.max_program_output_bytes)
+            .saturating_add(JOB_MIN_CHARGE_BYTES)
+    }
+
+    /// The limits an async job runs under: the render's, with the job
+    /// deadline as the render timeout (PSCat's own time limit follows it,
+    /// unless it is turned off) and the job step limit.
+    pub fn job_limits(&self, limits: &LimitsConfig) -> LimitsConfig {
+        LimitsConfig {
+            render_timeout_ms: self.job_timeout_ms,
+            max_steps: match (limits.max_steps, self.job_max_steps) {
+                (_, Some(n)) => n,
+                (0, None) => 0,
+                (n, None) => n.max(DEFAULT_JOB_MAX_STEPS),
+            },
+            interp_time_limit_ms: match limits.interp_time_limit_ms {
+                Some(0) => Some(0),
+                _ => None,
+            },
+            ..limits.clone()
+        }
+    }
+
+    /// Reject settings that cannot work with `limits`.
+    pub fn check(&self, limits: &LimitsConfig) -> Result<(), String> {
+        if self.tasks && !self.enabled {
+            return Err("--tasks needs async jobs (--async-jobs over HTTP)".into());
+        }
+        // Settings for jobs that are off cannot stop the server starting.
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.job_timeout_ms == 0
+            || self.max_jobs_per_principal == 0
+            || self.max_jobs == 0
+            || self.job_result_ttl_ms == 0
+        {
+            return Err(
+                "job-timeout-ms, max-jobs-per-principal, max-jobs and job-result-ttl-ms must be \
+                 positive"
+                    .into(),
+            );
+        }
+        let slots = limits.concurrency();
+        let running = self.running_jobs(limits);
+        if slots > 1 && running >= slots {
+            return Err(format!(
+                "max-running-jobs ({running}) must be below max-concurrent-renders ({slots}), so \
+                 synchronous calls always have a render slot"
+            ));
+        }
+        if slots == 1 && running > 1 {
+            return Err("with one render slot, max-running-jobs must be 1".into());
+        }
+        let largest = Self::max_result_bytes(limits);
+        if self.job_results_budget_bytes < largest {
+            return Err(format!(
+                "job-results-budget-bytes ({}) must hold at least one largest result ({largest} \
+                 bytes: max-output-bytes as base64, plus stdout)",
+                self.job_results_budget_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The default step limit of an async job: PSCat's for untrusted programs
+/// (`pscat::limits::UNTRUSTED_MAX_STEPS`), the PSCat plugin's.
+pub const DEFAULT_JOB_MAX_STEPS: u64 = 25_000_000_000;
+
+/// The least a finished job is charged against the results budget, for its
+/// status, message and bookkeeping.
+pub const JOB_MIN_CHARGE_BYTES: usize = 4096;
+
 /// `ms` less a margin of 10%, at least 250 ms, and never below 1 ms.
 fn below_with_margin(ms: u64) -> Duration {
     let margin = (ms / 10).max(250);
@@ -378,6 +565,14 @@ pub struct HttpConfig {
     /// Seconds to wait for in-flight requests on SIGTERM before exiting.
     #[arg(long, env = "PSCAT_MCP_SHUTDOWN_GRACE_SECS", default_value_t = 8)]
     pub shutdown_grace_secs: u64,
+
+    /// Serve async render jobs (`start_render`, `render_status`,
+    /// `render_result`, `cancel_render`, and the Tasks extension with
+    /// `--tasks`). Jobs and results live in this process's memory, so this
+    /// only works on a single instance whose CPU stays allocated between
+    /// requests: not on an autoscaled or request-billed Cloud Run service.
+    #[arg(long, env = "PSCAT_MCP_ASYNC_JOBS", default_value_t = false)]
+    pub async_jobs: bool,
 }
 
 impl HttpConfig {
@@ -481,6 +676,90 @@ mod tests {
         ] {
             assert!(bad.check().is_err());
         }
+    }
+
+    #[test]
+    fn job_settings() {
+        let l = LimitsConfig {
+            max_concurrent_renders: Some(4),
+            ..LimitsConfig::default()
+        };
+        let j = JobsConfig::default().enabled();
+        assert!(j.check(&l).is_ok());
+        assert_eq!(j.running_jobs(&l), 2);
+        assert_eq!(DEFAULT_JOB_MAX_STEPS, pscat::limits::UNTRUSTED_MAX_STEPS);
+        // The job limits: the job deadline, PSCat's time limit below it, the
+        // job step limit; everything else as for a render.
+        let jl = j.job_limits(&l);
+        assert_eq!(jl.render_timeout(), Duration::from_secs(600));
+        assert_eq!(jl.interp_time_limit(), Some(Duration::from_secs(540)));
+        assert_eq!(jl.max_steps, DEFAULT_JOB_MAX_STEPS);
+        assert_eq!(jl.max_pixels, l.max_pixels);
+        assert!(jl.check().is_ok());
+        let explicit = LimitsConfig {
+            interp_time_limit_ms: Some(5_000),
+            max_steps: 0,
+            ..l.clone()
+        };
+        assert_eq!(
+            j.job_limits(&explicit).interp_time_limit(),
+            Some(Duration::from_secs(540))
+        );
+        assert_eq!(j.job_limits(&explicit).max_steps, 0);
+        let off = LimitsConfig {
+            interp_time_limit_ms: Some(0),
+            ..l.clone()
+        };
+        assert_eq!(j.job_limits(&off).interp_time_limit(), None);
+        let steps = JobsConfig {
+            job_max_steps: Some(7),
+            ..j.clone()
+        };
+        assert_eq!(steps.job_limits(&l).max_steps, 7);
+
+        // Jobs stay below the render slots, and the budget holds one result.
+        for bad in [
+            JobsConfig {
+                max_running_jobs: Some(4),
+                ..j.clone()
+            },
+            JobsConfig {
+                job_results_budget_bytes: JobsConfig::max_result_bytes(&l) - 1,
+                ..j.clone()
+            },
+            JobsConfig {
+                max_jobs: 0,
+                ..j.clone()
+            },
+            JobsConfig {
+                tasks: true,
+                ..JobsConfig::default()
+            },
+        ] {
+            assert!(bad.check(&l).is_err(), "{bad:?}");
+        }
+        // With jobs off (HTTP by default) none of their settings matter,
+        // even with an output limit larger than the default budget.
+        let big_output = LimitsConfig {
+            max_output_bytes: 512 * 1024 * 1024,
+            ..l.clone()
+        };
+        assert!(JobsConfig::default().check(&big_output).is_ok());
+        assert!(j.check(&big_output).is_err());
+        let one = LimitsConfig {
+            max_concurrent_renders: Some(1),
+            ..LimitsConfig::default()
+        };
+        assert_eq!(j.running_jobs(&one), 1);
+        assert!(j.check(&one).is_ok());
+        assert!(
+            JobsConfig {
+                max_running_jobs: Some(2),
+                ..j.clone()
+            }
+            .check(&one)
+            .is_err()
+        );
     }
 
     #[test]

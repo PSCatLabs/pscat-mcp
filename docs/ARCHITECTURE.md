@@ -284,6 +284,88 @@ code, the limit, and PSCat's report cut to 240 bytes with control
 characters removed, so 32 failed cells stay under 24 KB. Labels are not
 echoed back.
 
+## Async jobs
+
+`src/jobs.rs` holds the job store; `RenderService` owns it
+(`RenderService::jobs`, turned on with `with_jobs`) and runs the jobs, so
+it is shared by every MCP handler: HTTP builds a `PscatMcp` per request,
+and a store in the handler would lose a job between `start_render` and
+`render_status`. Two shapes reach it from `mcp.rs`:
+
+* the explicit tools `start_render`, `render_status`, `render_result` and
+  `cancel_render` (the PSCat plugin's, without `out_path`), for
+  `render_postscript`;
+* the MCP Tasks extension (SEP-2663), with `--tasks`: in `call_tool`, a
+  `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
+  whose request declares `io.modelcontextprotocol/tasks` (rmcp's
+  `RequestContext::client_capabilities`: the request's `_meta`, or the
+  session's `initialize` over stdio) starts a job and answers
+  `CreateTaskResult`; `get_task`, `cancel_task` and `update_task` on the
+  `ServerHandler` read the same store. rmcp's protocol layer (dispatch,
+  the capability checks, the task types) is used; its
+  `task_manager::TaskManager` store is not, because it has no owner per
+  task (any caller with an id can read or cancel it), keeps its entries
+  with no hook for a byte budget, measures its TTL from creation and aborts
+  a task still running at it (a long job would need a TTL of deadline plus
+  queue time plus result time), and cancels only cooperatively.
+
+**What a job runs.** Any render `WorkerJob` whose plan can take the job
+deadline: the request is checked by `validate_request`/`validate_generate`
+under the *job limits* (`JobsConfig::job_limits`: the render limits with the
+job deadline as the render timeout, so PSCat's own time limit is computed
+from it, and the job step limit, 25·10⁹ by default; `RLIMIT_CPU` follows
+the deadline passed to the backend).
+`review_sheet` is excluded: its plan shares the sheet deadline out between
+the cells, and its result is a `SheetToolOutput`, not the
+`RenderToolOutput` `render_result` declares.
+
+**Running.** A job is a Tokio task, detached from the call that started it.
+A drop guard in the task finishes the job as `worker_failed` if the task
+panics or is dropped (the runtime shutting down) before it records an end,
+so the job leaves the caps and its reservation is released.
+It waits for a running-job permit (`--max-running-jobs`, below the render
+slots so a synchronous call always has one), then for a render slot from
+the same FIFO semaphore as every other call, without the queue timeout, and
+only then counts its deadline. Cancel (`cancel_render`, `tasks/cancel`,
+shutdown) fires the job's token; the task drops the render future, and the
+backend's `Worker` drop kills the worker's process group: the same path as a
+client's `notifications/cancelled`. A queued job never starts. Shutdown (the
+stdio session's end, or the HTTP grace period's) kills every unfinished job
+and waits up to 2 s; jobs are not drained.
+
+**Ownership and ids.** The owner is the principal. Each handler is built
+for one transport (`PscatMcp::new` for stdio, `PscatMcp::for_http`), so the
+handler, not the shape of the request, decides: over stdio the single local
+user; over HTTP the `auth` layer's `Principal` (`token#N`, never token
+material), read from the `http::request::Parts` rmcp puts in the request
+extensions, and a request with no `Parts` or no `Principal` is refused.
+`token#N` is the token's position in the list read at startup; it is stable
+because the list never changes while the process runs (and a restart loses
+every job). If tokens are ever reloaded at run time, the owner has to become
+stable per token, for example an HMAC of the token under a key generated at
+process start. Under `--allow-unauthenticated` (loopback only) every caller
+is `anonymous`, one shared owner. A lookup by any other owner is the same
+`unknown_job` (Tasks: rmcp's `invalid_params` "unknown task") as an unknown
+id. Ids are UUID v4.
+
+**Limits.** Unfinished jobs per principal and in all (`server_busy`). A
+results budget (at the defaults about 11 reservations fit in 128 MiB, so
+the budget binds before the total cap of 16): a job reserves the largest result it can have
+(`max_output_bytes` as base64, the stdout limit and 4 KiB) when it is
+accepted, and once finished keeps what it holds (its base64 artifacts and
+stdout, or its error, plus 4 KiB); a job that does not fit is
+`results_budget_exceeded`, after results already fetched are dropped,
+oldest first. A finished job is kept for the result TTL after it finished;
+the store is swept on every access.
+
+**States.** `queued`, `running`, `done`, `failed` (the render's own error:
+a PostScript error, a limit, the deadline), `cancelled`. In the Tasks
+extension queued and running are `working`; done and failed are both
+`completed`, the result being the tool's result with or without `isError`
+(the extension keeps `failed` for JSON-RPC errors); cancelled is
+`cancelled`. A task's `ttlMs` is the job deadline plus the result TTL, its
+`pollIntervalMs` 1000.
+
 ## Agent guidance (prompts and resources)
 
 `src/guide.rs` serves the PSCat plugin's skills (issue #39). It runs no
@@ -348,9 +430,10 @@ is a Markdown blockquote written by this server, a `---` rule, then the file
 unchanged. The note says:
 
 * where the text comes from (path, tag, full commit, copyright, licence);
-* this server's tools, from the tool router, and which of the plugin's ten
-  are missing (today `eval_postscript` and the four render job tools), with
-  `validate_postscript` standing in for `eval_postscript`;
+* this server's tools, from the tool router as this transport configured
+  it, and which of the plugin's ten are missing (`eval_postscript`, and the
+  four render job tools where async jobs are off, as on HTTP by default),
+  with `validate_postscript` standing in for `eval_postscript`;
 * how `pscat` CLI options map to tool arguments (and `pscat handwrite`,
   `chalk` and `sheet` to their tools, when present), and that the others
   have no equivalent;
@@ -361,8 +444,10 @@ unchanged. The note says:
 * one line for each of a few files (`FILE_NOTES`; a unit test checks that
   each key is a vendored file).
 
-Because the lists come from the router and the schema, #33's jobs will drop
-out of the "not available" list when they land, as `review_sheet` (#38) did. The
+Because the lists come from the router and the schema, the render job tools
+(#33) are listed as available where async jobs are on (stdio, or HTTP with
+`--async-jobs`) and as missing where they are off, as `review_sheet` (#38)
+dropped out when it landed. The
 served text is the note followed by the file, so a test can check that the
 file is a byte-exact suffix.
 
@@ -410,6 +495,11 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Program stdout returned | worker (truncates) | 16 KiB |
 | Concurrent renders | server semaphore, queue timeout → `server_busy` | min(CPUs, 4) |
 | Client cancel / disconnect | dropping the future kills the worker (`kill_on_drop`) | — |
+| Async job deadline | server: SIGKILL of the worker; PSCat's time limit and `RLIMIT_CPU` follow it | 10 min |
+| Async job steps | PSCat `Limits::max_steps` | 25·10⁹ |
+| Async jobs running | job semaphore, below the render slots; then a shared render slot, no queue timeout | half the slots |
+| Async jobs held | per principal and in all (unfinished), `server_busy` | 4, 16 |
+| Async job results | byte budget (largest result reserved while a job runs), TTL after it finishes | 128 MiB, 1 h |
 
 PSCat has **no operators for processes, network or environment access**
 (see PSCat's `SECURITY.md`). The worker's environment is cleared anyway
@@ -444,7 +534,8 @@ Known gaps:
   refused unless the bind address is loopback.
 * **Statelessness**: Streamable HTTP runs without sessions
   (`legacy_session_mode = false`, JSON responses), so any instance can serve
-  any request and nothing is stored between requests.
+  any request and nothing is stored between requests, except async jobs
+  when `--async-jobs` turns them on (see [Async jobs](#async-jobs)).
 
 ### Adding OAuth later
 
@@ -464,7 +555,8 @@ No user database or proprietary OAuth flow is needed in this repository.
 
 ## Extension points
 
-* **Another transport** (REST): call `RenderService::render`/`validate`.
+* **Another transport** (REST): call `RenderService::render`/`validate`
+  (and `start_job`, `jobs()`, `cancel_job` for async jobs).
 * **A tool whose input is not PostScript**: a `GenerateJob` kind (see
   [Generated programs](#generated-programs)); one whose output is an image
   made from several renders follows `review_sheet`.

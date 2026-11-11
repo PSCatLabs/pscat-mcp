@@ -14,7 +14,8 @@
 //!   (`references/paint.md`, `../SKILL.md`) resolve against them.
 //! * **Server note.** The text was written for the PSCat plugin, which runs
 //!   the `pscat` command line on the user's machine and has tools and
-//!   arguments this server does not (`out_path`, render jobs, ...). PSCat's
+//!   arguments this server does not (`out_path`, render jobs where async jobs
+//!   are off, ...). PSCat's
 //!   text is never rewritten. Instead `resources/read` returns a short note
 //!   written by this server, then PSCat's text byte for byte. The note says
 //!   where the text came from (tag, commit, path, copyright, licence) and
@@ -127,6 +128,8 @@ pub struct ServerFacts {
     pub render_arguments: Vec<String>,
     /// The render deadline, in milliseconds.
     pub render_timeout_ms: u64,
+    /// The async job deadline, in milliseconds, when `start_render` is served.
+    pub job_timeout_ms: Option<u64>,
     /// Longest value of one prompt argument, in bytes.
     pub max_prompt_argument_bytes: usize,
 }
@@ -453,9 +456,15 @@ fn note(path: &str, facts: &ServerFacts) -> String {
             either(&lacking)
         ));
     }
+    let jobs = match facts.job_timeout_ms {
+        Some(ms) if facts.has("start_render") => {
+            format!(" (a `start_render` job, within {} s)", ms.div_ceil(1000))
+        }
+        _ => String::new(),
+    };
     lines.push(format!(
-        "- Each render must finish within {} s on this server; `get_renderer_info` lists \
-         every limit.",
+        "- Each render must finish within {} s on this server{jobs}; `get_renderer_info` \
+         lists every limit.",
         facts.render_timeout_ms.div_ceil(1000)
     ));
     for (p, extra) in FILE_NOTES {
@@ -668,6 +677,7 @@ mod tests {
             tools: vec!["render_postscript".into(), "validate_postscript".into()],
             render_arguments: vec!["source".into(), "bands".into()],
             render_timeout_ms: 20_000,
+            job_timeout_ms: None,
             max_prompt_argument_bytes: MAX_PROMPT_ARGUMENT_BYTES,
         }
     }
@@ -706,6 +716,40 @@ mod tests {
             assert!(n.starts_with("> **Note from pscat-mcp**"), "{path}");
             assert!(n.contains(&source().commit[..10]), "{path}");
         }
+    }
+
+    #[test]
+    fn the_render_job_tools_follow_the_router() {
+        // Async jobs off (HTTP by default): listed as missing.
+        let off = note("pscat/SKILL.md", &facts());
+        let line = off.lines().find(|l| l.contains("The tools are")).unwrap();
+        assert!(line.contains("`start_render`"), "{line}");
+        assert!(!off.contains("a `start_render` job"), "{off}");
+        // Async jobs on (stdio): available, and their deadline is given.
+        let mut on = facts();
+        for t in [
+            "start_render",
+            "render_status",
+            "render_result",
+            "cancel_render",
+        ] {
+            on.tools.push(t.into());
+        }
+        on.job_timeout_ms = Some(600_000);
+        let n = note("pscat/SKILL.md", &on);
+        let line = n.lines().find(|l| l.contains("The tools are")).unwrap();
+        let missing = line.split(" not available").next().unwrap();
+        let missing = missing.rsplit("The plugin's").next().unwrap();
+        for t in [
+            "start_render",
+            "render_status",
+            "render_result",
+            "cancel_render",
+        ] {
+            assert!(!missing.contains(&format!("`{t}`")), "{line}");
+        }
+        assert!(missing.contains("`eval_postscript`"), "{line}");
+        assert!(n.contains("(a `start_render` job, within 600 s)"), "{n}");
     }
 
     #[test]

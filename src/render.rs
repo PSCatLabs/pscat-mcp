@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::backend::{BackendError, RenderBackend};
-use crate::config::{LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
+use crate::config::{JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{GenerateJob, PlannedPage};
+use crate::jobs::{JobStatus, JobStore};
 use crate::worker::{
     Artifact, InterpLimits, JobMode, LintNote, OutputFormat, PsDiagnostic, SyntaxScan,
     WorkerFailure, WorkerJob, WorkerResult,
@@ -47,6 +48,16 @@ pub struct GenerateRequest {
     pub job: GenerateJob,
     /// Requested format name; `None` means PNG.
     pub format: Option<String>,
+}
+
+/// What an async job runs: a render, or a generated program.
+#[derive(Debug, Clone)]
+pub enum JobRequest {
+    /// `render_postscript`.
+    Render(RenderRequest),
+    /// `chalkboard_math` or `handwrite` (not `review_sheet`, whose plan
+    /// shares out the sheet deadline and so cannot take a job's).
+    Generate(GenerateRequest),
 }
 
 /// A request that passed validation. Only these reach the backend.
@@ -87,6 +98,12 @@ pub enum ErrorCode {
     Cancelled,
     /// The worker process failed (crash, OS limit, bad output).
     WorkerFailed,
+    /// No such async job for this client: never started by it, or expired.
+    UnknownJob,
+    /// The async job is still queued or running; it has no result yet.
+    JobNotFinished,
+    /// The async job results held in memory would pass the server's budget.
+    ResultsBudgetExceeded,
 }
 
 /// A structured failure. `message` is written for the person or agent that
@@ -334,6 +351,11 @@ pub struct Counters {
     /// (`timeout`, `error.input.code` `deadline`). Both are a `timeout` to
     /// the client.
     pub timed_out: AtomicU64,
+    /// Async jobs accepted.
+    pub jobs_started: AtomicU64,
+    /// Async jobs cancelled before they finished (a running one's worker
+    /// killed), by `cancel_render`, `tasks/cancel` or shutdown.
+    pub jobs_cancelled: AtomicU64,
 }
 
 /// Device pixels for `points` at `dpi`, the way PSCat rounds them.
@@ -523,6 +545,8 @@ pub struct RenderService {
     /// The art catalog, fetched from a worker on first use. A failed fetch
     /// leaves it empty, so the next call tries again.
     catalog: tokio::sync::OnceCell<Arc<ArtCatalog>>,
+    /// Async jobs (off unless [`RenderService::with_jobs`] turned them on).
+    jobs: JobStore,
     /// Counters for health and tests.
     pub counters: Arc<Counters>,
 }
@@ -532,12 +556,25 @@ impl RenderService {
     pub fn new(backend: Arc<dyn RenderBackend>, limits: LimitsConfig) -> Self {
         let slots = Arc::new(Semaphore::new(limits.concurrency()));
         RenderService {
+            jobs: JobStore::new(JobsConfig::default(), &limits),
             backend,
             limits,
             slots,
             catalog: tokio::sync::OnceCell::new(),
             counters: Arc::new(Counters::default()),
         }
+    }
+
+    /// The same service serving async jobs with `jobs` (on only when
+    /// `jobs.enabled`).
+    pub fn with_jobs(mut self, jobs: JobsConfig) -> Self {
+        self.jobs = JobStore::new(jobs, &self.limits);
+        self
+    }
+
+    /// The async job store.
+    pub fn jobs(&self) -> &JobStore {
+        &self.jobs
     }
 
     /// The limits in force.
@@ -560,7 +597,6 @@ impl RenderService {
     }
 
     async fn render_job(&self, job: WorkerJob) -> Result<RenderOutput, RenderError> {
-        let format = job.format;
         let started = Instant::now();
         // A review sheet's deadline covers all of its cells.
         let deadline = if job.sheet.is_some() {
@@ -568,7 +604,19 @@ impl RenderService {
         } else {
             self.limits.render_timeout()
         };
-        let result = self.run(job, deadline).await?;
+        let permit = self.slot().await?;
+        self.render_in_slot(permit, job, deadline, started).await
+    }
+
+    async fn render_in_slot(
+        &self,
+        permit: OwnedSemaphorePermit,
+        job: WorkerJob,
+        deadline: Duration,
+        started: Instant,
+    ) -> Result<RenderOutput, RenderError> {
+        let format = job.format;
+        let result = self.run_in_slot(permit, job, deadline).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
         if let Some(WorkerFailure::Generate(f)) = &result.failure
             && f.code == crate::generate::GenerateErrorCode::Timeout
@@ -596,6 +644,121 @@ impl RenderService {
             wall_ms,
             sheet: result.sheet,
         })
+    }
+
+    /// Accept an async job for `owner` (see [`crate::jobs`]): check the
+    /// request under the job limits (the job deadline as the render
+    /// timeout) and the job caps, then run it in the background. Returns
+    /// its status, `queued`.
+    pub fn start_job(
+        self: &Arc<Self>,
+        owner: &str,
+        req: JobRequest,
+    ) -> Result<JobStatus, RenderError> {
+        if !self.jobs.enabled() {
+            return Err(RenderError::new(
+                ErrorCode::InvalidRequest,
+                "async jobs are not enabled on this server",
+            ));
+        }
+        let limits = self.jobs.config().job_limits(&self.limits);
+        let (checked, tool) = match &req {
+            JobRequest::Render(r) => (
+                validate_request(r, JobMode::Render, &limits),
+                "render_postscript",
+            ),
+            JobRequest::Generate(g) => (validate_generate(g, &limits), g.job.kind()),
+        };
+        let validated = self.rejected(checked)?;
+        if validated.job.sheet.is_some() {
+            return Err(RenderError::new(
+                ErrorCode::InvalidRequest,
+                "review_sheet does not run as an async job",
+            ));
+        }
+        let (id, cancel) = self.jobs.insert(owner, tool)?;
+        self.counters.jobs_started.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(tool, "async job accepted");
+        // The status as accepted (`queued`), before the job can move on.
+        let status = self.jobs.status(owner, &id);
+        let service = Arc::clone(self);
+        tokio::spawn(async move { service.run_async_job(id, validated.job, cancel).await });
+        status
+    }
+
+    async fn run_async_job(
+        self: Arc<Self>,
+        id: String,
+        job: WorkerJob,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        // Finishes the job as `worker_failed` if this task never reaches the
+        // `finish` below: a panic, or the task dropped (the runtime shutting
+        // down). The job then leaves the caps and keeps only its error
+        // against the budget, and `unfinished` counts it no more.
+        let mut guard = FinishOnDrop {
+            service: Arc::clone(&self),
+            id: id.clone(),
+            armed: true,
+        };
+        let deadline = self.jobs.config().job_timeout();
+        let work = async {
+            // A running-job permit first, then a render slot shared with
+            // every synchronous call; a queued job waits as long as it takes.
+            let _running = self.jobs.running_permit().await.ok_or_else(shutting_down)?;
+            let permit = self
+                .slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| shutting_down())?;
+            self.jobs.mark_running(&id);
+            self.render_in_slot(permit, job, deadline, Instant::now())
+                .await
+        };
+        // Dropping `work` drops the backend's future, which kills the worker.
+        let outcome = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            r = work => Some(r),
+        };
+        if outcome.is_none() {
+            self.counters.jobs_cancelled.fetch_add(1, Ordering::Relaxed);
+            tracing::info!("async job cancelled");
+        }
+        guard.armed = false;
+        self.jobs.finish(&id, outcome);
+    }
+
+    /// Cancel `owner`'s job `id` and wait (briefly) for it to stop; returns
+    /// its status. A finished job is left as it is.
+    pub async fn cancel_job(&self, owner: &str, id: &str) -> Result<JobStatus, RenderError> {
+        self.jobs.request_cancel(owner, id)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = self.jobs.status(owner, id)?;
+            if status.state.is_finished() || Instant::now() >= deadline {
+                return Ok(status);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Shut the job store down: refuse new jobs and kill every running one,
+    /// then wait (at most `wait`) for them to stop. Their results are lost.
+    pub async fn shutdown_jobs(&self, wait: Duration) {
+        if !self.jobs.enabled() {
+            return;
+        }
+        self.jobs.close();
+        let deadline = Instant::now() + wait;
+        while self.jobs.unfinished() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tracing::info!(
+            left = self.jobs.unfinished(),
+            "async jobs stopped for shutdown"
+        );
     }
 
     /// Scan and execute a program, returning diagnostics and no image.
@@ -694,7 +857,13 @@ impl RenderService {
     /// Run `job` on the backend in a render slot, killing it after
     /// `deadline`.
     async fn run(&self, job: WorkerJob, deadline: Duration) -> Result<WorkerResult, RenderError> {
-        let permit = tokio::time::timeout(
+        let permit = self.slot().await?;
+        self.run_in_slot(permit, job, deadline).await
+    }
+
+    /// A render slot, waiting at most the queue timeout.
+    async fn slot(&self) -> Result<OwnedSemaphorePermit, RenderError> {
+        tokio::time::timeout(
             self.limits.queue_timeout(),
             self.slots.clone().acquire_owned(),
         )
@@ -705,7 +874,16 @@ impl RenderService {
                 "all render slots are busy; try again shortly",
             )
         })?
-        .map_err(|_| RenderError::new(ErrorCode::ServerBusy, "the server is shutting down"))?;
+        .map_err(|_| shutting_down())
+    }
+
+    /// Run `job` in the slot `permit` holds, killing it after `deadline`.
+    async fn run_in_slot(
+        &self,
+        permit: OwnedSemaphorePermit,
+        job: WorkerJob,
+        deadline: Duration,
+    ) -> Result<WorkerResult, RenderError> {
         self.counters.executed.fetch_add(1, Ordering::Relaxed);
         let (source_len, generator) = match &job.generate {
             Some(g) => (g.input_len(), g.kind()),
@@ -750,6 +928,33 @@ impl RenderService {
             }
         }
     }
+}
+
+/// See [`RenderService::run_async_job`].
+struct FinishOnDrop {
+    service: Arc<RenderService>,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            tracing::error!("async job stopped before it finished; recorded as worker_failed");
+            self.service.jobs.finish(
+                &self.id,
+                Some(Err(RenderError::new(
+                    ErrorCode::WorkerFailed,
+                    "the job stopped before it finished (an internal error, or the server \
+                     shutting down)",
+                ))),
+            );
+        }
+    }
+}
+
+fn shutting_down() -> RenderError {
+    RenderError::new(ErrorCode::ServerBusy, "the server is shutting down")
 }
 
 /// The error for a worker failure; `format` is the requested format, which
@@ -997,6 +1202,97 @@ mod tests {
             })),
             ..WorkerResult::empty()
         })
+    }
+
+    /// A backend whose job never ends, or panics.
+    struct Stuck {
+        panic: bool,
+    }
+
+    impl RenderBackend for Stuck {
+        fn execute(
+            &self,
+            _job: WorkerJob,
+            _deadline: std::time::Duration,
+        ) -> crate::backend::BackendFuture<'_> {
+            let panic = self.panic;
+            Box::pin(async move {
+                if panic {
+                    panic!("backend panic (test)");
+                }
+                std::future::pending().await
+            })
+        }
+    }
+
+    fn job_service(panic: bool) -> Arc<RenderService> {
+        Arc::new(
+            RenderService::new(Arc::new(Stuck { panic }), LimitsConfig::default())
+                .with_jobs(JobsConfig::default().enabled()),
+        )
+    }
+
+    fn job_req() -> JobRequest {
+        JobRequest::Render(req("showpage"))
+    }
+
+    /// After a job's task died, the store holds it as `worker_failed`, with
+    /// only its small error charged and no cap slot taken.
+    fn assert_failed_cleanly(svc: &RenderService, id: &str) {
+        let status = svc.jobs().status("p", id).unwrap();
+        assert_eq!(status.state, crate::jobs::JobState::Failed);
+        assert_eq!(
+            status.job_error.as_ref().map(|e| e.code),
+            Some(ErrorCode::WorkerFailed)
+        );
+        assert_eq!(svc.jobs().unfinished(), 0);
+        assert!(svc.jobs().charged_bytes() < 8192, "reservation released");
+        // Its slot in the caps is free: the per-client cap of 4 allows 4 more.
+        for _ in 0..4 {
+            svc.jobs().insert("p", "render_postscript").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_job_dropped_with_the_runtime_is_finished() {
+        let svc = job_service(false);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let id = rt.block_on(async {
+            let status = svc.start_job("p", job_req()).unwrap();
+            // Let the job reach its worker, which never returns.
+            for _ in 0..100 {
+                if svc.jobs().status("p", &status.job_id).unwrap().state
+                    == crate::jobs::JobState::Running
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            status.job_id
+        });
+        assert_eq!(
+            svc.jobs().status("p", &id).unwrap().state,
+            crate::jobs::JobState::Running
+        );
+        // Shutting the runtime down drops the job's task mid-render.
+        drop(rt);
+        assert_failed_cleanly(&svc, &id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_job_whose_task_panics_is_finished() {
+        let svc = job_service(true);
+        let id = svc.start_job("p", job_req()).unwrap().job_id;
+        for _ in 0..200 {
+            if svc.jobs().unfinished() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_failed_cleanly(&svc, &id);
     }
 
     #[tokio::test]

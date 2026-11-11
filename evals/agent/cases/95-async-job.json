@@ -1,0 +1,56 @@
+{
+  "id": "async-job",
+  "title": "Scenario 11: a render run as a background job with start_render, polled and fetched",
+  "origin": "examples/agent-scenarios.md section 11",
+  "transports": ["stdio"],
+  "max_turns": 12,
+  "prompt": "Using the pscat-render tools, run this PostScript program as a background render job instead of a single call (it takes a few seconds on purpose), wait until it has finished, fetch its result, and tell me what came back:\n\n%!PS\nrealtime /t0 exch def { realtime t0 sub 3000 gt { exit } if } loop\n0 0.6 0 setrgbcolor 0 0 200 100 rectfill\nshowpage\n\nUse a 200 x 100 point page.\n",
+  "expect": {
+    "tools_required": [
+      "start_render",
+      "render_result"
+    ],
+    "calls": [
+      {
+        "tool": "start_render",
+        "args": {
+          "source": {
+            "regex": "realtime"
+          },
+          "width": 200,
+          "height": 100
+        },
+        "result": {
+          "is_error": false,
+          "structured": {
+            "ok": true,
+            "state": "queued"
+          }
+        }
+      },
+      {
+        "tool": "render_result",
+        "where": {
+          "job_id": {
+            "regex": "^[0-9a-f-]{36}$"
+          }
+        },
+        "result": {
+          "content_types": [
+            "image"
+          ]
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "green",
+          "200",
+          "png",
+          "image"
+        ]
+      ]
+    }
+  }
+}

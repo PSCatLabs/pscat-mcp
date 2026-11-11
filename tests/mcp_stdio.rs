@@ -26,14 +26,26 @@ showpage
 /// Every tool the server lists, with its title. Adding a tool means adding
 /// one row here (and its own behavioural test); the listing test checks the
 /// annotations, descriptions and output schema of every row.
-const EXPECTED_TOOLS: &[(&str, &str)] = &[
-    ("chalkboard_math", "Chalkboard math"),
-    ("describe_art_capabilities", "List art capabilities"),
-    ("get_renderer_info", "PSCat renderer info"),
-    ("handwrite", "Handwriting-style note"),
-    ("render_postscript", "Render PostScript"),
-    ("review_sheet", "Review sheet"),
-    ("validate_postscript", "Validate PostScript"),
+/// Every tool over stdio (async jobs are always on there): name, title,
+/// and the read-only and idempotent hints (every tool is non-destructive
+/// and closed-world).
+const EXPECTED_TOOLS: &[(&str, &str, bool, bool)] = &[
+    ("cancel_render", "Cancel a render job", false, true),
+    ("chalkboard_math", "Chalkboard math", true, true),
+    (
+        "describe_art_capabilities",
+        "List art capabilities",
+        true,
+        true,
+    ),
+    ("get_renderer_info", "PSCat renderer info", true, true),
+    ("handwrite", "Handwriting-style note", true, true),
+    ("render_postscript", "Render PostScript", true, true),
+    ("render_result", "Render job result", true, true),
+    ("render_status", "Render job status", true, true),
+    ("review_sheet", "Review sheet", true, true),
+    ("start_render", "Start a render job", false, false),
+    ("validate_postscript", "Validate PostScript", true, true),
 ];
 
 async fn start() -> Client {
@@ -183,16 +195,16 @@ async fn lists_annotated_tools() {
     let tools = tools(&client).await;
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort_unstable();
-    let mut expected: Vec<&str> = EXPECTED_TOOLS.iter().map(|(name, _)| *name).collect();
+    let mut expected: Vec<&str> = EXPECTED_TOOLS.iter().map(|(name, ..)| *name).collect();
     expected.sort_unstable();
     assert_eq!(names, expected, "tool set differs from EXPECTED_TOOLS");
-    for (name, title) in EXPECTED_TOOLS {
+    for (name, title, read_only, idempotent) in EXPECTED_TOOLS {
         let t = tools.iter().find(|t| t.name == *name).unwrap();
         assert_eq!(t.title.as_deref(), Some(*title), "{name} title");
         let a = t.annotations.as_ref().expect("annotations");
-        assert_eq!(a.read_only_hint, Some(true), "{name}");
+        assert_eq!(a.read_only_hint, Some(*read_only), "{name}");
         assert_eq!(a.destructive_hint, Some(false), "{name}");
-        assert_eq!(a.idempotent_hint, Some(true), "{name}");
+        assert_eq!(a.idempotent_hint, Some(*idempotent), "{name}");
         assert_eq!(a.open_world_hint, Some(false), "{name}");
         assert!(t.description.as_deref().is_some_and(|d| !d.is_empty()));
         assert!(
@@ -568,6 +580,11 @@ async fn argument_type_errors_get_the_structured_envelope() {
             "render_postscript",
             json!({"source": "showpage", "width": "x".repeat(100_000)}),
         ),
+        ("start_render", json!({"format": "png"})),
+        ("start_render", json!({"source": "showpage", "dpi": "high"})),
+        ("render_status", json!({})),
+        ("render_result", json!({"job_id": 7})),
+        ("cancel_render", json!({"job_id": null})),
     ];
     for (tool, args) in cases {
         let r = call(&client, tool, args.clone()).await;

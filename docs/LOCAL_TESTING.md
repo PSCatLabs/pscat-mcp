@@ -748,6 +748,11 @@ cases. A scenario runs on every target (stdio, http, container) unless
   sorted list of results (`ok`, or the error code) with `outcomes`, which
   is how `server_busy` is tested without depending on which call wins the
   slot.
+* **`save`** (a map of names to dotted `structuredContent` paths) keeps
+  values for the scenario's later steps, which use them as
+  `{{saved:NAME}}`; **`poll_ms`** repeats a call every 100 ms until its
+  `result` matches, for at most that long. Together they run an async job:
+  `start_render` saves `job_id`, `render_status` polls until `done`.
 * **Placeholders:** `{{file:PATH}}`, `{{server_version}}`,
   `{{pscat_version}}`, `{{pscat_revision}}` (from `Cargo.lock`),
   `{{huge_source}}`, `{{pages:N}}`, `{{huge_note}}` (a `handwrite` text over
@@ -757,9 +762,12 @@ cases. A scenario runs on every target (stdio, http, container) unless
 What is covered: the first prompt in section 5 (the runaway loop is
 `runaway-steps`, `runaway-time` and `runaway-timeout`), scenarios 1 to 6 of
 `agent-scenarios.md` (including 6, the catalog tool, 7, the chalkboard, and 8,
-the handwritten note), 9 (the review sheet), 10 (the guide prompts and resources), and every error code in its list except `cancelled`
-(`tests/mcp_cancel.rs` covers it: an rmcp client's cancellation kills the
-worker). Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
+the handwritten note), 9 (the review sheet), 10 (the guide prompts and
+resources), 11 (a background job, `66-async-job.json`, with
+`PSCAT_MCP_ASYNC_JOBS=true` for HTTP and the image), and every error code in
+its list (`cancelled` as a cancelled job's result; `tests/mcp_cancel.rs`
+covers an rmcp client's cancellation of a call, which kills the worker).
+Runaway loops must put `%!PS` and `{ 1 pop } loop` on separate
 lines: `%` starts a comment that runs to the end of the line.
 
 The run prints a table (scenario, step, result, milliseconds) and writes

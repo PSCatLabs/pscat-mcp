@@ -1,0 +1,192 @@
+{
+  "id": "async-job",
+  "title": "Scenario 11: a render past the sync deadline runs as a start_render job, is polled to done and fetched; a running job is cancelled",
+  "origin": "examples/agent-scenarios.md section 11; tests/jobs.rs",
+  "server_env": {
+    "PSCAT_MCP_ASYNC_JOBS": "true",
+    "PSCAT_MCP_RENDER_TIMEOUT_MS": "1000",
+    "PSCAT_MCP_INTERP_TIME_LIMIT_MS": "0",
+    "PSCAT_MCP_JOB_TIMEOUT_MS": "20000",
+    "PSCAT_MCP_MAX_CONCURRENT_RENDERS": "2"
+  },
+  "steps": [
+    {
+      "label": "synchronously, the program passes the deadline",
+      "tool": "render_postscript",
+      "args": {
+        "source": "%!PS\nrealtime /t0 exch def { realtime t0 sub 2000 gt { exit } if } loop\n0 0.6 0 setrgbcolor 0 0 100 50 rectfill\nshowpage\n",
+        "width": 100,
+        "height": 50
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "timeout"
+      }
+    },
+    {
+      "label": "start_render answers at once",
+      "tool": "start_render",
+      "args": {
+        "source": "%!PS\nrealtime /t0 exch def { realtime t0 sub 2000 gt { exit } if } loop\n0 0.6 0 setrgbcolor 0 0 100 50 rectfill\nshowpage\n",
+        "width": 100,
+        "height": 50
+      },
+      "save": {
+        "job": "job_id"
+      },
+      "result": {
+        "is_error": false,
+        "structured": {
+          "ok": true,
+          "state": "queued",
+          "tool": "render_postscript",
+          "timeout_seconds": 20,
+          "job_id": {
+            "regex": "^[0-9a-f]+-[0-9a-f]+-4[0-9a-f]+-[0-9a-f]+-[0-9a-f]+$"
+          }
+        },
+        "elapsed_ms": {
+          "max": 1000
+        }
+      }
+    },
+    {
+      "label": "no result while it runs",
+      "tool": "render_result",
+      "args": {
+        "job_id": "{{saved:job}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "job_not_finished",
+        "forbid_content_types": [
+          "image"
+        ]
+      }
+    },
+    {
+      "label": "render_status reaches done",
+      "tool": "render_status",
+      "args": {
+        "job_id": "{{saved:job}}"
+      },
+      "poll_ms": 20000,
+      "result": {
+        "is_error": false,
+        "structured": {
+          "ok": true,
+          "state": "done",
+          "elapsed_seconds": {
+            "min": 1.9
+          },
+          "expires_in_seconds": {
+            "min": 3000
+          }
+        }
+      }
+    },
+    {
+      "label": "render_result returns the page",
+      "tool": "render_result",
+      "args": {
+        "job_id": "{{saved:job}}"
+      },
+      "result": {
+        "is_error": false,
+        "content_types": [
+          "image:image/png",
+          "text"
+        ],
+        "structured": {
+          "ok": true,
+          "format": "png",
+          "artifacts.0.width_px": 100,
+          "artifacts.0.height_px": 50
+        },
+        "png": {
+          "width": 100,
+          "height": 50,
+          "pixels": [
+            {
+              "x": 50,
+              "y": 25,
+              "rgb": [
+                0,
+                153,
+                0
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "a job that never ends",
+      "tool": "start_render",
+      "args": {
+        "source": "%!PS\n{ 1 pop } loop\n"
+      },
+      "save": {
+        "loop": "job_id"
+      },
+      "result": {
+        "structured": {
+          "ok": true,
+          "state": "queued"
+        }
+      }
+    },
+    {
+      "label": "it runs",
+      "tool": "render_status",
+      "args": {
+        "job_id": "{{saved:loop}}"
+      },
+      "poll_ms": 10000,
+      "result": {
+        "structured": {
+          "state": "running"
+        }
+      }
+    },
+    {
+      "label": "cancel_render stops it",
+      "tool": "cancel_render",
+      "args": {
+        "job_id": "{{saved:loop}}"
+      },
+      "result": {
+        "is_error": false,
+        "structured": {
+          "ok": true,
+          "state": "cancelled"
+        }
+      }
+    },
+    {
+      "label": "a cancelled job has no result",
+      "tool": "render_result",
+      "args": {
+        "job_id": "{{saved:loop}}"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "cancelled"
+      }
+    },
+    {
+      "label": "an unknown job",
+      "tool": "render_status",
+      "args": {
+        "job_id": "00000000-0000-4000-8000-000000000000"
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "unknown_job",
+        "structured": {
+          "ok": false
+        }
+      }
+    }
+  ]
+}
