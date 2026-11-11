@@ -23,8 +23,23 @@ const SHAPES: &str = "\
 showpage
 ";
 
+/// Every tool the server lists, with its title. Adding a tool means adding
+/// one row here (and its own behavioural test); the listing test checks the
+/// annotations, descriptions and output schema of every row.
+const EXPECTED_TOOLS: &[(&str, &str)] = &[
+    ("describe_art_capabilities", "List art capabilities"),
+    ("get_renderer_info", "PSCat renderer info"),
+    ("render_postscript", "Render PostScript"),
+    ("validate_postscript", "Validate PostScript"),
+];
+
 async fn start() -> Client {
-    let cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server")).configure(|c| {
+    start_with(env!("CARGO_BIN_EXE_pscat-mcp-server")).await
+}
+
+/// A client on a server started from the executable at `exe`.
+async fn start_with(exe: impl AsRef<std::ffi::OsStr>) -> Client {
+    let cmd = tokio::process::Command::new(exe).configure(|c| {
         c.arg("serve-stdio")
             .env("PSCAT_MCP_LOG_FORMAT", "pretty")
             .env("RUST_LOG", "warn");
@@ -126,7 +141,7 @@ fn png_pixel(png_bytes: &[u8], x: u32, y: u32) -> (u32, u32, [u8; 4]) {
 }
 
 #[tokio::test]
-async fn lists_three_annotated_tools() {
+async fn lists_annotated_tools() {
     let client = start().await;
     let info = client.peer_info().expect("server info");
     let server = info.server_info.as_ref().expect("server_info");
@@ -137,27 +152,22 @@ async fn lists_three_annotated_tools() {
     let tools = tools(&client).await;
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort_unstable();
-    assert_eq!(
-        names,
-        [
-            "get_renderer_info",
-            "render_postscript",
-            "validate_postscript"
-        ]
-    );
-    for (name, title) in [
-        ("render_postscript", "Render PostScript"),
-        ("validate_postscript", "Validate PostScript"),
-        ("get_renderer_info", "PSCat renderer info"),
-    ] {
-        let t = tools.iter().find(|t| t.name == name).unwrap();
-        assert_eq!(t.title.as_deref(), Some(title), "{name} title");
+    let mut expected: Vec<&str> = EXPECTED_TOOLS.iter().map(|(name, _)| *name).collect();
+    expected.sort_unstable();
+    assert_eq!(names, expected, "tool set differs from EXPECTED_TOOLS");
+    for (name, title) in EXPECTED_TOOLS {
+        let t = tools.iter().find(|t| t.name == *name).unwrap();
+        assert_eq!(t.title.as_deref(), Some(*title), "{name} title");
         let a = t.annotations.as_ref().expect("annotations");
         assert_eq!(a.read_only_hint, Some(true), "{name}");
         assert_eq!(a.destructive_hint, Some(false), "{name}");
         assert_eq!(a.idempotent_hint, Some(true), "{name}");
         assert_eq!(a.open_world_hint, Some(false), "{name}");
         assert!(t.description.as_deref().is_some_and(|d| !d.is_empty()));
+        assert!(
+            t.output_schema.is_some(),
+            "{name} declares an output schema"
+        );
     }
 
     let render = tools
@@ -573,5 +583,214 @@ async fn reports_renderer_info() {
     assert_eq!(s["limits"]["max_side_px"], 8000);
     assert!(s["limits"]["max_concurrent_renders"].as_u64().unwrap() >= 1);
     assert!(!s["capabilities"].as_array().unwrap().is_empty());
+    client.cancel().await.ok();
+}
+
+/// `describe_art_capabilities` reads PSCat's catalog in a worker process and
+/// returns it as structured content that matches the declared schema.
+#[tokio::test]
+async fn describes_art_capabilities() {
+    let client = start().await;
+    let tool = tools(&client)
+        .await
+        .into_iter()
+        .find(|t| t.name == "describe_art_capabilities")
+        .unwrap();
+    assert!(
+        tool.input_schema["properties"]
+            .as_object()
+            .is_none_or(|p| p.is_empty()),
+        "takes no arguments"
+    );
+    let schema = tool.output_schema.as_ref().unwrap();
+
+    let r = call(&client, "describe_art_capabilities", json!({})).await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert!(!has_image(&r));
+    let s = structured(&r);
+    assert_eq!(s["ok"], true);
+    assert_conforms(schema, s);
+    assert_eq!(s["renderer"]["engine"], "pscat");
+
+    // The catalog comes from the linked PSCat build.
+    assert_eq!(s["pscat_version"], s["renderer"]["version"]);
+    assert_eq!(s["catalog_signature"].as_str().unwrap().len(), 16);
+
+    let caps = s["capabilities"].as_array().unwrap();
+    let entry = |kind: &str, name: &str| {
+        caps.iter()
+            .find(|c| c["kind"] == kind && c["name"] == name)
+            .unwrap_or_else(|| panic!("no {kind} named {name}"))
+    };
+    let kinds: std::collections::BTreeSet<&str> =
+        caps.iter().map(|c| c["kind"].as_str().unwrap()).collect();
+    for kind in [
+        "font",
+        "type3_face",
+        "palette",
+        "template",
+        "procedure",
+        "operator",
+    ] {
+        assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
+    }
+    let helvetica = entry("font", "Helvetica");
+    assert_eq!(helvetica["availability"], "builtin");
+    assert_eq!(helvetica["load"], "");
+    // Names are unique per kind and sorted, as `pscat --capabilities` prints them.
+    let keys: Vec<(&str, &str)> = caps
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap(), c["kind"].as_str().unwrap()))
+        .collect();
+    assert!(keys.windows(2).all(|w| w[0] < w[1]), "sorted and unique");
+    for c in caps {
+        for field in ["description", "source", "load", "example", "availability"] {
+            assert!(c[field].is_string(), "{field} in {c}");
+        }
+        assert!(c["parameters"].is_array(), "{c}");
+    }
+    // A template carries what a program needs to use it.
+    let template = caps.iter().find(|c| c["kind"] == "template").unwrap();
+    assert!(
+        template["load"].as_str().unwrap().contains("(lib/"),
+        "{template}"
+    );
+
+    // The text summary names every capability, one line per kind.
+    let text = text_of(&r);
+    assert!(
+        text.contains(&format!("{} capabilities", caps.len())),
+        "{text}"
+    );
+    for c in caps {
+        assert!(text.contains(c["name"].as_str().unwrap()), "{c}");
+    }
+    assert!(text.lines().any(|l| l.starts_with("palette (")), "{text}");
+
+    // It is the same on a second call, which runs in a fresh worker.
+    let again = call(&client, "describe_art_capabilities", json!({})).await;
+    assert_eq!(structured(&again), s);
+    client.cancel().await.ok();
+}
+
+/// Unknown arguments are ignored rather than echoed or executed, and the
+/// catalog is not affected by them.
+#[tokio::test]
+async fn describe_art_capabilities_ignores_extra_arguments() {
+    let client = start().await;
+    let plain = call(&client, "describe_art_capabilities", json!({})).await;
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"source": "(x) print", "out_path": "x.png"}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert_eq!(structured(&r), structured(&plain));
+    client.cancel().await.ok();
+}
+
+/// Font packs and font override directories next to the executable are
+/// reported by name, but their locations never leave the server.
+#[tokio::test]
+async fn describe_art_capabilities_does_not_report_server_paths() {
+    // Under target/, on the same volume as the build, and removed even if
+    // the test panics.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pscat-mcp-caps-{}", uuid::Uuid::new_v4()));
+    let _scratch = Scratch(dir.clone());
+    let pack = dir.join("fonts/packs/testpack");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::create_dir_all(dir.join("fonts/catalog")).unwrap();
+    std::fs::write(
+        pack.join("install.json"),
+        r#"{"pack":"testpack","tag":"fonts-test","pack_sha256":"abc123","source":"test"}"#,
+    )
+    .unwrap();
+    // The worker looks for packs beside the executable, so the server runs
+    // from `dir`. A hard link keeps the copy cheap.
+    let original = env!("CARGO_BIN_EXE_pscat-mcp-server");
+    let exe = dir.join(std::path::Path::new(original).file_name().unwrap());
+    if std::fs::hard_link(original, &exe).is_err() {
+        std::fs::copy(original, &exe).unwrap();
+    }
+
+    let client = start_with(&exe).await;
+    let r = call(&client, "describe_art_capabilities", json!({})).await;
+    client.cancel().await.ok();
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let s = structured(&r);
+    let packs = &s["font_packs"];
+    // The test setup took effect...
+    assert_eq!(packs["installed"].as_array().unwrap().len(), 1, "{packs}");
+    assert_eq!(packs["installed"][0]["name"], "testpack");
+    assert_eq!(packs["installed"][0]["status"], "user-selected");
+    assert_eq!(packs["overrides"].as_array().unwrap().len(), 1, "{packs}");
+    // ...and none of it says where.
+    let all = format!("{s}\n{}", text_of(&r));
+    let unique = dir.file_name().unwrap().to_str().unwrap();
+    assert!(!all.contains(unique), "server path leaked");
+    assert!(!all.contains("\"path\""), "path key leaked");
+    assert!(
+        !all.contains(env!("CARGO_MANIFEST_DIR")),
+        "checkout path leaked"
+    );
+}
+
+/// The `load` line the catalog gives for a template works in the render
+/// sandbox, so the names it reports are usable by `render_postscript`.
+#[tokio::test]
+async fn catalog_load_lines_work_in_a_render() {
+    let client = start().await;
+    let r = call(&client, "describe_art_capabilities", json!({})).await;
+    let card = structured(&r)["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "template" && c["name"] == "pgcard")
+        .expect("pgcard template")
+        .clone();
+    let load = card["load"].as_str().unwrap();
+    let source = format!(
+        "{load}\n0 0 400 300 << /Title (Hello) /Body (From the catalog) >> pgcard pop\nshowpage\n"
+    );
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": source, "width": 400, "height": 300}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let ContentBlock::Image(img) = r
+        .content
+        .iter()
+        .find(|c| matches!(c, ContentBlock::Image(_)))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&img.data)
+        .unwrap();
+    let (w, h, _) = png_pixel(&bytes, 0, 0);
+    assert_eq!((w, h), (400, 300));
+    let mut colors = std::collections::HashSet::new();
+    for (x, y) in (0..w)
+        .step_by(20)
+        .flat_map(|x| (0..h).step_by(20).map(move |y| (x, y)))
+    {
+        colors.insert(png_pixel(&bytes, x, y).2);
+    }
+    assert!(
+        colors.len() > 1,
+        "the template drew something: {}",
+        colors.len()
+    );
     client.cancel().await.ok();
 }

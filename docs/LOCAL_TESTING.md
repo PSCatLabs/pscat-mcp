@@ -51,7 +51,7 @@ server is registered only for the directory you ran the command in
 (`local` scope), and a session started elsewhere won't see it.
 
 Start a new `claude` session (servers are loaded at startup) and run
-`/mcp`. `pscat-render` should be connected with three tools.
+`/mcp`. `pscat-render` should be connected with four tools.
 
 To see the server's logs, start the session with `claude --debug`. Logs
 are on stderr, so they never mix with MCP messages. Set a level with
@@ -149,7 +149,7 @@ The client entries above work unchanged. Build locally rather than pulling
 
 ## 5. A first prompt
 
-Paste this into a new session. It calls all three tools, and each step has
+Paste this into a new session. It calls all four tools, and each step has
 a known result.
 
 ````text
@@ -173,6 +173,7 @@ showpage
 stroke showpage
 
 5. Render `%!PS { 1 pop } loop` and tell me the error code and roughly how long it took.
+6. Call describe_art_capabilities and tell me how many page templates it lists and their names.
 
 Finish with a table: step, exact tool name you called, error code (if any), result.
 ````
@@ -189,6 +190,7 @@ A pass looks like this:
 | 3 | SVG returns an embedded `image/svg+xml` resource, and PDF an `application/pdf` resource, not images. |
 | 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. If it comes back valid, check whether the agent corrected the typo in the source it sent. |
 | 5 | `limit_exceeded` ("stopped at the time limit") after about 20 s, or `timeout`. |
+| 6 | Five templates: `pgcard`, `pgcertificate`, `pginvitation`, `pgletter`, `pgposter` (for the pinned PSCat; a bump may change the set). |
 
 In step 2, the description is the test. A wrong or vague description means
 the image didn't reach the model. Whether the image appears on screen only

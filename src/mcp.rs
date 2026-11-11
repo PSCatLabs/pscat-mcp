@@ -12,6 +12,8 @@
 //!   with `ok: false` and `error` set; never an image.
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
+//! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
+//!   [`ArtCatalog`] fields at the top level) plus a text summary.
 //! * `get_renderer_info` — a [`RendererInfo`] object.
 
 use std::sync::Arc;
@@ -33,8 +35,8 @@ use tokio_util::sync::CancellationToken;
 use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::render::{
-    DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest, RenderService,
-    ValidationReport,
+    ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest,
+    RenderService, ValidationReport,
 };
 use crate::worker::OutputFormat;
 
@@ -134,6 +136,23 @@ pub struct ValidateToolOutput {
     #[serde(flatten)]
     pub report: Option<ValidationReport>,
     /// Why validation could not run, when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RenderError>,
+    /// The renderer that handled the request.
+    pub renderer: RendererIdentity,
+}
+
+/// `structuredContent` of `describe_art_capabilities`. When the catalog was
+/// read, `ok` is true and the [`ArtCatalog`] fields are present. Otherwise
+/// `ok` is false and `error` is set.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CapabilitiesToolOutput {
+    /// True when the catalog was read.
+    pub ok: bool,
+    /// The catalog.
+    #[serde(flatten)]
+    pub catalog: Option<ArtCatalog>,
+    /// Why the catalog could not be read, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
     /// The renderer that handled the request.
@@ -275,7 +294,7 @@ impl PscatMcp {
     }
 }
 
-/// All three tools only read their arguments and run the program in a
+/// Every tool only reads its arguments (if any) and runs the program (if any) in a
 /// sandboxed worker that cannot write files or reach the network, so they
 /// are annotated read-only, non-destructive, idempotent (the same input
 /// renders the same output) and closed-world.
@@ -368,6 +387,47 @@ impl PscatMcp {
     }
 
     #[tool(
+        name = "describe_art_capabilities",
+        title = "List art capabilities",
+        description = "Lists the creative capabilities of the linked PSCat build: fonts, Type 3 \
+                       faces, mood palettes, page templates, artkit and style-pack procedures, \
+                       and native operators. Each entry has its kind, description, parameters, \
+                       the library file that defines it, the `run` lines that load it, an example \
+                       and its availability. Takes no arguments, runs no PostScript, and does not \
+                       report server file paths.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<CapabilitiesToolOutput>(),
+        annotations(
+            title = "List art capabilities",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn describe_art_capabilities(&self, ct: CancellationToken) -> CallToolResult {
+        let outcome = tokio::select! {
+            r = self.service.capabilities() => r,
+            () = ct.cancelled() => Err(cancelled()),
+        };
+        match outcome {
+            Ok(catalog) => {
+                let text = capabilities_text(&catalog);
+                let envelope = CapabilitiesToolOutput {
+                    ok: true,
+                    catalog: Some(catalog),
+                    error: None,
+                    renderer: RendererIdentity::current(),
+                };
+                with_structured(
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    &envelope,
+                )
+            }
+            Err(err) => capabilities_failure(err),
+        }
+    }
+
+    #[tool(
         name = "get_renderer_info",
         title = "PSCat renderer info",
         description = "Reports the PSCat renderer version, this server's version, the supported \
@@ -411,8 +471,9 @@ impl ServerHandler for PscatMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("pscat-mcp", SERVER_VERSION))
             .with_instructions(
-                "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, and \
-                 validates programs without rendering. Programs run in a sandbox with no file \
+                "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
+                 validates programs without rendering, and lists the fonts, palettes, page \
+                 templates and procedures the interpreter has. Programs run in a sandbox with no file \
                  writes, no network, and file reads limited to PSCat's built-in lib/.",
             )
     }
@@ -606,11 +667,50 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
         postscript: None,
         program_output: None,
     };
+    // A new tool that takes arguments needs an arm here, or its argument
+    // errors come back as rmcp's bare text result, without the envelope.
     match tool {
         "render_postscript" => render_failure(err),
         "validate_postscript" => validate_failure(err),
         _ => result,
     }
+}
+
+fn capabilities_failure(err: RenderError) -> CallToolResult {
+    let text = error_text("Capabilities could not be listed", &err);
+    let envelope = CapabilitiesToolOutput {
+        ok: false,
+        catalog: None,
+        error: Some(err),
+        renderer: RendererIdentity::current(),
+    };
+    with_structured(
+        CallToolResult::error(vec![ContentBlock::text(text)]),
+        &envelope,
+    )
+}
+
+/// The names of every capability, one line per kind. Parameters, load lines
+/// and examples are only in `structuredContent`; a client that shows just
+/// the text still learns which names exist.
+fn capabilities_text(catalog: &ArtCatalog) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for c in &catalog.capabilities {
+        match groups.iter_mut().find(|(kind, _)| *kind == c.kind) {
+            Some((_, names)) => names.push(c.name.as_str()),
+            None => groups.push((c.kind.as_str(), vec![c.name.as_str()])),
+        }
+    }
+    let mut text = format!(
+        "PSCat {} lists {} capabilities. Parameters, load lines and examples are in \
+         structuredContent.capabilities.",
+        catalog.pscat_version,
+        catalog.capabilities.len()
+    );
+    for (kind, names) in groups {
+        text.push_str(&format!("\n{kind} ({}): {}", names.len(), names.join(", ")));
+    }
+    text
 }
 
 fn error_text(lead: &str, err: &RenderError) -> String {

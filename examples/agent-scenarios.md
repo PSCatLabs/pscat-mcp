@@ -5,12 +5,13 @@ agent SDK, or MCP Inspector) connected to `pscat-mcp-server`, over stdio or
 Streamable HTTP. Each case gives a prompt to type, the tool call the agent is
 expected to make, and the result that counts as a pass.
 
-The server exposes three tools:
+The server exposes four tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
+| `describe_art_capabilities` | none | Text naming every capability by kind; `structuredContent` `{ok, pscat_version, catalog_signature, font_packs{pinned_index?,installed[],overrides[],available[]}, capabilities[]{name,kind,description,parameters[]{name,description,default},source,load,example,availability}, renderer}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
 Every failure is `isError: true` with a text explanation and
@@ -306,6 +307,41 @@ HTTP).
 
 ---
 
+## 6. Find real names before using a palette or template
+
+**Prompt**
+
+> Make a greeting card with the PSCat page templates. Check which templates
+> and palettes this server has first, rather than guessing names.
+
+**Expected tool calls**
+
+```json
+{ "name": "describe_art_capabilities", "arguments": {} }
+```
+
+then `render_postscript` with a `source` that starts with the `load` line of
+the template it chose (for `pgcard`: `(lib/artkit.ps) run (lib/pagekit.ps) run`)
+and passes a palette name from the catalog.
+
+**Expected result**
+
+- The first call returns `ok: true` with `capabilities` containing entries of
+  kind `template` (`pgcard`, `pgcertificate`, `pginvitation`, `pgletter`,
+  `pgposter`), `palette` (for example `acid`, `brass`), `font`, `type3_face`,
+  `procedure` and `operator`. Each template lists its dict keys under
+  `parameters` and the `run` lines it needs under `load`.
+- No entry or text carries a server file path, and `font_packs.installed`
+  has no `path` fields.
+- The agent uses only names from the catalog, and the render returns a PNG
+  with `ok: true`.
+
+This case is covered by `tests/mcp_stdio.rs` (catalog structure, no paths,
+`pgcard` rendering from its `load` line); it has not been run through an
+agent against the container image.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -317,3 +353,4 @@ HTTP).
 | 5a | Infinite loop | `render_postscript` | `limit_exceeded` or `timeout`; server still healthy |
 | 5b | 10000×10000 page | `render_postscript` | `invalid_dimensions` (5000×5000: `too_many_pixels`) |
 | 5c | Huge source | `render_postscript` | `source_too_large` (or HTTP 413) |
+| 6 | Real names | `describe_art_capabilities` then `render_postscript` | Catalog lists templates and palettes; render uses a listed template and its `load` line |

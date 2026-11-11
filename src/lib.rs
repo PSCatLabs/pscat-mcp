@@ -10,6 +10,7 @@
 //! * [`backend`] — runs a job; [`backend::SubprocessBackend`] starts one
 //!   `render-worker` process per job and kills it at the deadline.
 //! * [`worker`] — the only code that executes PostScript (inside the child).
+//! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
 
@@ -19,6 +20,7 @@ pub mod build_info;
 pub mod config;
 pub mod http;
 pub mod mcp;
+pub mod pscat_extras;
 pub mod render;
 pub mod telemetry;
 pub mod worker;
