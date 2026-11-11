@@ -147,12 +147,60 @@ The client entries above work unchanged. Build locally rather than pulling
 `ghcr.io/pscatlabs/pscat-mcp`: that package is private, and it is
 `linux/amd64` only, so on Apple silicon it would run under emulation.
 
-## 5. What to try
+## 5. A first prompt
+
+Paste this into a new session. It calls all three tools, and each step has
+a known result.
+
+````text
+Use only the pscat-render MCP server for this (not the pscat plugin's tools).
+
+1. Call get_renderer_info and tell me the pscat-mcp server version and the PSCat version and revision.
+2. Render this program as a PNG at 300×200 points and describe the image you got back:
+
+%!PS
+0.1 0.2 0.6 setrgbcolor 0 0 300 200 rectfill
+1 0.3 0.2 setrgbcolor 150 110 60 0 360 arc fill
+1 setgray /Helvetica-Bold findfont 20 scalefont setfont 20 20 moveto (pscat-render) show
+showpage
+
+3. Render the same program as SVG, then as PDF, and tell me what kind of content block each came back as.
+4. Validate this program exactly as written (the typo is deliberate; don't correct it) and tell me the error name, the offending command and the line:
+
+%!PS
+100 100 moveto
+200 200 liento
+stroke showpage
+
+5. Render `%!PS { 1 pop } loop` and tell me the error code and roughly how long it took.
+
+Finish with a table: step, exact tool name you called, error code (if any), result.
+````
+
+For the HTTP entry, use `pscat-render-http` in the first line.
+
+A pass looks like this:
+
+| Step | Expected |
+|---|---|
+| Every step | In Claude Code, tool names start with `mcp__pscat-render__` (or `mcp__pscat-render-http__`). Over HTTP, the server's log shows a `POST /mcp` for each call. |
+| 1 | The pscat-mcp version, then the PSCat version and revision, matching the pin in `Cargo.toml` and `Cargo.lock`. |
+| 2 | The agent describes a dark blue background, an orange-red circle in the middle, and "pscat-render" in white at the bottom left. Separately, note whether the client showed you the image. |
+| 3 | SVG returns an embedded `image/svg+xml` resource, and PDF an `application/pdf` resource, not images. |
+| 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. If it comes back valid, check whether the agent corrected the typo in the source it sent. |
+| 5 | `limit_exceeded` ("stopped at the time limit") after about 20 s, or `timeout`. |
+
+In step 2, the description is the test. A wrong or vague description means
+the image didn't reach the model. Whether the image appears on screen only
+shows how that client displays images from tool results; record it either
+way.
+
+## 6. What else to try
 
 [`examples/agent-scenarios.md`](../examples/agent-scenarios.md) has five
 prompts with the expected tool call and result: render a program, draw a
 diagram, diagnose an invalid program, ask for an unsupported format, and
-try to exhaust resources. Beyond those:
+try to exhaust resources. Beyond those and the prompt above:
 
 * **Images.** After a PNG render, does the client show the image to you, and
   can the agent describe it correctly? That tells you whether the image
@@ -167,7 +215,7 @@ try to exhaust resources. Beyond those:
   HTTP the server's log shows whether the request ended early.
 * **Renderer info.** Ask which PSCat version is running.
 
-## 6. What to report
+## 7. What to report
 
 For each client, transport and finding:
 
@@ -184,7 +232,7 @@ rendering problems (a wrong picture, a wrong PostScript error) in
 [PSCatLabs/pscat](https://github.com/PSCatLabs/pscat/issues) with the
 program attached.
 
-## 7. Clean up
+## 8. Clean up
 
 ```bash
 claude mcp remove -s user pscat-render
