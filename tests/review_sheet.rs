@@ -702,19 +702,20 @@ async fn every_budget_is_refused_before_execution() {
     assert_ok(&r);
     client.cancel().await.ok();
 
-    // A deadline too short for every cell to have its 100 ms: 600 ms less a
-    // 250 ms margin is 350 ms, for 4 cells. (On a server of its own: one
-    // that short is not asked to draw anything.)
-    let client = start(&[("PSCAT_MCP_MAX_SHEET_TIMEOUT_MS", "600")]).await;
+    // A deadline too short for every cell to have its 100 ms: 1000 ms less
+    // the 250 ms render margin is 750 ms, less 250 ms to draw the labels,
+    // for 6 cells. (On a server of its own: one that short is not asked to
+    // draw anything.)
+    let client = start(&[("PSCAT_MCP_MAX_SHEET_TIMEOUT_MS", "1000")]).await;
     let r = call(
         &client,
-        json!({"entries": [entry(10, 10, json!([72, 72, 72, 72]))]}),
+        json!({"entries": [entry(10, 10, json!([72, 72, 72, 72, 72, 72]))]}),
     )
     .await;
     let s = assert_fails(&r, "invalid_request");
     assert_eq!(s["error"]["input"]["code"], "deadline", "{s}");
     let m = s["error"]["message"].as_str().unwrap();
-    assert!(m.contains("4 cells cannot each have 100 ms"), "{m}");
+    assert!(m.contains("6 cells cannot each have 100 ms"), "{m}");
     client.cancel().await.ok();
 }
 
@@ -909,5 +910,177 @@ async fn odd_inputs_never_crash() {
     )
     .await;
     assert_ok(&r);
+    client.cancel().await.ok();
+}
+
+/// A backend that answers every job as a sheet that ran out of its own time
+/// in the worker would: the worker's `timeout` with `error.input.code`
+/// `deadline`. Such a sheet needs a cell PSCat cannot interrupt, so a real
+/// worker does not produce it on demand.
+struct OutOfTime;
+
+impl pscat_mcp::backend::RenderBackend for OutOfTime {
+    fn execute(
+        &self,
+        job: pscat_mcp::worker::WorkerJob,
+        _deadline: Duration,
+    ) -> pscat_mcp::backend::BackendFuture<'_> {
+        assert!(job.sheet.is_some(), "a sheet job");
+        // What the worker writes on its stdout for such a sheet.
+        let result: pscat_mcp::worker::WorkerResult = serde_json::from_value(json!({
+            "failure": {"kind": "generate", "code": "timeout", "detail": "deadline",
+                        "message": "the sheet was not finished within this server's 18000 ms \
+                                    for a sheet (3 of 4 cells drawn). Use fewer or cheaper cells"},
+            "ps_error": null, "artifacts": [], "page_count": 0, "syntax": null, "lint": [],
+            "program_output": "", "program_output_truncated": false, "steps_used": 0,
+            "elapsed_ms": 0
+        }))
+        .expect("a worker result");
+        Box::pin(async { Ok(result) })
+    }
+}
+
+/// The worker's own sheet deadline is a `timeout` through the envelope,
+/// valid against the declared output schema, and counted as a timed-out
+/// job.
+#[tokio::test]
+async fn the_in_worker_deadline_is_a_timeout_in_the_envelope() {
+    let service = Arc::new(RenderService::new(
+        Arc::new(OutOfTime),
+        LimitsConfig::default(),
+    ));
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let server = pscat_mcp::mcp::PscatMcp::new(service.clone());
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let client: Client = ().serve(client_io).await.expect("initialize");
+    let r = call(
+        &client,
+        json!({"entries": [{"source": "showpage", "width": 10, "height": 10,
+                            "dpi": [72, 72, 72, 72]}]}),
+    )
+    .await;
+    let s = assert_fails(&r, "timeout");
+    assert_eq!(s["error"]["input"]["code"], "deadline", "{s}");
+    assert!(
+        s["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("3 of 4 cells drawn"),
+        "{s}"
+    );
+    let tools = client.list_all_tools().await.expect("list_tools");
+    let t = tools.iter().find(|t| t.name == "review_sheet").unwrap();
+    let schema = Value::Object((**t.output_schema.as_ref().unwrap()).clone());
+    assert_conforms(&schema, &schema, &s, "structuredContent");
+    assert_eq!(service.counters.timed_out.load(Ordering::SeqCst), 1);
+    assert_eq!(service.counters.executed.load(Ordering::SeqCst), 1);
+    client.cancel().await.ok();
+}
+
+/// A sheet at the pixel limit holding one cell enlarged 16 times: at the
+/// default limit (16,000,000 pixels) and at the most a sheet can be
+/// (8000 x 8000, the canvas alone 256 MB). The cell is an exact enlargement.
+#[tokio::test]
+async fn a_sheet_at_the_pixel_limit_with_a_zoom_16_cell() {
+    // 248 x 16 = 3968 pixels shown; with the hairline and the margins the
+    // sheet is 3994 x 3994 = 15,952,036 pixels.
+    for (env, side_pt, sheet_px) in [
+        (vec![], 248u32, 3994u32),
+        (
+            vec![
+                ("PSCAT_MCP_MAX_SHEET_PIXELS", "64000000"),
+                ("PSCAT_MCP_MAX_SHEET_TIMEOUT_MS", "60000"),
+            ],
+            498,
+            7994,
+        ),
+    ] {
+        let client = start(&env).await;
+        let r = call(
+            &client,
+            json!({"entries": [{"source": "1 0 0 setrgbcolor 0 0 1 1 rectfill \
+                                           0 0 1 setrgbcolor 100 100 50 50 rectfill showpage",
+                                "width": side_pt, "height": side_pt,
+                                "dpi": [{"dpi": 72, "zoom": 16}]}],
+                   "labels": false, "sizes": false}),
+        )
+        .await;
+        let s = assert_ok(&r).clone();
+        assert_eq!(s["width_px"], sheet_px, "{s}");
+        assert_eq!(s["height_px"], sheet_px, "{s}");
+        let png = png_of(&r);
+        assert_eq!((png.w, png.h), (sheet_px, sheet_px));
+        let (x, y) = xy(&s, 0);
+        let h = side_pt * 16;
+        // The one red pixel in the bottom-left corner is a 16x16 block.
+        assert_eq!(png.at(x, y + h - 1), RED);
+        assert_eq!(png.at(x + 15, y + h - 16), RED);
+        assert_eq!(png.at(x + 16, y + h - 1), WHITE);
+        assert_eq!(png.at(x, y + h - 17), WHITE);
+        // The blue square, 50 points from 100: pixels 1600 to 2399.
+        assert_eq!(png.at(x + 1600, y + h - 1601), BLUE);
+        assert_eq!(png.at(x + 1599, y + h - 1601), WHITE);
+        assert_eq!(png.at(x + h, y + h), HAIRLINE);
+        client.cancel().await.ok();
+    }
+}
+
+/// A cell's memory limit counts only what its own program allocates: the
+/// sheet already drawn around it (here 61 MB) is not charged to it. So a
+/// program that fits the limit alone fits it on a large sheet, one that
+/// does not fails the same way, and the cell is drawn the same.
+#[tokio::test]
+async fn a_cells_memory_limit_is_the_same_alone_and_on_a_large_sheet() {
+    // 64 MiB is 67,108,864 bytes.
+    let client = start(&[("PSCAT_MCP_MAX_MEMORY_BYTES", "67108864")]).await;
+    // An array element is about 40 bytes: 1,500,000 of them are about
+    // 60 MB, within the limit; 1,800,000 (about 72 MB) are not.
+    let fits = "/a 1500000 array def 1 0 0 setrgbcolor 0 0 10 10 rectfill showpage";
+    let over = "1 0 0 setrgbcolor 0 0 10 10 rectfill /a 1800000 array def showpage";
+    for (source, ok) in [(fits, true), (over, false)] {
+        let entry = json!({"source": source, "width": 20, "height": 20});
+        // Alone, as a page: the render's own verdict.
+        let page = call_tool(
+            &client,
+            "render_postscript",
+            json!({"source": source, "width": 20, "height": 20}),
+        )
+        .await;
+        assert_eq!(page.is_error, Some(!ok), "{}", text_of(&page));
+        if !ok {
+            assert_eq!(structured(&page)["error"]["postscript"]["limit"], "memory");
+        }
+        // Alone on a sheet, and first on a sheet of 3966 x 3926 pixels
+        // whose canvas is allocated before the cell runs.
+        let small = call(
+            &client,
+            json!({"entries": [entry], "labels": false, "sizes": false}),
+        )
+        .await;
+        let large = call(
+            &client,
+            json!({"entries": [entry, {"source": "", "width": 3900, "height": 3900}],
+                   "labels": false, "sizes": false}),
+        )
+        .await;
+        let mut drawn = Vec::new();
+        for r in [&small, &large] {
+            let s = assert_ok(r).clone();
+            let c = cell(&s, 0);
+            assert_eq!(c["ok"], ok, "{s}");
+            if !ok {
+                assert_eq!(c["error"]["limit"], "memory", "{s}");
+            }
+            let (x, y) = xy(&s, 0);
+            drawn.push(png_of(r).region(x, y, 20, 20));
+        }
+        assert_eq!(structured(&large)["width_px"], 3926);
+        assert!(drawn[0] == drawn[1], "the cell differs on the large sheet");
+        assert_eq!(drawn[0][19 * 20], RED, "the cell's square");
+    }
     client.cancel().await.ok();
 }

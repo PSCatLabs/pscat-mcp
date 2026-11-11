@@ -329,7 +329,10 @@ pub struct Counters {
     pub rejected: AtomicU64,
     /// Jobs handed to the backend.
     pub executed: AtomicU64,
-    /// Jobs that hit the external deadline.
+    /// Jobs that ran out of time: killed at the external deadline, or a
+    /// review sheet that stopped itself at its own deadline in the worker
+    /// (`timeout`, `error.input.code` `deadline`). Both are a `timeout` to
+    /// the client.
     pub timed_out: AtomicU64,
 }
 
@@ -567,6 +570,12 @@ impl RenderService {
         };
         let result = self.run(job, deadline).await?;
         let wall_ms = started.elapsed().as_millis() as u64;
+        if let Some(WorkerFailure::Generate(f)) = &result.failure
+            && f.code == crate::generate::GenerateErrorCode::Timeout
+        {
+            self.counters.timed_out.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(wall_ms, "a review sheet ran out of its time in the worker");
+        }
         if let Some(failure) = result.failure.clone() {
             return Err(failure_to_error(failure, result, format));
         }

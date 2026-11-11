@@ -538,15 +538,30 @@ pub fn render_sheet_cell(
         limit: err.limit().map(|l| l.name().to_string()),
         report: interp.error_report(&err),
     });
-    let gfx = interp.gfx();
-    let last = match gfx.pages().last() {
-        Some(page) if !gfx.has_trailing_art() => page.clone(),
-        _ => gfx.pixmap.clone(),
+    let steps = interp.steps_used();
+    // The last page without a second copy of it alive beside the canvas:
+    // the canvas is moved out when it is the last page, and freed before
+    // a shown page is copied when it is not. So a cell holds no more page
+    // rasters at once than `render_postscript` does.
+    let canvas_is_last = interp.gfx().pages().is_empty() || interp.gfx().has_trailing_art();
+    let tiny = || tiny_skia::Pixmap::new(1, 1).expect("a 1x1 pixmap");
+    let canvas = std::mem::replace(&mut interp.gfx_mut().pixmap, tiny());
+    let last = if canvas_is_last {
+        canvas
+    } else {
+        drop(canvas);
+        interp
+            .gfx()
+            .pages()
+            .last()
+            .cloned()
+            .ok_or("a shown page went missing")?
     };
+    drop(interp);
     Ok(SheetCellRender {
         image: SheetImage(last),
         error,
-        steps: interp.steps_used(),
+        steps,
         elapsed_ms,
     })
 }

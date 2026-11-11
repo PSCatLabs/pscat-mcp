@@ -215,7 +215,9 @@ arguments and checks every budget:
 1. the cell count and the source bytes (in all, and each entry against the
    source limit), counted from the argument lengths before anything is
    allocated per entry or per cell;
-2. that every cell can have at least 100 ms of the sheet's time;
+2. that every cell can have at least 100 ms of the sheet's time, after
+   250 ms left for drawing the strips and allocating the sheet (the worker
+   shares out what is left once that is done, so the two agree);
 3. each cell's sides after zoom (8000 pixels), then the pixels the cells
    render, all together (before zoom);
 4. the sheet's sides (8000 pixels) and pixels, from PSCat's `Layout` with
@@ -254,7 +256,26 @@ cells left). A runaway cell stops at its share with `limit_exceeded`, and
 the cells after it keep theirs; time a quick cell does not use passes on.
 (The plugin gives each child whatever is left of the call, so its first
 runaway cell can starve the rest.) If a share ever falls under 100 ms, the
-sheet stops with `timeout`.
+sheet stops with `timeout` and `error.input.code` `deadline`; that and the
+kill at the deadline both count in `Counters::timed_out`.
+
+**Memory.** PSCat's memory limit counts heap growth from when a cell's
+limits are set (`Interp::set_limits` takes `memtrack::live_bytes()`, the
+whole process's live heap, as its base), so the sheet already allocated
+around a cell is in the base, not charged to the cell: a cell has exactly
+the limit it would have as a render, and gives the same result alone or on
+a large sheet (`tests/review_sheet.rs` checks this at a 64 MiB limit beside
+a 61 MB canvas). The worker takes a cell's last page by moving the canvas
+out, or by freeing it before it copies a shown page, so it holds no more
+page rasters than a render does. What the sheet adds beyond a render is
+outside every cell's limit and bounded by the pixel budgets: the canvas (4
+bytes a sheet pixel, 64 MB at the default), the strips (about 10 MB at
+most), the largest zoomed cell (no larger than the sheet), and, while the
+PNG is encoded, a demultiplied copy of the canvas and the PNG. At the
+defaults this fits the per-render figure in `docs/CLOUD_RUN.md` and is far
+inside the Linux address-space limit (`max_memory + 1 GiB`);
+`PSCAT_MCP_MAX_SHEET_PIXELS` is capped at 64,000,000 (8000 a side), which
+adds about 200 MB.
 
 **Failed cells.** A cell whose program raises an error or passes its
 limit is drawn as far as it got (its last page or the canvas so far), and

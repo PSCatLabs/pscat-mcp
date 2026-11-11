@@ -86,6 +86,13 @@ const DEFAULT_PAGE: (u32, u32) = (612, 792);
 /// `MIN_CELL_BUDGET`). A sheet whose cells cannot each have it is refused
 /// before it starts; one that runs short of it stops with `timeout`.
 pub const MIN_CELL_MS: u64 = 100;
+/// Time the plan leaves for what the worker does before the first cell:
+/// drawing the label and caption strips (a millisecond or two each) and
+/// allocating the sheet. The plan admits a sheet only when every cell can
+/// still have [`MIN_CELL_MS`] after it, and the worker shares out what is
+/// left once that work is done, so a sheet the plan admits does not run
+/// short of time before its first cell.
+pub const SETUP_RESERVE_MS: u64 = 250;
 /// Longest error message kept per cell, in bytes, so that 32 failed cells
 /// still fit a reply of about 24 KB.
 const MAX_CELL_MESSAGE_BYTES: usize = 240;
@@ -369,13 +376,17 @@ impl SheetParams {
                 ),
             ));
         }
-        if (n_cells as u64).saturating_mul(MIN_CELL_MS) > budget.time_ms {
+        if (n_cells as u64)
+            .saturating_mul(MIN_CELL_MS)
+            .saturating_add(SETUP_RESERVE_MS)
+            > budget.time_ms
+        {
             return Err(fail(
                 GenerateErrorCode::InvalidRequest,
                 "deadline",
                 format!(
                     "{n_cells} cells cannot each have {MIN_CELL_MS} ms within this server's {} ms \
-                     for a sheet; use fewer cells",
+                     for a sheet, after {SETUP_RESERVE_MS} ms to draw its labels; use fewer cells",
                     budget.time_ms
                 ),
             ));
@@ -1055,13 +1066,14 @@ mod tests {
             detail(json!({"entries": [{"source": src(13)}]})),
             ("source".into(), GenerateErrorCode::SourceTooLarge)
         );
-        // 4 cells x 100 ms fit 1000 ms; with 300 ms they do not
-        let tight = SheetBudget { time_ms: 300, ..b };
-        let f = refusal(
-            json!({"entries": [{"source": "", "dpi": [9, 9, 9, 9], "width": 10, "height": 10}]}),
-            &tight,
-        );
+        // 4 cells x 100 ms after the 250 ms setup reserve: 650 ms is
+        // enough, 649 ms is not.
+        let four = json!({"entries": [{"source": "", "dpi": [9, 9, 9, 9], "width": 10,
+                                       "height": 10}]});
+        plan(&params(four.clone()), &SheetBudget { time_ms: 650, ..b }).unwrap();
+        let f = refusal(four, &SheetBudget { time_ms: 649, ..b });
         assert_eq!(f.detail, "deadline", "{}", f.message);
+        assert!(f.message.contains("after 250 ms"), "{}", f.message);
         // a cell over the side limit, before or after zoom
         assert_eq!(
             detail(json!({"entries": [{"source": "", "width": 8000, "dpi": [73]}]})),

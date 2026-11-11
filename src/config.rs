@@ -12,6 +12,8 @@ use clap::Args;
 
 /// Hard per-side ceiling PSCat applies to every page.
 pub const PSCAT_MAX_SIDE_PX: u32 = 8000;
+/// The most pixels a review sheet can have: 8000 a side.
+pub const MAX_SHEET_PIXELS: u64 = 8000 * 8000;
 /// Bounds accepted for the `dpi` argument (the same as upstream pscat-mcp).
 pub const MIN_DPI: f64 = 9.0;
 /// Upper bound for `dpi`.
@@ -108,8 +110,12 @@ pub struct LimitsConfig {
     pub max_sheet_cell_pixels: Option<u64>,
 
     /// Most device pixels of the composed `review_sheet` image (width x
-    /// height; at most 8000 a side). Checked before execution. Defaults to
-    /// the page pixel limit, as the plugin's does.
+    /// height; at most 8000 a side, so at most 64,000,000). Checked before
+    /// execution. Defaults to the page pixel limit, as the plugin's does
+    /// (capped at 64,000,000). The worker holds the sheet (4 bytes a pixel)
+    /// beside every cell, and up to three copies of it while it encodes the
+    /// PNG; none of that is in a cell's memory limit (see
+    /// docs/CLOUD_RUN.md, "Sizing").
     #[arg(long, env = "PSCAT_MCP_MAX_SHEET_PIXELS")]
     pub max_sheet_pixels: Option<u64>,
 
@@ -175,7 +181,8 @@ impl LimitsConfig {
 
     /// Most device pixels of a composed sheet.
     pub fn sheet_pixels(&self) -> u64 {
-        self.max_sheet_pixels.unwrap_or(self.max_pixels)
+        self.max_sheet_pixels
+            .unwrap_or(self.max_pixels.min(MAX_SHEET_PIXELS))
     }
 
     /// The deadline of a whole sheet, in milliseconds.
@@ -273,6 +280,11 @@ impl LimitsConfig {
                         max-sheet-pixels and max-sheet-timeout-ms must be positive"
                     .into(),
             );
+        }
+        if self.sheet_pixels() > MAX_SHEET_PIXELS {
+            return Err(format!(
+                "max-sheet-pixels is at most {MAX_SHEET_PIXELS} (8000 pixels a side)"
+            ));
         }
         Ok(())
     }
@@ -426,6 +438,14 @@ mod tests {
         };
         assert_eq!(big.max_text_bytes(), 1 << 20);
         assert_eq!(big.sheet_pixels(), 1000);
+        // A page limit past what a sheet can be does not make the sheet's
+        // default invalid.
+        let huge = LimitsConfig {
+            max_pixels: 100_000_000,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(huge.sheet_pixels(), 64_000_000);
+        assert!(huge.check().is_ok());
         assert_eq!(big.sheet_time_budget(), Duration::from_millis(54_000));
         for bad in [
             LimitsConfig {
@@ -438,6 +458,10 @@ mod tests {
             },
             LimitsConfig {
                 max_sheet_timeout_ms: Some(0),
+                ..LimitsConfig::default()
+            },
+            LimitsConfig {
+                max_sheet_pixels: Some(64_000_001),
                 ..LimitsConfig::default()
             },
         ] {

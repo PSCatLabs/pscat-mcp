@@ -66,6 +66,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.tiny-skia-path]
 opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
 [profile.dev.package.flate2]
 opt-level = 3
 [profile.dev.package.miniz_oxide]
