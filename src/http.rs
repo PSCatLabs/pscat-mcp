@@ -179,7 +179,7 @@ pub fn router_with_capture(
     let body_limit = mcp_body_limit(limits.max_text_bytes());
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
     let mcp = StreamableHttpService::new(
-        move || Ok(PscatMcp::new(service.clone())),
+        move || Ok(PscatMcp::for_http(service.clone())),
         Arc::new(LocalSessionManager::default()),
         mcp_config,
     );

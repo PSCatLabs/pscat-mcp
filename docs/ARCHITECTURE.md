@@ -320,6 +320,9 @@ the cells, and its result is a `SheetToolOutput`, not the
 `RenderToolOutput` `render_result` declares.
 
 **Running.** A job is a Tokio task, detached from the call that started it.
+A drop guard in the task finishes the job as `worker_failed` if the task
+panics or is dropped (the runtime shutting down) before it records an end,
+so the job leaves the caps and its reservation is released.
 It waits for a running-job permit (`--max-running-jobs`, below the render
 slots so a synchronous call always has one), then for a render slot from
 the same FIFO semaphore as every other call, without the queue timeout, and
@@ -330,16 +333,24 @@ client's `notifications/cancelled`. A queued job never starts. Shutdown (the
 stdio session's end, or the HTTP grace period's) kills every unfinished job
 and waits up to 2 s; jobs are not drained.
 
-**Ownership and ids.** The owner is the principal: over HTTP the `auth`
-layer's `Principal` (`token#N`, never token material), read from the
-`http::request::Parts` rmcp puts in the request extensions; over stdio the
-single local user. An HTTP request with no principal is refused rather than
-given the local identity. A lookup by any other owner is the same
+**Ownership and ids.** The owner is the principal. Each handler is built
+for one transport (`PscatMcp::new` for stdio, `PscatMcp::for_http`), so the
+handler, not the shape of the request, decides: over stdio the single local
+user; over HTTP the `auth` layer's `Principal` (`token#N`, never token
+material), read from the `http::request::Parts` rmcp puts in the request
+extensions, and a request with no `Parts` or no `Principal` is refused.
+`token#N` is the token's position in the list read at startup; it is stable
+because the list never changes while the process runs (and a restart loses
+every job). If tokens are ever reloaded at run time, the owner has to become
+stable per token, for example an HMAC of the token under a key generated at
+process start. Under `--allow-unauthenticated` (loopback only) every caller
+is `anonymous`, one shared owner. A lookup by any other owner is the same
 `unknown_job` (Tasks: rmcp's `invalid_params` "unknown task") as an unknown
 id. Ids are UUID v4.
 
 **Limits.** Unfinished jobs per principal and in all (`server_busy`). A
-results budget: a job reserves the largest result it can have
+results budget (at the defaults about 11 reservations fit in 128 MiB, so
+the budget binds before the total cap of 16): a job reserves the largest result it can have
 (`max_output_bytes` as base64, the stdout limit and 4 KiB) when it is
 accepted, and once finished keeps what it holds (its base64 artifacts and
 stdout, or its error, plus 4 KiB); a job that does not fit is

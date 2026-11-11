@@ -17,7 +17,7 @@ use pscat_mcp::auth::{Authenticator, BearerTokenAuth};
 use pscat_mcp::backend::SubprocessBackend;
 use pscat_mcp::config::{HttpConfig, JobsConfig, LimitsConfig};
 use pscat_mcp::http::{mcp_server_config, router};
-use pscat_mcp::mcp::PscatMcp;
+use pscat_mcp::mcp::{PscatMcp, Transport};
 use pscat_mcp::render::RenderService;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ClientCapabilities,
@@ -543,6 +543,112 @@ async fn shutdown_kills_running_jobs() {
     .await;
     assert_eq!(error_code(&r), "server_busy", "{r}");
     client.cancel().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http_handler_without_a_principal_owns_nothing() {
+    // An HTTP handler reached without the auth layer (no request parts, so
+    // no principal) is refused rather than given the local identity.
+    let svc = service(limits(), jobs(), &tag());
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    let server = PscatMcp::with_transport(svc.clone(), Transport::Http);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let client = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::from_build_env(),
+    )
+    .serve(client_io)
+    .await
+    .unwrap();
+    let r = call(
+        &client,
+        "start_render",
+        json!({ "source": QUICK_BLUE, "width": 20, "height": 10 }),
+    )
+    .await;
+    assert_eq!(error_code(&r), "invalid_request", "{r}");
+    assert!(
+        structured(&r)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no authenticated client"),
+        "{r}"
+    );
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 0);
+    let r = call(&client, "render_status", json!({ "job_id": "x" })).await;
+    assert_eq!(error_code(&r), "invalid_request", "{r}");
+    client.cancel().await.ok();
+}
+
+/// The real `serve-stdio` binary, started through a symlink whose path
+/// carries a unique tag: the server and every worker it starts (the
+/// worker executable is the same link) can be found with `pgrep -f`.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_stdin_kills_a_running_job_before_the_server_exits() {
+    let tag = tag();
+    let dir = std::env::temp_dir().join(&tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("pscat-mcp-server");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_pscat-mcp-server"), &exe).unwrap();
+    let mut child = tokio::process::Command::new(&exe)
+        .arg("serve-stdio")
+        .env("PSCAT_MCP_WORKER_EXE", &exe)
+        .env("PSCAT_MCP_MAX_STEPS", "0")
+        .env("PSCAT_MCP_INTERP_TIME_LIMIT_MS", "0")
+        .env("PSCAT_MCP_JOB_TIMEOUT_MS", "60000")
+        .env("PSCAT_MCP_LOG_FORMAT", "pretty")
+        .env("RUST_LOG", "warn")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let client = ().serve((stdout, stdin)).await.expect("initialize");
+    let workers = |tag: &str| {
+        let out = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(format!("{tag}/pscat-mcp-server render-worker"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    };
+    let r = client
+        .call_tool(params(
+            "start_render",
+            json!({ "source": FOREVER, "width": 20, "height": 10 }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    wait_for(
+        "the job's worker runs",
+        Duration::from_secs(10),
+        async || workers(&tag) == 1,
+    )
+    .await;
+
+    // Close the server's stdin: the session ends, the job is killed, and
+    // only then does the server exit.
+    drop(client);
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("the server exits")
+        .unwrap();
+    assert!(status.success(), "{status}");
+    // The worker was SIGKILLed before the server exited; give the kernel a
+    // moment to reap it.
+    wait_for("no worker left", Duration::from_secs(2), async || {
+        workers(&tag) == 0
+    })
+    .await;
+    assert_eq!(processes_with(&tag), 0, "nothing tagged survives");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ------------------------------------------------------------- the tool list

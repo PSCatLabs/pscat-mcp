@@ -65,6 +65,9 @@ This document lists what that deployment must get right for this image.
   64,000,000) adds 4 bytes a sheet pixel above 16,000,000 to the figure (at
   64,000,000: about 200 MB more per sheet). The worker's address-space
   limit on Linux, `max_memory + 1 GiB` by default, covers it either way.
+  With async jobs on (`PSCAT_MCP_ASYNC_JOBS`, see below), add
+  `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (128 MiB by default): job results
+  waiting to be fetched live in the server process, not in a worker.
 * **CPU.** One vCPU per concurrent render. Rendering is CPU-bound and
   single-threaded.
 * **Request timeout.** The Cloud Run request timeout must be more than

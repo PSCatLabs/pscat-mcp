@@ -120,7 +120,12 @@ How it behaves:
 * **Ownership.** A job belongs to the client that started it: the bearer
   token over HTTP (its position in the configured list, never the token),
   the local user over stdio. Any other client gets the same `unknown_job`
-  (or "unknown task") as for an id that never existed.
+  (or "unknown task") as for an id that never existed. Tokens are read once
+  at startup, so a position names the same token for the life of the
+  process (and its jobs). With `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback
+  only) and async jobs, every caller is `anonymous` and they all share one
+  owner: any of them can see, fetch and cancel the others' jobs, and the
+  per-client cap is shared.
 * **Render slots.** A job holds one render slot while it runs, shared with
   synchronous calls. At most `PSCAT_MCP_MAX_RUNNING_JOBS` jobs run at once
   (half the slots by default, and always fewer than the slots, so a
@@ -132,7 +137,12 @@ How it behaves:
   are held in memory: a job reserves its largest possible result
   (`PSCAT_MCP_MAX_OUTPUT_BYTES` as base64, plus stdout) when it is accepted
   and keeps what it produced once it finishes, all against
-  `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (`results_budget_exceeded`). A
+  `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (`results_budget_exceeded`). At the
+  defaults a reservation is about 11 MiB, so the 128 MiB budget holds about
+  11 unfinished jobs: past that, `results_budget_exceeded` comes before the
+  total cap of 16 (`server_busy`), and the budget, not the cap, is what
+  bounds memory. Raise the budget to about 180 MiB for the cap to bind
+  first, or lower `PSCAT_MCP_MAX_OUTPUT_BYTES` to shrink each reservation. A
   finished job is kept for `PSCAT_MCP_JOB_RESULT_TTL_MS` (an hour, as in
   the plugin) and can be fetched again until then; when the budget is short,
   results already fetched are dropped first.
@@ -145,7 +155,9 @@ How it behaves:
   would stop a busy program long before the deadline). Every other limit
   (memory, pixels, pages, output) is the render's.
 * **Shutdown.** Running jobs are killed (not drained) when the stdio client
-  disconnects or after the HTTP grace period; their results are lost.
+  disconnects (closes the server's stdin) or after the HTTP grace period,
+  and the server waits for them to stop before it exits; their results are
+  lost.
 * **Hosted HTTP.** Off by default (`PSCAT_MCP_ASYNC_JOBS=false`): with it
   off the four tools are not listed and the Tasks extension is not
   advertised. The store is in memory, so it only works on **one instance

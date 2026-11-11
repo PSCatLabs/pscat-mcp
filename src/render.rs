@@ -692,6 +692,15 @@ impl RenderService {
         job: WorkerJob,
         cancel: tokio_util::sync::CancellationToken,
     ) {
+        // Finishes the job as `worker_failed` if this task never reaches the
+        // `finish` below: a panic, or the task dropped (the runtime shutting
+        // down). The job then leaves the caps and keeps only its error
+        // against the budget, and `unfinished` counts it no more.
+        let mut guard = FinishOnDrop {
+            service: Arc::clone(&self),
+            id: id.clone(),
+            armed: true,
+        };
         let deadline = self.jobs.config().job_timeout();
         let work = async {
             // A running-job permit first, then a render slot shared with
@@ -717,6 +726,7 @@ impl RenderService {
             self.counters.jobs_cancelled.fetch_add(1, Ordering::Relaxed);
             tracing::info!("async job cancelled");
         }
+        guard.armed = false;
         self.jobs.finish(&id, outcome);
     }
 
@@ -916,6 +926,29 @@ impl RenderService {
                 tracing::error!(error = %e, "render worker failed");
                 Err(RenderError::new(ErrorCode::WorkerFailed, e.to_string()))
             }
+        }
+    }
+}
+
+/// See [`RenderService::run_async_job`].
+struct FinishOnDrop {
+    service: Arc<RenderService>,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            tracing::error!("async job stopped before it finished; recorded as worker_failed");
+            self.service.jobs.finish(
+                &self.id,
+                Some(Err(RenderError::new(
+                    ErrorCode::WorkerFailed,
+                    "the job stopped before it finished (an internal error, or the server \
+                     shutting down)",
+                ))),
+            );
         }
     }
 }
@@ -1169,6 +1202,97 @@ mod tests {
             })),
             ..WorkerResult::empty()
         })
+    }
+
+    /// A backend whose job never ends, or panics.
+    struct Stuck {
+        panic: bool,
+    }
+
+    impl RenderBackend for Stuck {
+        fn execute(
+            &self,
+            _job: WorkerJob,
+            _deadline: std::time::Duration,
+        ) -> crate::backend::BackendFuture<'_> {
+            let panic = self.panic;
+            Box::pin(async move {
+                if panic {
+                    panic!("backend panic (test)");
+                }
+                std::future::pending().await
+            })
+        }
+    }
+
+    fn job_service(panic: bool) -> Arc<RenderService> {
+        Arc::new(
+            RenderService::new(Arc::new(Stuck { panic }), LimitsConfig::default())
+                .with_jobs(JobsConfig::default().enabled()),
+        )
+    }
+
+    fn job_req() -> JobRequest {
+        JobRequest::Render(req("showpage"))
+    }
+
+    /// After a job's task died, the store holds it as `worker_failed`, with
+    /// only its small error charged and no cap slot taken.
+    fn assert_failed_cleanly(svc: &RenderService, id: &str) {
+        let status = svc.jobs().status("p", id).unwrap();
+        assert_eq!(status.state, crate::jobs::JobState::Failed);
+        assert_eq!(
+            status.job_error.as_ref().map(|e| e.code),
+            Some(ErrorCode::WorkerFailed)
+        );
+        assert_eq!(svc.jobs().unfinished(), 0);
+        assert!(svc.jobs().charged_bytes() < 8192, "reservation released");
+        // Its slot in the caps is free: the per-client cap of 4 allows 4 more.
+        for _ in 0..4 {
+            svc.jobs().insert("p", "render_postscript").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_job_dropped_with_the_runtime_is_finished() {
+        let svc = job_service(false);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let id = rt.block_on(async {
+            let status = svc.start_job("p", job_req()).unwrap();
+            // Let the job reach its worker, which never returns.
+            for _ in 0..100 {
+                if svc.jobs().status("p", &status.job_id).unwrap().state
+                    == crate::jobs::JobState::Running
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            status.job_id
+        });
+        assert_eq!(
+            svc.jobs().status("p", &id).unwrap().state,
+            crate::jobs::JobState::Running
+        );
+        // Shutting the runtime down drops the job's task mid-render.
+        drop(rt);
+        assert_failed_cleanly(&svc, &id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_job_whose_task_panics_is_finished() {
+        let svc = job_service(true);
+        let id = svc.start_job("p", job_req()).unwrap().job_id;
+        for _ in 0..200 {
+            if svc.jobs().unfinished() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_failed_cleanly(&svc, &id);
     }
 
     #[tokio::test]

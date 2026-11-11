@@ -680,10 +680,22 @@ pub struct RendererInfo {
     pub capabilities: Vec<String>,
 }
 
+/// Which transport a handler serves. It decides who owns an async job: the
+/// one local user over stdio, the authenticated principal over HTTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// One local user (`serve-stdio`, or an in-process pipe).
+    Stdio,
+    /// Streamable HTTP behind the auth layer: every request must carry the
+    /// authenticated `Principal`, or it cannot own or see a job.
+    Http,
+}
+
 /// The MCP server handler shared by the stdio and HTTP transports.
 #[derive(Clone)]
 pub struct PscatMcp {
     service: Arc<RenderService>,
+    transport: Transport,
     tool_router: ToolRouter<Self>,
     guide: Arc<Guide>,
 }
@@ -700,8 +712,20 @@ impl From<CapabilitiesArgs> for CatalogQuery {
 }
 
 impl PscatMcp {
-    /// A handler over `service`.
+    /// A stdio handler over `service`: every call is the one local user's.
+    /// HTTP uses [`PscatMcp::for_http`].
     pub fn new(service: Arc<RenderService>) -> Self {
+        Self::with_transport(service, Transport::Stdio)
+    }
+
+    /// An HTTP handler over `service`: job calls need the authenticated
+    /// principal the auth layer puts in the request.
+    pub fn for_http(service: Arc<RenderService>) -> Self {
+        Self::with_transport(service, Transport::Http)
+    }
+
+    /// A handler over `service` for `transport`.
+    pub fn with_transport(service: Arc<RenderService>, transport: Transport) -> Self {
         let mut tool_router = Self::tool_router();
         let limits = service.limits();
         if let Some(route) = tool_router.map.get_mut("render_postscript") {
@@ -839,6 +863,7 @@ impl PscatMcp {
         };
         PscatMcp {
             service,
+            transport,
             tool_router,
             guide: Arc::new(Guide::new(&facts)),
         }
@@ -1239,7 +1264,7 @@ impl PscatMcp {
         Parameters(args): Parameters<RenderArgs>,
         ext: Extensions,
     ) -> CallToolResult {
-        let started = principal(&ext).and_then(|owner| {
+        let started = principal(self.transport, &ext).and_then(|owner| {
             self.service
                 .start_job(&owner, JobRequest::Render(args.into_request()))
         });
@@ -1278,7 +1303,9 @@ impl PscatMcp {
         Parameters(args): Parameters<JobIdArgs>,
         ext: Extensions,
     ) -> CallToolResult {
-        match principal(&ext).and_then(|owner| self.service.jobs().status(&owner, &args.job_id)) {
+        match principal(self.transport, &ext)
+            .and_then(|owner| self.service.jobs().status(&owner, &args.job_id))
+        {
             Ok(status) => job_success(status, None),
             Err(err) => job_failure("No job status", err),
         }
@@ -1306,7 +1333,9 @@ impl PscatMcp {
         Parameters(args): Parameters<JobIdArgs>,
         ext: Extensions,
     ) -> CallToolResult {
-        match principal(&ext).and_then(|owner| self.service.jobs().result(&owner, &args.job_id)) {
+        match principal(self.transport, &ext)
+            .and_then(|owner| self.service.jobs().result(&owner, &args.job_id))
+        {
             Ok(result) => job_result(result),
             Err(err) => failure_with("No render result", err),
         }
@@ -1332,7 +1361,7 @@ impl PscatMcp {
         Parameters(args): Parameters<JobIdArgs>,
         ext: Extensions,
     ) -> CallToolResult {
-        let owner = match principal(&ext) {
+        let owner = match principal(self.transport, &ext) {
             Ok(owner) => owner,
             Err(err) => return job_failure("Job not cancelled", err),
         };
@@ -1378,7 +1407,7 @@ impl ServerHandler for PscatMcp {
                 .client_capabilities()
                 .is_some_and(|caps| caps.supports_tasks());
         if wants_task && let Some(job) = task_request(&request) {
-            let started = principal(&context.extensions)
+            let started = principal(self.transport, &context.extensions)
                 .and_then(|owner| self.service.start_job(&owner, job));
             return Ok(match started {
                 Ok(status) => CallToolResponse::Task(CreateTaskResult::new(task_of(
@@ -1404,7 +1433,7 @@ impl ServerHandler for PscatMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, ErrorData> {
         let jobs = self.service.jobs();
-        let (status, result) = principal(&context.extensions)
+        let (status, result) = principal(self.transport, &context.extensions)
             .and_then(|owner| jobs.status_and_result(&owner, &request.task_id))
             .map_err(|_| unknown_task(&request.task_id))?;
         let payload = match (status.state, result) {
@@ -1427,7 +1456,7 @@ impl ServerHandler for PscatMcp {
         request: CancelTaskParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
-        principal(&context.extensions)
+        principal(self.transport, &context.extensions)
             .and_then(|owner| self.service.jobs().request_cancel(&owner, &request.task_id))
             .map_err(|_| unknown_task(&request.task_id))
     }
@@ -1439,7 +1468,7 @@ impl ServerHandler for PscatMcp {
     ) -> Result<(), ErrorData> {
         // A render never asks for input, so every response is for an
         // unknown key and is ignored, as the extension requires.
-        principal(&context.extensions)
+        principal(self.transport, &context.extensions)
             .and_then(|owner| self.service.jobs().status(&owner, &request.task_id))
             .map(|_| ())
             .map_err(|_| unknown_task(&request.task_id))
@@ -1537,15 +1566,28 @@ const JOB_TOOLS: [&str; 4] = [
 /// deadline (`review_sheet`'s plan shares out its own deadline).
 const TASK_TOOLS: [&str; 3] = ["render_postscript", "chalkboard_math", "handwrite"];
 
-/// Who is calling: the authenticated principal over HTTP (the auth layer
-/// puts it in the request's extensions), the local user over stdio. An HTTP
-/// request without one is refused rather than given the local identity.
-fn principal(ext: &Extensions) -> Result<String, RenderError> {
-    match ext.get::<http::request::Parts>() {
-        None => Ok(LOCAL_PRINCIPAL.to_string()),
-        Some(parts) => parts
-            .extensions
-            .get::<crate::auth::Principal>()
+/// Who is calling, as the owner of async jobs.
+///
+/// * stdio: the one local user.
+/// * HTTP: the `Principal` the auth layer put in the request's extensions
+///   (rmcp passes the request's `http::request::Parts` on). A request with
+///   no `Parts` or no `Principal` is refused: it never gets the local
+///   identity.
+///
+/// The owner is the principal's id: `token#N`, the token's position in the
+/// configured list, or `anonymous` under `--allow-unauthenticated` (loopback
+/// only), where every caller shares one owner. This relies on the token list
+/// never changing while the process runs: tokens are read once at startup,
+/// and a restart loses every job anyway. If tokens are ever reloaded at run
+/// time, the owner must become stable per token (for example an HMAC of the
+/// token under a key generated at process start), or a job could pass to
+/// whichever token takes its old position.
+fn principal(transport: Transport, ext: &Extensions) -> Result<String, RenderError> {
+    match transport {
+        Transport::Stdio => Ok(LOCAL_PRINCIPAL.to_string()),
+        Transport::Http => ext
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::auth::Principal>())
             .map(|p| p.id.clone())
             .ok_or_else(|| {
                 RenderError::new(
