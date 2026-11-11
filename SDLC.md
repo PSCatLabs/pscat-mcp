@@ -65,9 +65,17 @@ this file is the rule here.
 9. **Squash-merge** once CI is green on the final commit and the review
    findings are resolved. The squash message summarises the change and
    ends with the commit trailers below.
-10. **Clean up after the merge.** Pull `main`, remove the worktree
-    (`git worktree remove --force`) and the local branch, and confirm the
-    issue closed. GitHub deletes the remote branch on merge.
+10. **Check `main` after the merge.** A branch doesn't have to be up to
+    date to merge, so two PRs merged one after the other are never tested
+    together. A push to `main` also publishes the container image.
+    Confirm that the `CI` and `Container image` runs for the merge commit
+    pass. If either fails, stop and report it before merging anything
+    else. When two open PRs touch the same files, merge `origin/main` into
+    the second and wait for green CI before merging it.
+11. **Clean up.** Pull `main`, remove the worktree
+    (`git worktree remove --force`) and the local branch, remove the
+    `in-progress` and `in-review` labels, and confirm the issue closed.
+    GitHub deletes the remote branch on merge.
 
 ### Commit and PR attribution
 
@@ -105,7 +113,8 @@ The coordinating session merges, after CI is green and the advisor
 review is resolved. Implementation agents open PRs and fix review
 findings. They don't merge, close or approve PRs or issues.
 
-The owner merges, or approves in the session that merges:
+The owner merges, or approves in the session that merges, these (a
+default the owner can change):
 * anything that changes repository or organisation settings;
 * anything that publishes beyond the private image, such as making the
   GHCR package public or tagging a `v*` release.
@@ -161,8 +170,9 @@ Add a proposal, the design notes and the open questions when they help.
 A metric in the issue, such as a byte budget or a timing, sits beside
 the acceptance check, never in place of it.
 
-**Labels in flight.** `in-progress` marks an issue being worked on, and
-`in-review` marks one with an open PR. Remove both once the PR merges.
+**Labels in flight.** The coordinator adds `in-progress` when an agent
+starts on an issue, and swaps it for `in-review` when the PR opens. Both
+are removed once the PR merges.
 `deferred` parks an issue until the owner revives it.
 
 ## Dispatching several issues
@@ -186,10 +196,11 @@ When the coordinating session runs issues through implementation agents:
   in its final report, with the user-visible impact of each and suggested
   labels. The coordinator files those whose impact is real. Polish goes
   into an existing issue or is dropped.
-* **Every agent prompt** points to the common brief, which covers the
-  environment, design rules, gates, conventions and what not to do. The
-  prompt adds the issue number, the agent's files, and anything the
-  issue can't say.
+* **Every agent prompt** points to [`docs/AGENT_BRIEF.md`](docs/AGENT_BRIEF.md),
+  which covers the code layout, environment, design rules, gates,
+  conventions and what not to do. The prompt adds the issue number, the
+  agent's files, the machine-specific settings (such as `CARGO_HOME`),
+  whether live evals are allowed, and anything the issue can't say.
 
 ## Environment and cost rules
 

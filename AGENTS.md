@@ -1,5 +1,10 @@
 # pscat-mcp: notes for agents
 
+This file is read by Codex and other agents; `CLAUDE.md` imports it for
+Claude Code.
+
+* **Implementing an issue:** read [`docs/AGENT_BRIEF.md`](docs/AGENT_BRIEF.md)
+  first: code layout, environment, design rules, gates and don'ts.
 * **Process:** read [`SDLC.md`](SDLC.md) before starting work. It covers
   the issue, worktree branch, PR, review and squash-merge lifecycle, the
   required CI checks, issue labels (`priority:`, `difficulty:`, `model:`)
