@@ -192,6 +192,42 @@ class DescribeCapabilities(unittest.TestCase):
         self.assertFalse(results["full entry for named procedure (any)"])
 
 
+class TriagedCases(unittest.TestCase):
+    """Case changes from the #44 triage, on synthetic transcripts."""
+
+    @staticmethod
+    def render(source, ok=True, code=None):
+        c = tx.ToolCall("1", "mcp__pscat-render__render_postscript", SERVER, "render_postscript", {"source": source})
+        structured = {"ok": ok} if ok else {"ok": False, "error": {"code": code, "message": "m"}}
+        c.result = {
+            "is_error": not ok,
+            "text": json.dumps(structured),
+            "content_types": ["image"] if ok else ["text"],
+            "structured": structured,
+        }
+        return c
+
+    def passes(self, case_id, calls, answer):
+        t = tx.Transcript(agent="claude", calls=calls, answer=answer, completed=True, stop="success", num_turns=2)
+        return all(c.ok for c in tx.evaluate_case(case(case_id), t, SERVER, CTX, "stdio"))
+
+    def test_diagram_without_showpage_passes(self):
+        # render_postscript returns the current page of a program that
+        # never calls showpage, so the final source need not contain it.
+        src = "/Helvetica findfont 12 scalefont setfont 10 10 moveto (Box) show"
+        self.assertTrue(self.passes("diagram", [self.render(src)], "Here it is."))
+        self.assertFalse(self.passes("diagram", [self.render("0 0 moveto (x) show")], "Here it is."))
+
+    def test_huge_source_shortened_copy_must_be_disclosed(self):
+        short = "%!PS\n" + "0 0 moveto 1 1 lineto stroke\n" * 10 + "showpage\n"
+        told = "I rendered a shortened copy with 10 repeats, not the exact file."
+        silent = "The render succeeded: one blank-looking page with a tiny diagonal line."
+        self.assertTrue(self.passes("huge-source", [self.render(short)], told))
+        self.assertFalse(self.passes("huge-source", [self.render(short)], silent))
+        rejected = self.render("x", ok=False, code="source_too_large")
+        self.assertTrue(self.passes("huge-source", [rejected], "Too big; use a loop instead."))
+
+
 class Matchers(unittest.TestCase):
     def m(self, spec, value=tx._MISSING):
         return tx.match_value(spec, value)[0]

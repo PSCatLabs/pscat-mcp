@@ -17,8 +17,7 @@
         "args": {
           "source": {
             "contains": [
-              "Helvetica",
-              "showpage"
+              "Helvetica"
             ]
           }
         },
@@ -30,5 +29,6 @@
         }
       }
     ]
-  }
+  },
+  "notes": "showpage is not required: render_postscript returns the current page of a program that never calls it (#44 triage)."
 }
