@@ -160,6 +160,15 @@ fn validate_scenario(sc: &Scenario) -> Result<(), String> {
             if c.get("tool").and_then(Value::as_str).is_none() {
                 return Err(format!("step {i}: a call needs a tool"));
             }
+            // A parallel call only has these; its result is the group's.
+            if obj.contains_key("parallel")
+                && let Some(co) = c.as_object()
+                && let Some(k) = co
+                    .keys()
+                    .find(|k| !["tool", "args", "delay_ms"].contains(&k.as_str()))
+            {
+                return Err(format!("step {i}: unknown key {k:?} in a parallel call"));
+            }
         }
         if let Some(Value::Object(r)) = obj.get("result") {
             for k in r.keys() {
@@ -1009,8 +1018,31 @@ async fn renders_since(server: &Server, base: usize, want: usize) -> usize {
     server.renders.load(Ordering::SeqCst) - base
 }
 
+/// Wait until the render count has stopped changing. The log is read
+/// asynchronously (through `docker logs -f` for a container), so a render
+/// from an earlier step can still be on its way and must not be counted in
+/// the next step's window.
+async fn settle_render_count(server: &Server) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last = server.renders.load(Ordering::SeqCst);
+    let mut since = Instant::now();
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let now = server.renders.load(Ordering::SeqCst);
+        if now != last {
+            last = now;
+            since = Instant::now();
+        } else if since.elapsed() >= Duration::from_millis(250) {
+            return;
+        }
+    }
+}
+
 async fn run_step(server: &Server, step: &Value) -> Result<(u128, Vec<String>), String> {
     let spec = expand(step.get("result").unwrap_or(&json!({})))?;
+    if spec.get("renders_executed").is_some() {
+        settle_render_count(server).await;
+    }
     let base = server.renders.load(Ordering::SeqCst);
     let started = Instant::now();
     let mut problems = Vec::new();
@@ -1256,19 +1288,22 @@ fn report(target: &str, rows: &[StepRow]) -> String {
     if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY")
         && let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path)
     {
+        // One write, so the stdio and HTTP tables cannot interleave.
         use std::io::Write as _;
-        let _ = writeln!(f, "### Server evals over {target}\n");
-        let _ = writeln!(f, "| scenario | step | result | ms |\n|---|---|---|---|");
+        let mut md = format!(
+            "### Server evals over {target}\n\n| scenario | step | result | ms |\n|---|---|---|---|\n"
+        );
         for r in rows {
-            let _ = writeln!(
-                f,
-                "| {} | {} | {} | {} |",
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
                 r.scenario,
                 r.step,
                 if r.ok { "pass" } else { "**FAIL**" },
                 r.elapsed_ms
-            );
+            ));
         }
+        md.push('\n');
+        let _ = f.write_all(md.as_bytes());
     }
     table
 }

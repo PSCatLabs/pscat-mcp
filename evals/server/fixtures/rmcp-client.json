@@ -5,7 +5,7 @@
     "version": "3.9.0"
   },
   "obtained": "real-capture",
-  "how": "rmcp 3.9.0 client (the Rust MCP SDK Codex is built on) against serve-http --capture-file: initialize, tools/list, two tools/call; cargo test --test eval_replay record_rmcp_client_traffic -- --ignored",
+  "how": "rmcp 3.9.0 client (the Rust MCP SDK; Codex's binary contains rmcp-client source paths, so it probably uses it) against serve-http --capture-file: initialize, tools/list, two tools/call; cargo test --test eval_replay record_rmcp_client_traffic -- --ignored",
   "captured_on": "2026-11-10",
   "requests": [
     {

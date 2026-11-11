@@ -5,7 +5,7 @@
     "version": "0.167.1"
   },
   "obtained": "synthesized",
-  "how": "derived from the rmcp-client capture: Codex's MCP client is built on rmcp (its binary contains rmcp-client and the user agent codex-mcp-client/0.167.1), but Codex itself was not run (its usage limit is exhausted), so the exact headers, protocol version and clientInfo it sends are NOT captured",
+  "how": "derived from the rmcp-client capture: Codex's binary contains rmcp-client source paths and the user agent codex-mcp-client/0.167.1, so its MCP client probably builds on rmcp, but Codex itself was not run (its usage limit is exhausted), so the exact headers, protocol version and clientInfo it sends are NOT captured",
   "captured_on": "2026-11-10",
   "requests": [
     {
