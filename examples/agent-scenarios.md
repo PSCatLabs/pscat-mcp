@@ -11,7 +11,7 @@ The server exposes four tools:
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
-| `describe_art_capabilities` | none | Text naming every capability by kind; `structuredContent` `{ok, pscat_version, catalog_signature, font_packs{pinned_index?,installed[],overrides[],available[]}, capabilities[]{name,kind,description,parameters[]{name,description,default},source,load,example,availability}, renderer}` |
+| `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent`. None: `{view:"index", index[]{kind,count,names[]}, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
 
 Every failure is `isError: true` with a text explanation and
@@ -318,6 +318,8 @@ HTTP).
 
 ```json
 { "name": "describe_art_capabilities", "arguments": {} }
+{ "name": "describe_art_capabilities", "arguments": { "kind": "template" } }
+{ "name": "describe_art_capabilities", "arguments": { "names": ["pgcard"] } }
 ```
 
 then `render_postscript` with a `source` that starts with the `load` line of
@@ -326,17 +328,21 @@ and passes a palette name from the catalog.
 
 **Expected result**
 
-- The first call returns `ok: true` with `capabilities` containing entries of
-  kind `template` (`pgcard`, `pgcertificate`, `pginvitation`, `pgletter`,
-  `pgposter`), `palette` (for example `acid`, `brass`), `font`, `type3_face`,
-  `procedure` and `operator`. Each template lists its dict keys under
-  `parameters` and the `run` lines it needs under `load`.
+- The first call returns `ok: true`, `view: "index"` with the kinds
+  `font`, `type3_face`, `palette`, `template`, `procedure`, `operator` and
+  `dial`, each with its names (templates `pgcard`, `pgcertificate`,
+  `pginvitation`, `pgletter`, `pgposter`; palettes such as `acid`, `brass`).
+  The reply is about 5 KB.
+- `kind: "template"` lists the five with a one-line description each.
+- `names: ["pgcard"]` returns the full entry: its dict keys under
+  `parameters` and the `run` lines it needs under `load`. A made-up name in
+  `names` comes back under `not_found`, and the call still succeeds.
 - No entry or text carries a server file path, and `font_packs.installed`
   has no `path` fields.
 - The agent uses only names from the catalog, and the render returns a PNG
   with `ok: true`.
 
-This case is covered by `tests/mcp_stdio.rs` (catalog structure, no paths,
+This case is covered by `tests/mcp_stdio.rs` (the three views and their size ceilings, no paths,
 `pgcard` rendering from its `load` line); it has not been run through an
 agent against the container image.
 

@@ -61,8 +61,14 @@ are the first thing to re-check when bumping the pin:
   worker computes it (`JobMode::Capabilities`): the worker's environment is
   cleared and its working directory is `/`, which is what renders see, and the
   scan runs under the same deadline and rlimits as a render. It takes a
-  render slot. Nothing is cached: the call costs one worker start. The
-  font-pack status contains directories, which `pscat_extras` removes.
+  render slot. `RenderService` keeps the parsed catalog after the first
+  successful fetch (the worker's environment is fixed, so it is too; a failed
+  fetch is not kept), so later calls start no worker. The font-pack status
+  contains directories, which `pscat_extras` removes. The catalog is about
+  280 KB, so `src/catalog.rs` filters it in the server into three bounded
+  views (index, one kind's names with truncated descriptions, full entries
+  for up to 20 names within a byte budget), each under 24 KB as structured
+  content and as text.
 
 The library runs **inside a child process**, not in the server, because:
 

@@ -454,6 +454,8 @@ async fn argument_type_errors_get_the_structured_envelope() {
         ),
         ("render_postscript", json!({"format": "png"})),
         ("validate_postscript", json!({"source": 42})),
+        ("describe_art_capabilities", json!({"names": "pgcard"})),
+        ("describe_art_capabilities", json!({"offset": -1})),
         (
             "render_postscript",
             json!({"source": "showpage", "width": "x".repeat(100_000)}),
@@ -586,22 +588,47 @@ async fn reports_renderer_info() {
     client.cancel().await.ok();
 }
 
-/// `describe_art_capabilities` reads PSCat's catalog in a worker process and
-/// returns it as structured content that matches the declared schema.
-#[tokio::test]
-async fn describes_art_capabilities() {
-    let client = start().await;
-    let tool = tools(&client)
+/// What every `describe_art_capabilities` reply stays under, in both its
+/// structured and its text form.
+const REPLY_CEILING: usize = 24 * 1024;
+
+/// Assert the reply is within the ceiling in both forms; returns the
+/// (structured, text) sizes.
+fn assert_reply_size(r: &CallToolResult) -> (usize, usize) {
+    let structured_bytes = structured(r).to_string().len();
+    let text_bytes = text_of(r).len();
+    assert!(
+        structured_bytes < REPLY_CEILING,
+        "structuredContent is {structured_bytes} bytes"
+    );
+    assert!(text_bytes < REPLY_CEILING, "text is {text_bytes} bytes");
+    (structured_bytes, text_bytes)
+}
+
+async fn capabilities_tool(client: &Client) -> Tool {
+    tools(client)
         .await
         .into_iter()
         .find(|t| t.name == "describe_art_capabilities")
-        .unwrap();
-    assert!(
-        tool.input_schema["properties"]
-            .as_object()
-            .is_none_or(|p| p.is_empty()),
-        "takes no arguments"
-    );
+        .unwrap()
+}
+
+/// The kinds the tool accepts, from its input schema.
+fn kind_enum(tool: &Tool) -> Vec<String> {
+    tool.input_schema["properties"]["kind"]["enum"]
+        .as_array()
+        .expect("kind enum")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// With no arguments the tool returns a compact index of every kind, read
+/// in a worker, as structured content that matches the declared schema.
+#[tokio::test]
+async fn describes_art_capabilities_as_an_index() {
+    let client = start().await;
+    let tool = capabilities_tool(&client).await;
     let schema = tool.output_schema.as_ref().unwrap();
 
     let r = call(&client, "describe_art_capabilities", json!({})).await;
@@ -609,21 +636,19 @@ async fn describes_art_capabilities() {
     assert!(!has_image(&r));
     let s = structured(&r);
     assert_eq!(s["ok"], true);
+    assert_eq!(s["view"], "index");
     assert_conforms(schema, s);
+    let (structured_bytes, text_bytes) = assert_reply_size(&r);
+    eprintln!("index reply: {structured_bytes} structured bytes, {text_bytes} text bytes");
     assert_eq!(s["renderer"]["engine"], "pscat");
-
-    // The catalog comes from the linked PSCat build.
     assert_eq!(s["pscat_version"], s["renderer"]["version"]);
     assert_eq!(s["catalog_signature"].as_str().unwrap().len(), 16);
+    assert!(s.get("entries").is_none() && s.get("summaries").is_none());
 
-    let caps = s["capabilities"].as_array().unwrap();
-    let entry = |kind: &str, name: &str| {
-        caps.iter()
-            .find(|c| c["kind"] == kind && c["name"] == name)
-            .unwrap_or_else(|| panic!("no {kind} named {name}"))
-    };
-    let kinds: std::collections::BTreeSet<&str> =
-        caps.iter().map(|c| c["kind"].as_str().unwrap()).collect();
+    // Every kind the catalog has is one the `kind` argument accepts.
+    let accepted = kind_enum(&tool);
+    let index = s["index"].as_array().unwrap();
+    let kinds: Vec<&str> = index.iter().map(|k| k["kind"].as_str().unwrap()).collect();
     for kind in [
         "font",
         "type3_face",
@@ -632,44 +657,252 @@ async fn describes_art_capabilities() {
         "procedure",
         "operator",
     ] {
-        assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
+        assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
     }
-    let helvetica = entry("font", "Helvetica");
-    assert_eq!(helvetica["availability"], "builtin");
-    assert_eq!(helvetica["load"], "");
-    // Names are unique per kind and sorted, as `pscat --capabilities` prints them.
-    let keys: Vec<(&str, &str)> = caps
-        .iter()
-        .map(|c| (c["name"].as_str().unwrap(), c["kind"].as_str().unwrap()))
-        .collect();
-    assert!(keys.windows(2).all(|w| w[0] < w[1]), "sorted and unique");
-    for c in caps {
-        for field in ["description", "source", "load", "example", "availability"] {
-            assert!(c[field].is_string(), "{field} in {c}");
-        }
-        assert!(c["parameters"].is_array(), "{c}");
+    for kind in &kinds {
+        assert!(accepted.iter().any(|a| a == kind), "{kind} not in the enum");
     }
-    // A template carries what a program needs to use it.
-    let template = caps.iter().find(|c| c["kind"] == "template").unwrap();
+    let fonts = index.iter().find(|k| k["kind"] == "font").unwrap();
     assert!(
-        template["load"].as_str().unwrap().contains("(lib/"),
-        "{template}"
+        fonts["names"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Helvetica")),
+        "{fonts}"
     );
+    for k in index {
+        assert_eq!(k["count"], k["names"].as_array().unwrap().len());
+    }
 
-    // The text summary names every capability, one line per kind.
+    // The text carries the same names and says how to get more.
     let text = text_of(&r);
-    assert!(
-        text.contains(&format!("{} capabilities", caps.len())),
-        "{text}"
-    );
-    for c in caps {
-        assert!(text.contains(c["name"].as_str().unwrap()), "{c}");
+    for k in index {
+        for name in k["names"].as_array().unwrap() {
+            assert!(text.contains(name.as_str().unwrap()), "{name}");
+        }
     }
-    assert!(text.lines().any(|l| l.starts_with("palette (")), "{text}");
+    assert!(text.contains("names (up to 20)"), "{text}");
+    assert!(!text.contains("structuredContent"), "{text}");
 
-    // It is the same on a second call, which runs in a fresh worker.
+    // The catalog is kept, so a second call is the same without a new worker.
     let again = call(&client, "describe_art_capabilities", json!({})).await;
     assert_eq!(structured(&again), s);
+    client.cancel().await.ok();
+}
+
+/// A client may leave `arguments` out altogether.
+#[tokio::test]
+async fn describe_art_capabilities_works_without_an_arguments_field() {
+    let client = start().await;
+    let r = tokio::time::timeout(
+        CALL_TIMEOUT,
+        client.call_tool(CallToolRequestParams::new("describe_art_capabilities")),
+    )
+    .await
+    .expect("timed out")
+    .expect("call");
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    assert_eq!(structured(&r)["view"], "index");
+    client.cancel().await.ok();
+}
+
+/// `kind` lists names with one-line descriptions, a bounded page at a time;
+/// paging covers exactly the names the index shows, and no reply is large.
+#[tokio::test]
+async fn describe_art_capabilities_lists_a_kind_in_pages() {
+    let client = start().await;
+    let tool = capabilities_tool(&client).await;
+    let schema = tool.output_schema.as_ref().unwrap();
+    let index = call(&client, "describe_art_capabilities", json!({})).await;
+    let index = structured(&index)["index"].as_array().unwrap().clone();
+
+    let mut largest = (0, 0);
+    for k in &index {
+        let kind = k["kind"].as_str().unwrap();
+        let expected: Vec<&str> = k["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .collect();
+        let mut got: Vec<String> = Vec::new();
+        let mut offset = 0;
+        // A small `limit` on the largest kinds forces several pages.
+        let limit = if expected.len() > 100 { 60 } else { 100 };
+        loop {
+            let r = call(
+                &client,
+                "describe_art_capabilities",
+                json!({"kind": kind, "offset": offset, "limit": limit}),
+            )
+            .await;
+            assert_eq!(r.is_error, Some(false), "{kind}: {}", text_of(&r));
+            let s = structured(&r);
+            assert_conforms(schema, s);
+            assert_eq!(s["view"], "kind");
+            assert_eq!(s["kind"], kind);
+            assert_eq!(s["total"], expected.len());
+            assert_eq!(s["offset"], offset);
+            assert!(
+                s.get("entries").is_none(),
+                "kind alone returns no full entries"
+            );
+            let (a, b) = assert_reply_size(&r);
+            largest = (largest.0.max(a), largest.1.max(b));
+            let text = text_of(&r);
+            for item in s["summaries"].as_array().unwrap() {
+                let name = item["name"].as_str().unwrap();
+                assert!(text.contains(name), "{name} in the text");
+                assert!(item["description"].as_str().unwrap().chars().count() <= 101);
+                got.push(name.to_string());
+            }
+            match s["next_offset"].as_u64() {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(got, expected, "{kind}");
+    }
+
+    // The default page of the largest kind (no offset or limit) is also bounded.
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"kind": "procedure"}),
+    )
+    .await;
+    let (a, b) = assert_reply_size(&r);
+    eprintln!("procedure page (default limit): {a} structured bytes, {b} text bytes");
+    assert!(structured(&r)["summaries"].as_array().unwrap().len() <= 100);
+    eprintln!(
+        "largest kind page seen: {} structured bytes, {} text bytes",
+        largest.0, largest.1
+    );
+    client.cancel().await.ok();
+}
+
+/// `names` returns full entries, reports unknown names without failing, and
+/// stays under the ceiling even for the largest entries.
+#[tokio::test]
+async fn describe_art_capabilities_returns_named_entries() {
+    let client = start().await;
+    let tool = capabilities_tool(&client).await;
+    let schema = tool.output_schema.as_ref().unwrap();
+
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"names": ["pgcard", "Helvetica", "no-such-name"]}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let s = structured(&r);
+    assert_conforms(schema, s);
+    assert_eq!(s["view"], "names");
+    assert_eq!(s["not_found"], json!(["no-such-name"]));
+    assert_eq!(s["omitted"], json!([]));
+    let entries = s["entries"].as_array().unwrap();
+    let kinds: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e["name"].as_str().unwrap(), e["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(kinds, [("pgcard", "template"), ("Helvetica", "font")]);
+    let card = &entries[0];
+    assert_eq!(card["source"], "lib/pagekit.ps");
+    assert!(
+        card["load"]
+            .as_str()
+            .unwrap()
+            .contains("(lib/artkit.ps) run")
+    );
+    assert!(card["parameters"].as_array().unwrap().len() >= 3);
+    assert_eq!(entries[1]["availability"], "builtin");
+    // The text carries the same entries.
+    let text = text_of(&r);
+    assert!(text.contains(card["load"].as_str().unwrap()), "{text}");
+    assert!(text.contains("parameter Title"), "{text}");
+    assert!(text.contains("Not found: no-such-name"), "{text}");
+    assert!(!text.contains("structuredContent"), "{text}");
+    assert_reply_size(&r);
+
+    // `kind` narrows `names`.
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"names": ["pgcard", "Helvetica"], "kind": "font"}),
+    )
+    .await;
+    let s = structured(&r);
+    assert_eq!(s["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(s["not_found"], json!(["pgcard"]));
+
+    // The 20 names with the largest entries in the pinned PSCat: the reply
+    // keeps whole entries that fit and lists the rest as omitted.
+    let heavy = [
+        "pkwet",
+        "tw-type",
+        "tw-setup",
+        "rel-page",
+        "dkstroke",
+        "pkbrushedge",
+        "pkfan",
+        "pktrowel",
+        "pkdab",
+        "pkfeather",
+        "pkbroad",
+        "dycrayon",
+        "pktrowelplane",
+        "dcchalk",
+        "tw-set",
+        "pkoil",
+        "mkalign",
+        "jerseylayout",
+        "hatch",
+        "dcboard",
+    ];
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"names": heavy}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    let s = structured(&r);
+    assert_conforms(schema, s);
+    let (a, b) = assert_reply_size(&r);
+    eprintln!("20 largest names: {a} structured bytes, {b} text bytes");
+    let accounted = s["entries"].as_array().unwrap().len()
+        + s["omitted"].as_array().unwrap().len()
+        + s["not_found"].as_array().unwrap().len();
+    assert_eq!(accounted, heavy.len(), "{s}");
+    assert!(!s["entries"].as_array().unwrap().is_empty());
+    client.cancel().await.ok();
+}
+
+/// Arguments that parse but make no sense are `invalid_request` with the
+/// envelope, and start no worker.
+#[tokio::test]
+async fn describe_art_capabilities_rejects_bad_arguments() {
+    let client = start().await;
+    let schema = capabilities_tool(&client).await.output_schema.unwrap();
+    let too_many: Vec<String> = (0..21).map(|i| format!("n{i}")).collect();
+    for args in [
+        json!({"kind": "fonts"}),
+        json!({"names": []}),
+        json!({"names": too_many}),
+        json!({"offset": 5}),
+        json!({"kind": "font", "limit": 0}),
+        json!({"kind": "font", "limit": 101}),
+        json!({"kind": "font", "names": ["Helvetica"], "offset": 1}),
+    ] {
+        let r = call(&client, "describe_art_capabilities", args.clone()).await;
+        assert_eq!(r.is_error, Some(true), "{args}");
+        let s = structured(&r);
+        assert_eq!(s["ok"], false, "{args}: {s}");
+        assert_eq!(error_code(&r), "invalid_request", "{args}");
+        assert!(s.get("view").is_none(), "{args}");
+        assert_conforms(&schema, s);
+    }
     client.cancel().await.ok();
 }
 
@@ -748,14 +981,14 @@ async fn describe_art_capabilities_does_not_report_server_paths() {
 #[tokio::test]
 async fn catalog_load_lines_work_in_a_render() {
     let client = start().await;
-    let r = call(&client, "describe_art_capabilities", json!({})).await;
-    let card = structured(&r)["capabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["kind"] == "template" && c["name"] == "pgcard")
-        .expect("pgcard template")
-        .clone();
+    let r = call(
+        &client,
+        "describe_art_capabilities",
+        json!({"names": ["pgcard"], "kind": "template"}),
+    )
+    .await;
+    let card = structured(&r)["entries"][0].clone();
+    assert_eq!(card["name"], "pgcard");
     let load = card["load"].as_str().unwrap();
     let source = format!(
         "{load}\n0 0 400 300 << /Title (Hello) /Body (From the catalog) >> pgcard pop\nshowpage\n"

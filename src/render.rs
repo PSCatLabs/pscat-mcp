@@ -93,7 +93,7 @@ pub struct RenderError {
 }
 
 impl RenderError {
-    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         RenderError {
             code,
             message: message.into(),
@@ -407,6 +407,9 @@ pub struct RenderService {
     backend: Arc<dyn RenderBackend>,
     limits: LimitsConfig,
     slots: Arc<Semaphore>,
+    /// The art catalog, fetched from a worker on first use. A failed fetch
+    /// leaves it empty, so the next call tries again.
+    catalog: tokio::sync::OnceCell<Arc<ArtCatalog>>,
     /// Counters for health and tests.
     pub counters: Arc<Counters>,
 }
@@ -419,6 +422,7 @@ impl RenderService {
             backend,
             limits,
             slots,
+            catalog: tokio::sync::OnceCell::new(),
             counters: Arc::new(Counters::default()),
         }
     }
@@ -486,8 +490,20 @@ impl RenderService {
 
     /// PSCat's art catalog, read in a worker process so it reflects the
     /// environment renders run in (fonts, font packs), not the server's.
-    /// Runs no PostScript, takes a render slot and the render deadline.
-    pub async fn capabilities(&self) -> Result<ArtCatalog, RenderError> {
+    ///
+    /// The first successful call runs the worker (no PostScript; it takes a
+    /// render slot and the render deadline) and the result is kept for the
+    /// life of the service: the worker's environment is fixed, so the
+    /// catalog is too. Later calls take no slot. Concurrent first calls share
+    /// one fetch; a failed fetch is not kept.
+    pub async fn capabilities(&self) -> Result<Arc<ArtCatalog>, RenderError> {
+        self.catalog
+            .get_or_try_init(|| async { self.fetch_catalog().await.map(Arc::new) })
+            .await
+            .cloned()
+    }
+
+    async fn fetch_catalog(&self) -> Result<ArtCatalog, RenderError> {
         let job = WorkerJob {
             mode: JobMode::Capabilities,
             source: String::new(),
@@ -710,8 +726,12 @@ mod tests {
         assert!(d.job.page_points.is_none());
     }
 
-    /// A backend that answers every job with a fixed outcome.
-    struct Fixed(fn() -> Result<WorkerResult, BackendError>);
+    /// A backend that answers every job with a fixed outcome and counts the
+    /// jobs it was given.
+    struct Fixed {
+        outcome: fn() -> Result<WorkerResult, BackendError>,
+        calls: Arc<AtomicU64>,
+    }
 
     impl RenderBackend for Fixed {
         fn execute(
@@ -719,17 +739,63 @@ mod tests {
             _job: WorkerJob,
             _deadline: std::time::Duration,
         ) -> crate::backend::BackendFuture<'_> {
-            let outcome = (self.0)();
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = (self.outcome)();
             Box::pin(async move { outcome })
         }
     }
 
+    fn service_with(
+        outcome: fn() -> Result<WorkerResult, BackendError>,
+    ) -> (RenderService, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let backend = Fixed {
+            outcome,
+            calls: calls.clone(),
+        };
+        (
+            RenderService::new(Arc::new(backend), LimitsConfig::default()),
+            calls,
+        )
+    }
+
     async fn capabilities_with(
         outcome: fn() -> Result<WorkerResult, BackendError>,
-    ) -> Result<ArtCatalog, RenderError> {
-        RenderService::new(Arc::new(Fixed(outcome)), LimitsConfig::default())
-            .capabilities()
-            .await
+    ) -> Result<Arc<ArtCatalog>, RenderError> {
+        service_with(outcome).0.capabilities().await
+    }
+
+    fn catalog_result() -> Result<WorkerResult, BackendError> {
+        Ok(WorkerResult {
+            capabilities: Some(serde_json::json!({
+                "pscat_version": "0.0.0",
+                "catalog_signature": "0000000000000000",
+                "font_packs": {
+                    "pinned_index": null, "installed": [], "overrides": [], "available": []
+                },
+                "capabilities": []
+            })),
+            ..WorkerResult::empty()
+        })
+    }
+
+    #[tokio::test]
+    async fn the_catalog_is_fetched_once_and_failures_are_not_kept() {
+        let (service, calls) = service_with(catalog_result);
+        let first = service.capabilities().await.unwrap();
+        let second = service.capabilities().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call hit the worker"
+        );
+        assert_eq!(service.counters.executed.load(Ordering::SeqCst), 1);
+
+        let (service, calls) = service_with(|| Err(BackendError::Timeout));
+        assert!(service.capabilities().await.is_err());
+        assert!(service.capabilities().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a failure was cached");
     }
 
     #[tokio::test]

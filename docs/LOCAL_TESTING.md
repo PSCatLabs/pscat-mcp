@@ -173,7 +173,7 @@ showpage
 stroke showpage
 
 5. Render `%!PS { 1 pop } loop` and tell me the error code and roughly how long it took.
-6. Call describe_art_capabilities and tell me how many page templates it lists and their names.
+6. Call describe_art_capabilities with no arguments and tell me how many page templates it lists and their names. Then call it with names ["pgcard"] and tell me the `load` line.
 
 Finish with a table: step, exact tool name you called, error code (if any), result.
 ````
@@ -190,7 +190,7 @@ A pass looks like this:
 | 3 | SVG returns an embedded `image/svg+xml` resource, and PDF an `application/pdf` resource, not images. |
 | 4 | Not valid: `undefined`, offending command `liento`, line 3, plus a blank-page lint warning. If it comes back valid, check whether the agent corrected the typo in the source it sent. |
 | 5 | `limit_exceeded` ("stopped at the time limit") after about 20 s, or `timeout`. |
-| 6 | Five templates: `pgcard`, `pgcertificate`, `pginvitation`, `pgletter`, `pgposter` (for the pinned PSCat; a bump may change the set). |
+| 6 | Five templates: `pgcard`, `pgcertificate`, `pginvitation`, `pgletter`, `pgposter` (for the pinned PSCat; a bump may change the set); `pgcard`'s load line is `(lib/artkit.ps) run (lib/pagekit.ps) run`. |
 
 In step 2, the description is the test. A wrong or vague description means
 the image didn't reach the model. Whether the image appears on screen only

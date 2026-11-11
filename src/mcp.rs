@@ -13,7 +13,7 @@
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
-//!   [`ArtCatalog`] fields at the top level) plus a text summary.
+//!   [`CatalogSlice`] fields at the top level) plus the same slice as text.
 //! * `get_renderer_info` — a [`RendererInfo`] object.
 
 use std::sync::Arc;
@@ -33,10 +33,11 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::build_info::{RendererIdentity, SERVER_VERSION};
+use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::render::{
-    ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest,
-    RenderService, ValidationReport,
+    DEFAULT_PAGE_POINTS, ErrorCode, RenderError, RenderOutput, RenderRequest, RenderService,
+    ValidationReport,
 };
 use crate::worker::OutputFormat;
 
@@ -142,16 +143,38 @@ pub struct ValidateToolOutput {
     pub renderer: RendererIdentity,
 }
 
+/// Arguments of `describe_art_capabilities`. With none, the reply is an
+/// index of every kind with its names.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct CapabilitiesArgs {
+    /// List one kind: its names with a one-line description each, a page at a
+    /// time (see `offset` and `limit`).
+    #[schemars(extend("enum" = ["font", "type3_face", "palette", "template", "procedure", "operator", "dial"]))]
+    pub kind: Option<String>,
+    /// Exact names (up to 20) to return in full: description, parameters,
+    /// library file, `run` lines to load it, example and availability. With
+    /// `kind`, only entries of that kind. Unknown names are listed under
+    /// `not_found`; names that do not fit the reply under `omitted`.
+    #[schemars(length(min = 1, max = 20))]
+    pub names: Option<Vec<String>>,
+    /// First entry of a `kind` listing, default 0.
+    #[schemars(range(min = 0))]
+    pub offset: Option<u32>,
+    /// Entries in a `kind` listing, 1 to 100, default 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u32>,
+}
+
 /// `structuredContent` of `describe_art_capabilities`. When the catalog was
-/// read, `ok` is true and the [`ArtCatalog`] fields are present. Otherwise
+/// read, `ok` is true and the [`CatalogSlice`] fields are present. Otherwise
 /// `ok` is false and `error` is set.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CapabilitiesToolOutput {
     /// True when the catalog was read.
     pub ok: bool,
-    /// The catalog.
+    /// The part of the catalog that was asked for.
     #[serde(flatten)]
-    pub catalog: Option<ArtCatalog>,
+    pub catalog: Option<CatalogSlice>,
     /// Why the catalog could not be read, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -219,6 +242,17 @@ pub struct PscatMcp {
     tool_router: ToolRouter<Self>,
 }
 
+impl From<CapabilitiesArgs> for CatalogQuery {
+    fn from(a: CapabilitiesArgs) -> Self {
+        CatalogQuery {
+            kind: a.kind,
+            names: a.names,
+            offset: a.offset,
+            limit: a.limit,
+        }
+    }
+}
+
 impl PscatMcp {
     /// A handler over `service`.
     pub fn new(service: Arc<RenderService>) -> Self {
@@ -247,6 +281,15 @@ impl PscatMcp {
     /// The underlying service.
     pub fn service(&self) -> &Arc<RenderService> {
         &self.service
+    }
+
+    /// The view of the art catalog `query` asks for. Arguments are checked
+    /// before any worker starts; the catalog itself is kept after the first
+    /// fetch.
+    async fn capabilities_slice(&self, query: &CatalogQuery) -> Result<CatalogSlice, RenderError> {
+        query.check()?;
+        let catalog = self.service.capabilities().await?;
+        crate::catalog::slice(&catalog, query)
     }
 
     fn renderer_info(&self) -> RendererInfo {
@@ -391,9 +434,12 @@ impl PscatMcp {
         title = "List art capabilities",
         description = "Lists the creative capabilities of the linked PSCat build: fonts, Type 3 \
                        faces, mood palettes, page templates, artkit and style-pack procedures, \
-                       and native operators. Each entry has its kind, description, parameters, \
-                       the library file that defines it, the `run` lines that load it, an example \
-                       and its availability. Takes no arguments, runs no PostScript, and does not \
+                       native operators and config dials. With no arguments it returns an index \
+                       of every kind with its names. `kind` returns that kind's names with a \
+                       one-line description each, 100 at a time (`offset`, `limit`). `names` \
+                       (up to 20) returns full entries: parameters, defining library file, `run` \
+                       lines to load it, example, availability; unknown names are listed under \
+                       `not_found`. A reply is under 24 KB. Runs no PostScript and does not \
                        report server file paths.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<CapabilitiesToolOutput>(),
         annotations(
@@ -404,17 +450,22 @@ impl PscatMcp {
             open_world_hint = false
         )
     )]
-    async fn describe_art_capabilities(&self, ct: CancellationToken) -> CallToolResult {
+    async fn describe_art_capabilities(
+        &self,
+        Parameters(args): Parameters<CapabilitiesArgs>,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        let query = CatalogQuery::from(args);
         let outcome = tokio::select! {
-            r = self.service.capabilities() => r,
+            r = self.capabilities_slice(&query) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(catalog) => {
-                let text = capabilities_text(&catalog);
+            Ok(slice) => {
+                let text = slice.text();
                 let envelope = CapabilitiesToolOutput {
                     ok: true,
-                    catalog: Some(catalog),
+                    catalog: Some(slice),
                     error: None,
                     renderer: RendererIdentity::current(),
                 };
@@ -672,6 +723,7 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
     match tool {
         "render_postscript" => render_failure(err),
         "validate_postscript" => validate_failure(err),
+        "describe_art_capabilities" => capabilities_failure(err),
         _ => result,
     }
 }
@@ -688,29 +740,6 @@ fn capabilities_failure(err: RenderError) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text(text)]),
         &envelope,
     )
-}
-
-/// The names of every capability, one line per kind. Parameters, load lines
-/// and examples are only in `structuredContent`; a client that shows just
-/// the text still learns which names exist.
-fn capabilities_text(catalog: &ArtCatalog) -> String {
-    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
-    for c in &catalog.capabilities {
-        match groups.iter_mut().find(|(kind, _)| *kind == c.kind) {
-            Some((_, names)) => names.push(c.name.as_str()),
-            None => groups.push((c.kind.as_str(), vec![c.name.as_str()])),
-        }
-    }
-    let mut text = format!(
-        "PSCat {} lists {} capabilities. Parameters, load lines and examples are in \
-         structuredContent.capabilities.",
-        catalog.pscat_version,
-        catalog.capabilities.len()
-    );
-    for (kind, names) in groups {
-        text.push_str(&format!("\n{kind} ({}): {}", names.len(), names.join(", ")));
-    }
-    text
 }
 
 fn error_text(lead: &str, err: &RenderError) -> String {
