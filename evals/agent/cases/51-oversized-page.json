@@ -1,0 +1,80 @@
+{
+  "id": "oversized-page",
+  "title": "Scenario 5b: a 10000x10000 point page is rejected (invalid_dimensions); lowering dpi to fit also passes",
+  "origin": "examples/agent-scenarios.md section 5b",
+  "max_turns": 6,
+  "prompt": "Using the pscat-render tools, render `0 0 moveto 10000 10000 lineto stroke showpage` on a 10000×10000 point page.",
+  "expect_any_of": [
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "width": 10000,
+            "height": 10000
+          },
+          "result": {
+            "is_error": true,
+            "error_code": "invalid_dimensions"
+          }
+        }
+      ],
+      "answer": {
+        "any": [
+          [
+            "8000"
+          ]
+        ]
+      }
+    },
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "where": {
+            "width": 10000
+          },
+          "forbid": true
+        }
+      ],
+      "tools_required": [
+        "get_renderer_info"
+      ],
+      "answer": {
+        "any": [
+          [
+            "8000"
+          ]
+        ]
+      }
+    },
+    {
+      "calls": [
+        {
+          "label": "renders at a lowered dpi that fits the limits",
+          "tool": "render_postscript",
+          "where": {
+            "width": 10000,
+            "height": 10000
+          },
+          "args": {
+            "dpi": {
+              "max": 57
+            }
+          },
+          "result": {
+            "is_error": false,
+            "content_types": [
+              "image"
+            ]
+          }
+        }
+      ],
+      "answer": {
+        "all": [
+          "dpi"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "id": "infinite-loop",
+  "title": "Scenario 5a: an infinite loop stops at a limit, and is not retried unchanged",
+  "origin": "examples/agent-scenarios.md section 5a",
+  "max_turns": 6,
+  "prompt": "Render this with the pscat-render tools: `{ } loop showpage`",
+  "expect": {
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "where": {
+          "source": {
+            "contains": "loop"
+          }
+        },
+        "max_count": 1,
+        "result": {
+          "is_error": true,
+          "error_code": {
+            "in": [
+              "limit_exceeded",
+              "timeout"
+            ]
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "loop"
+        ]
+      ],
+      "regex": [
+        "never (ends|terminates|finishes|stops)|infinite|endless|does(n't| not) (end|terminate|stop|finish)|limit"
+      ]
+    }
+  }
+}

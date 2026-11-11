@@ -1,0 +1,56 @@
+{
+  "id": "huge-source",
+  "title": "Scenario 5c: a source over 256 KiB (source_too_large); tens of thousands of tokens",
+  "origin": "examples/agent-scenarios.md section 5c",
+  "tags": [
+    "expensive"
+  ],
+  "transports": [
+    "stdio"
+  ],
+  "max_turns": 6,
+  "timeout_s": 600,
+  "prompt": "Using the pscat-render tools, render this PostScript file exactly as given:\n\n%!PS\n{{huge_source}}showpage\n",
+  "expect_any_of": [
+    {
+      "calls": [
+        {
+          "tool": "render_postscript",
+          "result": {
+            "is_error": true,
+            "error_code": "source_too_large"
+          }
+        }
+      ],
+      "answer": {
+        "any": [
+          [
+            "loop",
+            "procedure",
+            "simplif",
+            "smaller",
+            "shorter"
+          ]
+        ]
+      }
+    },
+    {
+      "tools_forbidden": [
+        "render_postscript"
+      ],
+      "answer": {
+        "any": [
+          [
+            "loop",
+            "procedure",
+            "simplif",
+            "smaller",
+            "shorter",
+            "too large",
+            "limit"
+          ]
+        ]
+      }
+    }
+  ]
+}
