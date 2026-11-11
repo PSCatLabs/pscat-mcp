@@ -307,7 +307,7 @@ The exit status is 0 when every row passes, 1 when a check failed, and 2
 when the billing guard stopped the run.
 
 **Budget.** Cases run one at a time. A full default run is 20 sessions
-(10 cases × 2 transports) and took 54 turns and about 25 tool calls with
+(10 cases × 2 transports) and took 54 turns and 34 tool calls with
 `claude-sonnet-5-5`, about 4 minutes in all. Most cases take 2 or 3 turns,
 and the first prompt takes 7. It moved the Max 5x plan's five-hour
 utilization from 8 % to 10 %, while another session was using the same
