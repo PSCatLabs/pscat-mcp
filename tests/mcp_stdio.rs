@@ -684,6 +684,8 @@ async fn describes_art_capabilities_as_an_index() {
         }
     }
     assert!(text.contains("names (up to 20)"), "{text}");
+    // A client that shows the model only structuredContent gets the same hint.
+    assert!(s["details"].as_str().unwrap().contains("names (up to 20)"));
     assert!(!text.contains("structuredContent"), "{text}");
 
     // The catalog is kept, so a second call is the same without a new worker.

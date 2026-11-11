@@ -161,6 +161,9 @@ pub struct CatalogSlice {
     /// again (names view).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omitted: Option<Vec<String>>,
+    /// How to get more detail or the next page (index and kind views).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
 fn base(catalog: &ArtCatalog, view: &str) -> CatalogSlice {
@@ -178,6 +181,7 @@ fn base(catalog: &ArtCatalog, view: &str) -> CatalogSlice {
         entries: None,
         not_found: None,
         omitted: None,
+        details: None,
     }
 }
 
@@ -229,6 +233,11 @@ fn index_view(catalog: &ArtCatalog) -> CatalogSlice {
     CatalogSlice {
         font_packs: Some(catalog.font_packs.clone()),
         index: Some(index),
+        details: Some(format!(
+            "Call again with kind (one of {}) for descriptions, or with names (up to \
+             {MAX_NAMES}) for parameters, load lines and examples.",
+            KINDS.join(", ")
+        )),
         ..base(catalog, "index")
     }
 }
@@ -256,6 +265,13 @@ fn kind_view(catalog: &ArtCatalog, kind: &str, query: &CatalogQuery) -> CatalogS
         total: Some(all.len()),
         offset: Some(offset),
         next_offset: (end < all.len()).then_some(end),
+        details: Some(match (end < all.len()).then_some(end) {
+            Some(next) => format!(
+                "More: call again with offset {next}. Call with names for parameters, load \
+                 lines and examples."
+            ),
+            None => "Call with names for parameters, load lines and examples.".to_string(),
+        }),
         summaries: Some(page),
         ..base(catalog, "kind")
     }
@@ -332,11 +348,6 @@ impl CatalogSlice {
                     k.names.join(", ")
                 ));
             }
-            out.push_str(&format!(
-                "\n\nDetails: call again with kind (one of {}) for descriptions, or with names \
-                 (up to {MAX_NAMES}) for parameters, load lines and examples.",
-                KINDS.join(", ")
-            ));
         } else if let Some(summaries) = &self.summaries {
             let (kind, total, offset) = (
                 self.kind.as_deref().unwrap_or(""),
@@ -350,10 +361,6 @@ impl CatalogSlice {
             for s in summaries {
                 out.push_str(&format!("\n{}: {}", s.name, s.description));
             }
-            if let Some(next) = self.next_offset {
-                out.push_str(&format!("\n\nMore: call again with offset {next}."));
-            }
-            out.push_str("\n\nDetails: call with names for parameters, load lines and examples.");
         } else {
             out.push_str(": full entries.\n");
             for c in self.entries.iter().flatten() {
@@ -388,6 +395,9 @@ impl CatalogSlice {
                     om.join(", ")
                 ));
             }
+        }
+        if let Some(details) = &self.details {
+            out.push_str(&format!("\n\n{details}"));
         }
         out
     }

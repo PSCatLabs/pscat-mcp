@@ -25,9 +25,15 @@
         },
         "result": {
           "is_error": false,
-          "text_contains": [
-            "palette"
-          ]
+          "structured": {
+            "ok": true,
+            "view": {
+              "in": [
+                "index",
+                "kind"
+              ]
+            }
+          }
         }
       },
       {
@@ -40,10 +46,17 @@
         },
         "result": {
           "is_error": false,
-          "text_contains": [
-            "source:",
-            "availability:"
-          ]
+          "structured": {
+            "ok": true,
+            "view": "names",
+            "entries.0.kind": "procedure",
+            "entries.0.source": {
+              "regex": "\\S"
+            },
+            "entries.0.availability": {
+              "regex": "\\S"
+            }
+          }
         }
       }
     ],
