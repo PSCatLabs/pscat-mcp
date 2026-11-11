@@ -354,7 +354,7 @@ impl GenerateJob {
                         ),
                     ));
                 }
-                let note = p.resolve().map_err(|m| {
+                let note = p.check().map_err(|m| {
                     RenderError::new(ErrorCode::InvalidRequest, bounded(&m, MAX_MESSAGE_CHARS))
                 })?;
                 if !(1..=crate::handwrite::MAX_PAGE_POINTS).contains(&note.width) {

@@ -542,3 +542,16 @@ async fn extreme_arguments_never_crash() {
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     client.cancel().await.ok();
 }
+
+/// A limit hit inside the layout of a huge text is reported without the text.
+#[tokio::test]
+async fn a_limit_hit_in_the_layout_of_a_huge_word_keeps_the_reply_small() {
+    let client = start(&[("PSCAT_MCP_MAX_STEPS", "1000000")]).await;
+    let r = call(&client, json!({"text": "x".repeat(1_000_000)})).await;
+    let s = assert_fails(&r, "limit_exceeded");
+    let structured_len = serde_json::to_string(&s).unwrap().len();
+    let text_len = text_of(&r).len();
+    assert!(structured_len < 24 * 1024, "structured: {structured_len}");
+    assert!(text_len < 24 * 1024, "text: {text_len}");
+    client.cancel().await.ok();
+}

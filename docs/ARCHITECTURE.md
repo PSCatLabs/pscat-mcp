@@ -165,7 +165,7 @@ For `handwrite` (`src/handwrite.rs`) the plugin's tool runs `pscat handwrite`,
 a subcommand of the `pscat` binary and not of the library; this server does
 what it does from public pieces. `plan` checks the text's byte size
 (`PSCAT_MCP_MAX_HANDWRITE_BYTES`, 1 MiB, the plugin's) and every argument
-(`HandwriteParams::resolve`: ranges, `paper`, and `ink`, which is three plain
+(`HandwriteParams::check`: ranges, `paper`, and `ink`, which is three plain
 decimals in 0 to 1 and can carry no code), and returns a `FixedWidth` plan.
 `generate` runs `hs-linecount` from `lib/handscript.ps` on a default page
 (the measuring pass), computes the height as the plugin does (two margins,

@@ -22,7 +22,7 @@
 //! measuring pass left of the time and step limits.
 //!
 //! Everything that touches the text happens in the worker. The server only
-//! checks what needs no layout ([`HandwriteParams::resolve`]): the text's
+//! checks what needs no layout ([`HandwriteParams::check`]): the text's
 //! size and the arguments.
 
 use std::time::Instant;
@@ -149,10 +149,12 @@ fn drawable(c: char) -> bool {
 }
 
 impl HandwriteParams {
-    /// Check the text and the arguments. Needs no layout, so it is safe to
-    /// run in the server; the text is only scanned for its characters.
-    /// An `Err` is a message that names the argument at fault.
-    pub fn resolve(&self) -> Result<Note, String> {
+    /// The checked arguments, with the text not yet prepared for the
+    /// program. Needs no layout and copies nothing of the text (it is only
+    /// scanned for its characters), so it is safe to run in the server: it
+    /// is what the plan uses. An `Err` is a message that names the argument
+    /// at fault.
+    pub fn check(&self) -> Result<Note, String> {
         if self.text.trim().is_empty() {
             return Err("text is empty".into());
         }
@@ -191,7 +193,7 @@ impl HandwriteParams {
             Some(ink) => ink_token(ink)?,
         };
         Ok(Note {
-            text: escape_text(&self.text),
+            text: String::new(),
             size,
             size_token: number_token(size),
             jitter_token: number_token(jitter),
@@ -201,6 +203,16 @@ impl HandwriteParams {
             width: self.width.unwrap_or(612),
             dpi: self.dpi.unwrap_or(72.0),
         })
+    }
+}
+
+impl HandwriteParams {
+    /// [`check`](Self::check), and the text prepared for the program
+    /// (lowercased, escaped). Worker side: this copies the whole text.
+    pub fn resolve(&self) -> Result<Note, String> {
+        let mut note = self.check()?;
+        note.text = escape_text(&self.text);
+        Ok(note)
     }
 }
 
