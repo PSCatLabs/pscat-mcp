@@ -14,6 +14,12 @@
 //!   envelope as `render_postscript`, for the one board it draws.
 //! * `handwrite` — the same content blocks and [`RenderToolOutput`] envelope,
 //!   for the one PNG note it draws.
+//! * `review_sheet` — one PNG `image` block (the sheet) and a text summary
+//!   with a line per cell. `structuredContent` is a [`SheetToolOutput`]
+//!   envelope: the sheet's size and every cell's status, size and place on
+//!   the sheet, with no image bytes. A failed cell does not fail the call.
+//!   On failure, `isError: true`, a text explanation and the envelope with
+//!   `ok: false` and `error`.
 //! * `validate_postscript` — a [`ValidateToolOutput`] envelope (the
 //!   [`ValidationReport`] fields at the top level) plus a text summary.
 //! * `describe_art_capabilities` — a [`CapabilitiesToolOutput`] envelope (the
@@ -45,6 +51,9 @@ use crate::handwrite::HandwriteParams;
 use crate::render::{
     DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, RenderError, RenderOutput, RenderRequest,
     RenderService, ValidationReport,
+};
+use crate::sheet::{
+    MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
 };
 use crate::worker::OutputFormat;
 
@@ -244,6 +253,112 @@ impl HandwriteArgs {
     }
 }
 
+/// Arguments of `review_sheet`. Names, defaults and caps are those of the
+/// PSCat plugin's tool, without `out_path`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ReviewSheetArgs {
+    /// The rows, top to bottom, one program each.
+    #[schemars(schema_with = "sheet_entries_schema")]
+    pub entries: Vec<SheetEntryParams>,
+    /// Page width in points for entries that give none. Default 612.
+    #[schemars(range(min = 1, max = 8000))]
+    pub width: Option<u32>,
+    /// Page height in points for entries that give none. Default 792.
+    #[schemars(range(min = 1, max = 8000))]
+    pub height: Option<u32>,
+    /// One cell per item, left to right, for entries that give no list.
+    #[serde(default)]
+    #[schemars(schema_with = "sheet_dpi_default_schema")]
+    pub dpi: Option<Value>,
+    /// Draw the row labels. Default true.
+    pub labels: Option<bool>,
+    /// Draw the pixel-size caption under each cell. Default true.
+    pub sizes: Option<bool>,
+}
+
+/// The schema of a dpi list, written out where it is used rather than as a
+/// `$ref` (as the plugin does: some clients do not resolve references in a
+/// tool's input schema).
+fn sheet_dpi_schema(description: &str) -> Value {
+    serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "description": description,
+        "items": {
+            "anyOf": [
+                { "type": "number", "minimum": 9, "maximum": 1200 },
+                {
+                    "type": "object",
+                    "properties": {
+                        "dpi": { "type": "number", "minimum": 9, "maximum": 1200 },
+                        "zoom": { "type": "integer", "minimum": 2, "maximum": MAX_ZOOM }
+                    },
+                    "required": ["dpi"]
+                }
+            ]
+        }
+    })
+}
+
+fn to_schema(v: Value) -> schemars::Schema {
+    schemars::Schema::try_from(v).unwrap_or_default()
+}
+
+fn sheet_dpi_default_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    to_schema(sheet_dpi_schema(
+        "One cell per item, left to right: a dpi (9 to 1200), or {\"dpi\": 9, \"zoom\": 4} \
+         to draw that render enlarged 4x. For entries that give no list. Default [72].",
+    ))
+}
+
+fn sheet_entries_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    to_schema(serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "description": "The rows, top to bottom, one program each.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "source": { "type": "string", "description": "The PostScript program." },
+                "label": {
+                    "type": "string",
+                    "maxLength": MAX_LABEL_CHARS,
+                    "description": "The row label. Default \"program N\", N counting from 1."
+                },
+                "width": {
+                    "type": "integer", "minimum": 1, "maximum": MAX_PAGE_POINTS,
+                    "description": "Page width in points. Default: the top-level width."
+                },
+                "height": {
+                    "type": "integer", "minimum": 1, "maximum": MAX_PAGE_POINTS,
+                    "description": "Page height in points. Default: the top-level height."
+                },
+                "dpi": sheet_dpi_schema(
+                    "The cells of this row, left to right. Default: the top-level dpi."
+                )
+            },
+            "required": ["source"]
+        }
+    }))
+}
+
+impl ReviewSheetArgs {
+    /// The generate request: a PNG sheet.
+    fn into_request(self) -> GenerateRequest {
+        GenerateRequest {
+            job: GenerateJob::ReviewSheet(SheetParams {
+                entries: self.entries,
+                width: self.width,
+                height: self.height,
+                dpi: self.dpi,
+                labels: self.labels,
+                sizes: self.sizes,
+            }),
+            format: None,
+        }
+    }
+}
+
 /// Arguments of `validate_postscript`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ValidateArgs {
@@ -297,6 +412,49 @@ pub struct RenderToolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steps_used: Option<u64>,
     /// Time spent executing the program, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// The failure, when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RenderError>,
+    /// The renderer that handled the request.
+    pub renderer: RendererIdentity,
+}
+
+/// `structuredContent` of `review_sheet`, for success and failure alike. On
+/// success every field except `error` is present; on failure only `ok`,
+/// `error` and `renderer` are.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SheetToolOutput {
+    /// True when the sheet was composed (some cells may still have failed:
+    /// see `failed_cells`).
+    pub ok: bool,
+    /// Always `png`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Always `image/png`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// The sheet's width in pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_px: Option<u32>,
+    /// The sheet's height in pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_px: Option<u32>,
+    /// Size of the PNG in bytes (before base64).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<usize>,
+    /// Cells whose program did not run to the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_cells: Option<usize>,
+    /// Every cell, row by row, left to right: its dpi, zoom, render size,
+    /// place on the sheet, and error if it failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cells: Option<Vec<SheetCellReport>>,
+    /// Interpreter steps, all cells together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps_used: Option<u64>,
+    /// Time the cells' programs ran, all together, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
     /// The failure, when `ok` is false.
@@ -383,6 +541,16 @@ pub struct LimitsInfo {
     pub max_latex_bytes: usize,
     /// Largest `handwrite` text accepted, in bytes.
     pub max_handwrite_bytes: usize,
+    /// Most cells in one `review_sheet`.
+    pub max_sheet_cells: usize,
+    /// Most bytes of source in one `review_sheet`, all entries together.
+    pub max_sheet_source_bytes: usize,
+    /// Most pixels the cells of one `review_sheet` render, together.
+    pub max_sheet_cell_pixels: u64,
+    /// Most pixels of a composed `review_sheet`.
+    pub max_sheet_pixels: u64,
+    /// Wall-clock deadline for one whole `review_sheet`, in milliseconds.
+    pub sheet_timeout_ms: u64,
     /// Wall-clock deadline for one render, in milliseconds.
     pub render_timeout_ms: u64,
     /// Most device pixels on one page (width x height).
@@ -483,6 +651,38 @@ impl PscatMcp {
                 .into(),
             );
         }
+        if let Some(route) = tool_router.map.get_mut("review_sheet") {
+            let base = route.attr.description.clone().unwrap_or_default();
+            let per_cell_ms = limits.interp_time_limit().map_or(String::new(), |t| {
+                format!(" and at most {} ms", t.as_millis())
+            });
+            route.attr.description = Some(
+                format!(
+                    "{base} Limits on this server: at most {} cells; sources up to {} bytes in \
+                     all and {} each; the cells render at most {} pixels in all; the sheet at \
+                     most {} pixels and {PSCAT_MAX_SIDE_PX} a side; labels up to \
+                     {MAX_LABEL_CHARS} characters; {} ms for the whole sheet, each cell the \
+                     render's step limit{per_cell_ms}, never more than an equal share of the \
+                     time left (a cell past its limit fails with limit_exceeded); the PNG up to \
+                     {} bytes.",
+                    limits.max_sheet_cells,
+                    limits.sheet_source_bytes(),
+                    limits.max_source_bytes,
+                    limits.sheet_cell_pixels(),
+                    limits.sheet_pixels(),
+                    limits.sheet_timeout_ms(),
+                    limits.max_output_bytes,
+                )
+                .into(),
+            );
+            let schema = Arc::make_mut(&mut route.attr.input_schema);
+            if let Some(Value::Object(entries)) = schema
+                .get_mut("properties")
+                .and_then(|p| p.get_mut("entries"))
+            {
+                entries.insert("maxItems".into(), limits.max_sheet_cells.into());
+            }
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -531,6 +731,11 @@ impl PscatMcp {
                 max_source_bytes: l.max_source_bytes,
                 max_latex_bytes: l.max_latex_bytes,
                 max_handwrite_bytes: l.max_handwrite_bytes,
+                max_sheet_cells: l.max_sheet_cells,
+                max_sheet_source_bytes: l.sheet_source_bytes(),
+                max_sheet_cell_pixels: l.sheet_cell_pixels(),
+                max_sheet_pixels: l.sheet_pixels(),
+                sheet_timeout_ms: l.sheet_timeout_ms(),
                 render_timeout_ms: l.render_timeout_ms,
                 max_pixels: l.max_pixels,
                 max_side_px: PSCAT_MAX_SIDE_PX,
@@ -719,6 +924,48 @@ impl PscatMcp {
     }
 
     #[tool(
+        name = "review_sheet",
+        title = "Review sheet",
+        description = "Composes one labelled PNG from several PostScript programs, each rendered \
+                       at one or more resolutions, to compare candidates (logos, icons, a seed's \
+                       variants) side by side. Each entry is a row and each item of its dpi \
+                       list a cell, drawn at its true pixel size (a 48 px render stays 48 px \
+                       beside a 512 px one), centred in its column with a hairline around it, \
+                       the row label above and a pixel-size caption (`48x48 px`) under each \
+                       cell. A dpi item {\"dpi\": 9, \"zoom\": 4} draws that render enlarged 4x \
+                       with no smoothing (whole factors 2 to 16). A program that shows several \
+                       pages gives its last one. A cell whose program fails is drawn as far as \
+                       it got; structuredContent lists every cell with its size, its place on \
+                       the sheet and, for a failed cell, its error code and PSCat's report. \
+                       Labels are drawn in PSCat's fonts: Latin with accents, and Korean, \
+                       Japanese, Chinese and Thai only where the cjk-thai font pack is \
+                       installed (otherwise as ?). Programs run in the same sandbox as \
+                       render_postscript, one after another in one worker.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<SheetToolOutput>(),
+        annotations(
+            title = "Review sheet",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn review_sheet(
+        &self,
+        Parameters(args): Parameters<ReviewSheetArgs>,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        let outcome = tokio::select! {
+            r = self.service.generate(args.into_request()) => r,
+            () = ct.cancelled() => Err(cancelled()),
+        };
+        match outcome {
+            Ok(out) => sheet_success(out),
+            Err(err) => sheet_failure(err),
+        }
+    }
+
+    #[tool(
         name = "validate_postscript",
         title = "Validate PostScript",
         description = "Checks a PostScript program without returning an image. It runs a \
@@ -858,7 +1105,8 @@ impl ServerHandler for PscatMcp {
             .with_instructions(
                 "Renders PostScript programs to PNG, SVG or PDF with the PSCat interpreter, \
                  validates programs without rendering, writes LaTeX formulas on a chalkboard, writes text \
-                 as a handwriting-style note, \
+                 as a handwriting-style note, composes several programs at several sizes into one \
+                 labelled review sheet, \
                  and lists the fonts, palettes, page \
                  templates and procedures the interpreter has. Programs run in a sandbox with no file \
                  writes, no network, and file reads limited to PSCat's built-in lib/.",
@@ -1007,6 +1255,89 @@ fn failure_with(lead: &str, err: RenderError) -> CallToolResult {
     )
 }
 
+fn sheet_success(out: RenderOutput) -> CallToolResult {
+    let (Some(report), Some(png)) = (out.sheet, out.artifacts.first()) else {
+        return sheet_failure(RenderError::new(
+            ErrorCode::WorkerFailed,
+            "the renderer returned no sheet",
+        ));
+    };
+    let renderer = RendererIdentity::current();
+    let mut text = format!(
+        "Composed a review sheet of {} cells ({} failed) as PNG ({}x{} px, {} bytes) with \
+         PSCat {} in {} ms.",
+        report.cells.len(),
+        report.failed_cells,
+        report.width_px,
+        report.height_px,
+        png.byte_len,
+        renderer.version,
+        out.elapsed_ms
+    );
+    for c in &report.cells {
+        let zoom = if c.zoom > 1 {
+            format!(", shown at {}x", c.zoom)
+        } else {
+            String::new()
+        };
+        text.push_str(&format!(
+            "\nrow {} column {}: {} dpi, {}x{} px{zoom}, at ({}, {}): ",
+            c.row, c.column, c.dpi, c.width_px, c.height_px, c.x, c.y
+        ));
+        match &c.error {
+            None => text.push_str("ok"),
+            Some(e) => {
+                text.push_str(&code_name(e.code));
+                if let Some(limit) = &e.limit {
+                    text.push_str(&format!(" ({limit})"));
+                }
+                text.push_str(&format!(": {}", e.message));
+            }
+        }
+    }
+    let blocks = vec![
+        ContentBlock::image(png.data_base64.clone(), OutputFormat::Png.mime_type()),
+        ContentBlock::text(text),
+    ];
+    let envelope = SheetToolOutput {
+        ok: true,
+        format: Some(OutputFormat::Png.name().to_string()),
+        mime_type: Some(OutputFormat::Png.mime_type().to_string()),
+        width_px: Some(report.width_px),
+        height_px: Some(report.height_px),
+        bytes: Some(png.byte_len),
+        failed_cells: Some(report.failed_cells),
+        cells: Some(report.cells),
+        steps_used: Some(out.steps_used),
+        elapsed_ms: Some(out.elapsed_ms),
+        error: None,
+        renderer,
+    };
+    with_structured(CallToolResult::success(blocks), &envelope)
+}
+
+fn sheet_failure(err: RenderError) -> CallToolResult {
+    let text = error_text("Review sheet failed", &err);
+    let envelope = SheetToolOutput {
+        ok: false,
+        format: None,
+        mime_type: None,
+        width_px: None,
+        height_px: None,
+        bytes: None,
+        failed_cells: None,
+        cells: None,
+        steps_used: None,
+        elapsed_ms: None,
+        error: Some(err),
+        renderer: RendererIdentity::current(),
+    };
+    with_structured(
+        CallToolResult::error(vec![ContentBlock::text(text)]),
+        &envelope,
+    )
+}
+
 fn validate_failure(err: RenderError) -> CallToolResult {
     let text = error_text("Validation could not run", &err);
     let envelope = ValidateToolOutput {
@@ -1058,6 +1389,7 @@ fn with_argument_error_envelope(tool: &str, result: CallToolResult) -> CallToolR
         "render_postscript" => render_failure(err),
         "chalkboard_math" => failure_with("Chalkboard failed", err),
         "handwrite" => failure_with("Handwrite failed", err),
+        "review_sheet" => sheet_failure(err),
         "validate_postscript" => validate_failure(err),
         "describe_art_capabilities" => capabilities_failure(err),
         _ => result,

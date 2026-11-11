@@ -26,13 +26,25 @@
 //!   `pscat::pdf::scan_document_info` with `Gfx::set_pdf_info`
 //!   ([`set_transparent_background`], [`set_pdf_info_from_source`]), which a
 //!   generated board needs the way `pscat chalk` uses them.
+//! * `pscat::contact_sheet` ([`SheetLayout`], [`sheet_text`], [`SheetImage`],
+//!   [`SheetCanvas`]) and `pscat::png::encode`, the layout, label strips,
+//!   zoom, hairline frames and PNG behind `pscat sheet` and the plugin's
+//!   `review_sheet`; plus the page rasters of `pscat::gfx` again
+//!   ([`render_sheet_cell`]: a cell is its program's last page).
 //!
 //! Nothing outside this module may name a `#[doc(hidden)]` PSCat item.
-//! Everything here runs inside the worker process, with one exception:
-//! [`ChalkBoard::from_args`] and [`ChalkBoard::page`] also run in the server,
-//! before a job is started, to refuse a bad board config and to size the
-//! board for the pixel limits. They read only the board config (a bounded
-//! JSON object of fixed depth, already parsed by rmcp), never the LaTeX.
+//! Everything here runs inside the worker process, with two exceptions:
+//!
+//! * [`ChalkBoard::from_args`] and [`ChalkBoard::page`] also run in the
+//!   server, before a job is started, to refuse a bad board config and to
+//!   size the board for the pixel limits. They read only the board config (a
+//!   bounded JSON object of fixed depth, already parsed by rmcp), never the
+//!   LaTeX.
+//! * [`SheetLayout::new`] also runs in the server, to size a sheet against
+//!   its budgets before any worker starts. It is arithmetic on sizes (at
+//!   most the cell cap's worth of them, checked first), with the label
+//!   strips at an upper bound computed from the label's length; no text is
+//!   laid out and no pixel is allocated.
 
 use serde_json::{Map, Value, json};
 
@@ -354,6 +366,218 @@ impl ChalkBoard {
             dpi: d.dpi,
             transparent: d.transparent,
         })
+    }
+}
+
+// --- review_sheet: pscat::contact_sheet --------------------------------
+
+/// Most pixels on one side of a sheet or of one (zoomed) cell
+/// (`pscat::contact_sheet::MAX_SIDE_PX`).
+pub const SHEET_MAX_SIDE_PX: u32 = pscat::contact_sheet::MAX_SIDE_PX;
+
+/// One cell's footprint, for [`SheetLayout::new`]: the image as shown (after
+/// any zoom) and its caption strip, `(0, 0)` for none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheetCellSize {
+    /// The image in pixels.
+    pub image: (u32, u32),
+    /// The caption strip in pixels.
+    pub caption: (u32, u32),
+}
+
+/// One row, for [`SheetLayout::new`]: its label strip (`(0, 0)` for none)
+/// and its cells, left to right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SheetRowSize {
+    /// The label strip in pixels.
+    pub header: (u32, u32),
+    /// The cells.
+    pub cells: Vec<SheetCellSize>,
+}
+
+/// Where everything goes on a review sheet (`pscat::contact_sheet::Layout`,
+/// the geometry `pscat sheet` and the plugin's `review_sheet` use). Pure
+/// arithmetic on sizes: it allocates no pixels.
+#[derive(Debug)]
+pub struct SheetLayout(pscat::contact_sheet::Layout);
+
+impl SheetLayout {
+    /// Place `rows`. `Err` names the size when the sheet would be over
+    /// [`SHEET_MAX_SIDE_PX`] on a side (`contact sheet would be WxHpx, over
+    /// the 8000px-per-side limit`); nothing is allocated either way.
+    pub fn new(rows: &[SheetRowSize]) -> Result<SheetLayout, String> {
+        use pscat::contact_sheet::{CellSize, Layout, RowSize};
+        let rows: Vec<RowSize> = rows
+            .iter()
+            .map(|r| RowSize {
+                header: r.header,
+                cells: r
+                    .cells
+                    .iter()
+                    .map(|c| CellSize {
+                        image: c.image,
+                        caption: c.caption,
+                    })
+                    .collect(),
+            })
+            .collect();
+        // PSCat's message ends with advice for its CLI flags; keep the size.
+        Layout::new(&rows)
+            .map(SheetLayout)
+            .map_err(|m| m.split(" -- ").next().unwrap_or_default().to_string())
+    }
+
+    /// The sheet's size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.0.width, self.0.height)
+    }
+
+    /// Top-left of row `r`'s label strip.
+    pub fn header_xy(&self, r: usize) -> (u32, u32) {
+        self.0.header_xy[r]
+    }
+
+    /// Top-left of the image of row `r`, cell `c` (inside its hairline).
+    pub fn image_xy(&self, r: usize, c: usize) -> (u32, u32) {
+        self.0.image_xy[r][c]
+    }
+
+    /// Top-left of the caption of row `r`, cell `c`.
+    pub fn caption_xy(&self, r: usize, c: usize) -> (u32, u32) {
+        self.0.caption_xy[r][c]
+    }
+}
+
+/// A strip of text (a row label or a caption), drawn by
+/// [`sheet_text`].
+pub struct SheetStrip(tiny_skia::Pixmap);
+
+impl SheetStrip {
+    /// Its size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.0.width(), self.0.height())
+    }
+}
+
+/// `text` as a tight, opaque strip, `px` pixels tall type, bold or not,
+/// set by PSCat's own interpreter and fonts with the face picked per
+/// character by script (`pscat::contact_sheet::render_text`): Latin
+/// (accents included) in Helvetica, Korean, Japanese, Chinese and Thai in
+/// the `cjk-thai` font pack's faces, `?` for a character no installed face
+/// has. `None` for an empty text. Worker only: the label is untrusted, and
+/// laying it out runs PostScript (a program PSCat writes, with the text as
+/// an escaped string literal) on an interpreter without limits; the text is
+/// at most a few hundred characters, and the worker's deadline and rlimits
+/// bound it.
+pub fn sheet_text(text: &str, px: u32, bold: bool) -> Result<Option<SheetStrip>, String> {
+    pscat::contact_sheet::render_text(text, px, bold).map(|p| p.map(SheetStrip))
+}
+
+/// One cell's image: the program's last page, or a blank stand-in.
+pub struct SheetImage(tiny_skia::Pixmap);
+
+impl SheetImage {
+    /// Its size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.0.width(), self.0.height())
+    }
+
+    /// A white image of `w`x`h` pixels, for a cell whose program left none
+    /// that can be shown. `None` for an unusable size.
+    pub fn blank(w: u32, h: u32) -> Option<SheetImage> {
+        let mut p = tiny_skia::Pixmap::new(w, h)?;
+        p.fill(tiny_skia::Color::WHITE);
+        Some(SheetImage(p))
+    }
+
+    /// This image enlarged `k` times with nearest-neighbour sampling (every
+    /// pixel a `k`x`k` block; `pscat::contact_sheet::zoom_nearest`). `None`
+    /// past [`SHEET_MAX_SIDE_PX`] on a side.
+    pub fn zoomed(&self, k: u32) -> Option<SheetImage> {
+        pscat::contact_sheet::zoom_nearest(&self.0, k).map(SheetImage)
+    }
+}
+
+/// What one cell's program left.
+pub struct SheetCellRender {
+    /// The last page, as `pscat sheet` takes it: a program that shows
+    /// several pages contributes its final one, one that fails the page as
+    /// far as it got.
+    pub image: SheetImage,
+    /// The error the program raised or the limit it passed, if any.
+    pub error: Option<crate::worker::PsDiagnostic>,
+    /// Interpreter steps.
+    pub steps: u64,
+    /// Milliseconds the program ran.
+    pub elapsed_ms: u64,
+}
+
+/// Run one cell's program on a fresh `page` (points) at `scale` device
+/// pixels per point, under `limits` and the worker's sandbox
+/// ([`crate::worker::apply_limits`]), on the calling thread, as `pscat
+/// sheet` renders a cell. Worker only. `Err` when the page or the limits
+/// cannot be set up (not the program's fault).
+pub fn render_sheet_cell(
+    source: &[u8],
+    page: (u32, u32),
+    scale: f32,
+    limits: &crate::worker::InterpLimits,
+) -> Result<SheetCellRender, String> {
+    let mut interp = pscat::Interp::with_page_scaled(page.0, page.1, scale).ok_or_else(|| {
+        format!(
+            "a {}x{} pt page at scale {scale} is unusable",
+            page.0, page.1
+        )
+    })?;
+    crate::worker::apply_limits(&mut interp, limits)?;
+    let started = std::time::Instant::now();
+    let run = interp.run_source(source);
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let error = run.err().map(|err| crate::worker::PsDiagnostic {
+        name: err.name().to_string(),
+        limit: err.limit().map(|l| l.name().to_string()),
+        report: interp.error_report(&err),
+    });
+    let gfx = interp.gfx();
+    let last = match gfx.pages().last() {
+        Some(page) if !gfx.has_trailing_art() => page.clone(),
+        _ => gfx.pixmap.clone(),
+    };
+    Ok(SheetCellRender {
+        image: SheetImage(last),
+        error,
+        steps: interp.steps_used(),
+        elapsed_ms,
+    })
+}
+
+/// The sheet being composed: white, the size of its [`SheetLayout`].
+pub struct SheetCanvas(tiny_skia::Pixmap);
+
+impl SheetCanvas {
+    /// A blank white sheet for `layout`. The caller has checked its size
+    /// against the budget; this allocates it.
+    pub fn new(layout: &SheetLayout) -> Result<SheetCanvas, String> {
+        layout.0.new_sheet().map(SheetCanvas)
+    }
+
+    /// Copy `strip` with its top-left at `at`.
+    pub fn put_strip(&mut self, at: (u32, u32), strip: &SheetStrip) {
+        pscat::contact_sheet::blit_at(&mut self.0, at.0, at.1, &strip.0);
+    }
+
+    /// Draw the hairline frame around where `image` goes, then copy it with
+    /// its top-left at `at`.
+    pub fn put_image(&mut self, at: (u32, u32), image: &SheetImage) {
+        let (w, h) = image.size();
+        pscat::contact_sheet::frame(&mut self.0, at.0, at.1, w, h);
+        pscat::contact_sheet::blit_at(&mut self.0, at.0, at.1, &image.0);
+    }
+
+    /// The sheet as a PNG, recording 72 dpi (cells of any dpi share it), as
+    /// `pscat sheet` writes it.
+    pub fn to_png(&self) -> std::io::Result<Vec<u8>> {
+        pscat::png::encode(&self.0, 1.0)
     }
 }
 

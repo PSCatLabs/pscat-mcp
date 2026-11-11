@@ -29,9 +29,9 @@
 //!
 //! Adding a kind means a variant here with its `plan`, `generate` and
 //! `explain` arms, a `RenderService::generate` caller in `mcp.rs`, and any
-//! hidden PSCat calls in `pscat_extras`. A generator that produces pages
-//! rather than a program (a contact sheet) would add a second output shape
-//! next to [`GeneratedProgram`].
+//! hidden PSCat calls in `pscat_extras`. A generator whose output is an
+//! image rather than a program (`review_sheet`, [`crate::sheet`]) returns
+//! [`Generated::Sheet`] and plans a [`PlannedPage::Sheet`].
 //!
 //! [`JobMode::Generate`]: crate::worker::JobMode::Generate
 
@@ -41,7 +41,8 @@ use serde_json::{Map, Value};
 use crate::config::{LimitsConfig, PSCAT_MAX_SIDE_PX};
 use crate::handwrite::HandwriteParams;
 use crate::pscat_extras::{ChalkBoard, ChalkFailure};
-use crate::render::{ErrorCode, RenderError, device_px};
+use crate::render::{ErrorCode, InputDiagnostic, RenderError, device_px};
+use crate::sheet::{ComposedSheet, SheetBudget, SheetParams};
 use crate::worker::{InterpLimits, PsDiagnostic};
 
 /// What a [`JobMode::Generate`](crate::worker::JobMode::Generate) job
@@ -54,6 +55,10 @@ pub enum GenerateJob {
     /// Text written as a handwriting-style note (`/HandScript`,
     /// `lib/handscript.ps`); see [`crate::handwrite`].
     Handwrite(HandwriteParams),
+    /// Several programs at several sizes composed into one labelled PNG
+    /// (`pscat::contact_sheet`); see [`crate::sheet`]. Its output is the
+    /// image, not a program ([`Generated::Sheet`]).
+    ReviewSheet(SheetParams),
 }
 
 /// Parameters of a chalkboard.
@@ -90,6 +95,16 @@ pub enum PlannedPage {
     /// The width and the dpi. The height comes from laying out the untrusted
     /// input, so only the worker can know it; it must fit the budget.
     FixedWidth(DecidedHeight),
+    /// A composed image, not a program's page: a review sheet. The plan has
+    /// checked every budget with the sheet at its largest (`bound_px`); the
+    /// worker checks the exact sheet against `budget` before it allocates
+    /// it or runs a cell.
+    Sheet {
+        /// The sheet's size at most, in pixels.
+        bound_px: (u32, u32),
+        /// The budgets, which travel in the job.
+        budget: SheetBudget,
+    },
 }
 
 /// The width a generated page must have, and the budget its height, decided
@@ -184,6 +199,18 @@ pub struct GenerateContext<'a> {
     pub limits: &'a InterpLimits,
     /// The height budget, when the plan decided only the width.
     pub decided: Option<&'a DecidedHeight>,
+    /// The sheet's budgets, for a review sheet.
+    pub sheet: Option<&'a SheetBudget>,
+}
+
+/// What a generator made: a program for the worker to render, or (a review
+/// sheet) the finished image.
+#[derive(Debug, Clone)]
+pub enum Generated {
+    /// A program, rendered like a `render_postscript` job.
+    Program(GeneratedProgram),
+    /// A composed sheet: the PNG and what it holds.
+    Sheet(Box<ComposedSheet>),
 }
 
 /// A program a generator wrote, with its page.
@@ -250,6 +277,12 @@ pub enum GenerateErrorCode {
     TooManyPixels,
     /// [`ErrorCode::InvalidDimensions`].
     InvalidDimensions,
+    /// [`ErrorCode::SourceTooLarge`].
+    SourceTooLarge,
+    /// [`ErrorCode::Timeout`]: a sheet ran out of its time between cells.
+    Timeout,
+    /// [`ErrorCode::OutputTooLarge`].
+    OutputTooLarge,
 }
 
 impl From<GenerateErrorCode> for ErrorCode {
@@ -259,6 +292,9 @@ impl From<GenerateErrorCode> for ErrorCode {
             GenerateErrorCode::PostscriptError => ErrorCode::PostscriptError,
             GenerateErrorCode::TooManyPixels => ErrorCode::TooManyPixels,
             GenerateErrorCode::InvalidDimensions => ErrorCode::InvalidDimensions,
+            GenerateErrorCode::SourceTooLarge => ErrorCode::SourceTooLarge,
+            GenerateErrorCode::Timeout => ErrorCode::Timeout,
+            GenerateErrorCode::OutputTooLarge => ErrorCode::OutputTooLarge,
         }
     }
 }
@@ -299,6 +335,7 @@ impl GenerateJob {
         match self {
             GenerateJob::ChalkboardMath(_) => "chalkboard_math",
             GenerateJob::Handwrite(_) => "handwrite",
+            GenerateJob::ReviewSheet(_) => "review_sheet",
         }
     }
 
@@ -307,6 +344,7 @@ impl GenerateJob {
         match self {
             GenerateJob::ChalkboardMath(p) => p.latex.len(),
             GenerateJob::Handwrite(p) => p.text.len(),
+            GenerateJob::ReviewSheet(p) => p.entries.iter().map(|e| e.source.len()).sum(),
         }
     }
 
@@ -376,12 +414,29 @@ impl GenerateJob {
                     dpi: note.dpi,
                 })
             }
+            GenerateJob::ReviewSheet(p) => {
+                let budget = SheetBudget::from_limits(limits);
+                let bound_px = crate::sheet::plan(p, &budget).map_err(RenderError::from)?;
+                Ok(PagePlan {
+                    page: PlannedPage::Sheet { bound_px, budget },
+                    // Cells of any dpi share the sheet: nominal 72 dpi.
+                    dpi: 72.0,
+                })
+            }
         }
     }
 
     /// Worker side: write the program (and, for a decided height, size the
-    /// page and check it against the budget first).
-    pub fn generate(&self, cx: &GenerateContext<'_>) -> Result<GeneratedProgram, GenerateError> {
+    /// page and check it against the budget first), or, for a review sheet,
+    /// compose the image.
+    pub fn generate(&self, cx: &GenerateContext<'_>) -> Result<Generated, GenerateError> {
+        if let GenerateJob::ReviewSheet(p) = self {
+            return crate::sheet::compose(p, cx).map(|s| Generated::Sheet(Box::new(s)));
+        }
+        self.program(cx).map(Generated::Program)
+    }
+
+    fn program(&self, cx: &GenerateContext<'_>) -> Result<GeneratedProgram, GenerateError> {
         match self {
             GenerateJob::ChalkboardMath(p) => {
                 let board = ChalkBoard::from_args(&p.board).map_err(|message| GenerateFailure {
@@ -408,6 +463,9 @@ impl GenerateJob {
                 })?;
                 note.generate(cx)
             }
+            GenerateJob::ReviewSheet(_) => Err(GenerateError::Internal(
+                "a review sheet is composed, not written".into(),
+            )),
         }
     }
 
@@ -418,7 +476,21 @@ impl GenerateJob {
             GenerateJob::ChalkboardMath(_) => {
                 crate::pscat_extras::chalk_explain(err).map(GenerateFailure::from)
             }
-            GenerateJob::Handwrite(_) => None,
+            GenerateJob::Handwrite(_) | GenerateJob::ReviewSheet(_) => None,
+        }
+    }
+}
+
+/// A generator's refusal found before any worker starts, with the
+/// generator's code in `error.input`.
+impl From<GenerateFailure> for RenderError {
+    fn from(f: GenerateFailure) -> Self {
+        RenderError {
+            input: Some(InputDiagnostic {
+                code: f.detail,
+                token: f.token,
+            }),
+            ..RenderError::new(f.code.into(), f.message)
         }
     }
 }
@@ -444,10 +516,11 @@ mod tests {
         GenerateContext {
             limits: &LIMITS,
             decided,
+            sheet: None,
         }
     }
 
-    fn input_failure(r: Result<GeneratedProgram, GenerateError>) -> GenerateFailure {
+    fn input_failure<T: std::fmt::Debug>(r: Result<T, GenerateError>) -> GenerateFailure {
         match r.unwrap_err() {
             GenerateError::Input(f) => f,
             other => panic!("expected an input failure, got {other:?}"),
@@ -475,7 +548,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidRequest);
         assert!(err.message.chars().count() <= MAX_MESSAGE_CHARS + 1);
         assert!(err.message.ends_with('…'));
-        let fail = input_failure(job.generate(&cx(None)));
+        let fail = input_failure(job.program(&cx(None)));
         assert!(fail.message.chars().count() <= MAX_MESSAGE_CHARS + 1);
         let long_cmd = format!("mk-unsupported-command:\\{}", "a".repeat(5000));
         let e = job.explain(&pscat::PsError::Undefined(long_cmd)).unwrap();
@@ -527,14 +600,14 @@ mod tests {
     #[test]
     fn generate_writes_a_program_and_names_row_errors() {
         let p = chalk("a^2+b^2=c^2", json!({"board": false}))
-            .generate(&cx(None))
+            .program(&cx(None))
             .unwrap();
         assert!(p.transparent);
         assert_eq!(p.page_points, (800, 400));
         assert!(p.source.contains("mathkit"));
-        let err = input_failure(chalk(r"\(x", json!({})).generate(&cx(None)));
+        let err = input_failure(chalk(r"\(x", json!({})).program(&cx(None)));
         assert_eq!(err.code, GenerateErrorCode::PostscriptError);
-        let err = input_failure(chalk("% only a comment", json!({})).generate(&cx(None)));
+        let err = input_failure(chalk("% only a comment", json!({})).program(&cx(None)));
         assert_eq!(err.code, GenerateErrorCode::InvalidRequest);
         assert_eq!(err.detail, "empty");
     }
@@ -641,22 +714,22 @@ mod tests {
     #[test]
     fn handwrite_sizes_the_page_and_checks_the_budget_before_drawing() {
         let b = budget(612, 16_000_000);
-        let one = hand("hello", json!({})).generate(&cx(Some(&b))).unwrap();
+        let one = hand("hello", json!({})).program(&cx(Some(&b))).unwrap();
         assert_eq!(one.page_points, (612, 146));
         assert_eq!(one.dpi, 72.0);
         assert!(one.source.contains("hs-write showpage"));
         assert!(one.spent.steps > 0);
-        let three = hand("a\nb\nc", json!({})).generate(&cx(Some(&b))).unwrap();
+        let three = hand("a\nb\nc", json!({})).program(&cx(Some(&b))).unwrap();
         assert_eq!(three.page_points, (612, 254));
         // 10 lines = 631.8 -> 632 points; the cap is 612 x 631 pixels.
         let tight = budget(612, 612 * 631);
         let ten = "a\n".repeat(10);
-        let err = input_failure(hand(&ten, json!({})).generate(&cx(Some(&tight))));
+        let err = input_failure(hand(&ten, json!({})).program(&cx(Some(&tight))));
         assert_eq!(err.code, GenerateErrorCode::TooManyPixels);
         assert!(err.message.contains("10 lines"), "{}", err.message);
         // Without a budget the generator refuses to guess.
         assert!(matches!(
-            hand("hi", json!({})).generate(&cx(None)),
+            hand("hi", json!({})).program(&cx(None)),
             Err(GenerateError::Internal(_))
         ));
         // A step limit hit in the measuring pass is a PostScript diagnostic.
@@ -665,8 +738,9 @@ mod tests {
         let cx = GenerateContext {
             limits: &limits,
             decided: Some(&b),
+            sheet: None,
         };
-        match hand("hello", json!({})).generate(&cx) {
+        match hand("hello", json!({})).program(&cx) {
             Err(GenerateError::PostScript(d)) => assert_eq!(d.limit.as_deref(), Some("steps")),
             other => panic!("expected a limit, got {other:?}"),
         }

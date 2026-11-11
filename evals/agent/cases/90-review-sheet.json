@@ -1,0 +1,41 @@
+{
+  "id": "review-sheet",
+  "title": "Scenario 9: two logo candidates compared at two sizes on one review sheet, with review_sheet",
+  "origin": "examples/agent-scenarios.md section 9",
+  "max_turns": 8,
+  "prompt": "Using the pscat-render tools, I have two logo ideas for a 64x64 point icon: a red ring, and a blue square with a white square hole in it. Draw both in PostScript and show them side by side on one review sheet at 128 pixels and at 32 pixels, with the 32 pixel version also blown up 4x so I can see the pixels. Tell me which one reads better small.\n",
+  "expect": {
+    "tools_required": [
+      "review_sheet"
+    ],
+    "calls": [
+      {
+        "tool": "review_sheet",
+        "args": {
+          "entries": {
+            "absent": false
+          }
+        },
+        "result": {
+          "is_error": false,
+          "content_types": [
+            "image"
+          ],
+          "structured": {
+            "ok": true,
+            "format": "png",
+            "failed_cells": 0
+          }
+        }
+      }
+    ],
+    "answer": {
+      "any": [
+        [
+          "ring",
+          "square"
+        ]
+      ]
+    }
+  }
+}

@@ -47,6 +47,9 @@ subtle = "2"
 thiserror = "2"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
+# PSCat's raster type, for the review sheet's cells and canvas (only in
+# src/pscat_extras.rs). The same version as PSCat's own, so one copy is built.
+tiny-skia = { version = "0.12", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

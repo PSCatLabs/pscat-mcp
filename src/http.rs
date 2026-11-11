@@ -41,7 +41,9 @@ use crate::render::RenderService;
 const BODY_ENVELOPE_BYTES: usize = 64 * 1024;
 
 /// Largest `/mcp` request body: the largest text input a tool takes (the
-/// source limit, or `handwrite`'s text limit if that is larger) times 6
+/// source limit, `handwrite`'s text limit or a `review_sheet`'s sources
+/// together, whichever is larger;
+/// [`crate::config::LimitsConfig::max_text_bytes`]) times 6
 /// (worst-case JSON escaping, `\u00XX`) plus envelope slack. Inputs a little
 /// over their limit still reach the tool and get a structured
 /// `source_too_large` error; only truly huge bodies are cut off with `413`.
@@ -154,7 +156,7 @@ pub fn mcp_server_config(http: &HttpConfig, ct: CancellationToken) -> Streamable
 
 /// The application router: `/healthz` and authenticated `/mcp` over
 /// `service`. Testable without binding a port. The request-body limit is
-/// derived from the service's `max_source_bytes` and also applied to rmcp's
+/// derived from the service's input limits and also applied to rmcp's
 /// own limit (overriding `mcp_config.max_request_body_bytes`).
 pub fn router(
     service: Arc<RenderService>,
@@ -174,7 +176,7 @@ pub fn router_with_capture(
     capture: Option<Arc<Capture>>,
 ) -> Router {
     let limits = service.limits();
-    let body_limit = mcp_body_limit(limits.max_source_bytes.max(limits.max_handwrite_bytes));
+    let body_limit = mcp_body_limit(limits.max_text_bytes());
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
     let mcp = StreamableHttpService::new(
         move || Ok(PscatMcp::new(service.clone())),

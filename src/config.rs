@@ -89,6 +89,36 @@ pub struct LimitsConfig {
     /// `server_busy`, in milliseconds.
     #[arg(long, env = "PSCAT_MCP_QUEUE_TIMEOUT_MS", default_value_t = 10_000)]
     pub queue_timeout_ms: u64,
+
+    /// Most cells (dpi entries over all rows) one `review_sheet` may have.
+    /// Checked before execution. The PSCat plugin's limit.
+    #[arg(long, env = "PSCAT_MCP_MAX_SHEET_CELLS", default_value_t = 32)]
+    pub max_sheet_cells: usize,
+
+    /// Most bytes of PostScript in one `review_sheet`, all entries together.
+    /// Checked before execution. Defaults to the source limit, as the
+    /// plugin's does; each entry is also held to the source limit.
+    #[arg(long, env = "PSCAT_MCP_MAX_SHEET_SOURCE_BYTES")]
+    pub max_sheet_source_bytes: Option<usize>,
+
+    /// Most device pixels the cells of one `review_sheet` render, all cells
+    /// together (before any zoom). Checked before execution. Defaults to
+    /// the page pixel limit, as the plugin's does.
+    #[arg(long, env = "PSCAT_MCP_MAX_SHEET_CELL_PIXELS")]
+    pub max_sheet_cell_pixels: Option<u64>,
+
+    /// Most device pixels of the composed `review_sheet` image (width x
+    /// height; at most 8000 a side). Checked before execution. Defaults to
+    /// the page pixel limit, as the plugin's does.
+    #[arg(long, env = "PSCAT_MCP_MAX_SHEET_PIXELS")]
+    pub max_sheet_pixels: Option<u64>,
+
+    /// Wall-clock deadline for one whole `review_sheet`, in milliseconds:
+    /// the worker that renders every cell is killed when it passes. Each
+    /// cell also has the render's own step and time limits. Defaults to the
+    /// render timeout (the plugin fits a sheet in one call's timeout).
+    #[arg(long, env = "PSCAT_MCP_MAX_SHEET_TIMEOUT_MS")]
+    pub max_sheet_timeout_ms: Option<u64>,
 }
 
 impl Default for LimitsConfig {
@@ -108,6 +138,11 @@ impl Default for LimitsConfig {
             max_program_output_bytes: 16 * 1024,
             max_concurrent_renders: None,
             queue_timeout_ms: 10_000,
+            max_sheet_cells: 32,
+            max_sheet_source_bytes: None,
+            max_sheet_cell_pixels: None,
+            max_sheet_pixels: None,
+            max_sheet_timeout_ms: None,
         }
     }
 }
@@ -124,13 +159,49 @@ impl LimitsConfig {
         match self.interp_time_limit_ms {
             Some(0) => None,
             Some(ms) => Some(Duration::from_millis(ms)),
-            None => {
-                let margin = (self.render_timeout_ms / 10).max(250);
-                Some(Duration::from_millis(
-                    self.render_timeout_ms.saturating_sub(margin).max(1),
-                ))
-            }
+            None => Some(below_with_margin(self.render_timeout_ms)),
         }
+    }
+
+    /// Most bytes of PostScript in one sheet.
+    pub fn sheet_source_bytes(&self) -> usize {
+        self.max_sheet_source_bytes.unwrap_or(self.max_source_bytes)
+    }
+
+    /// Most device pixels the cells of one sheet render together.
+    pub fn sheet_cell_pixels(&self) -> u64 {
+        self.max_sheet_cell_pixels.unwrap_or(self.max_pixels)
+    }
+
+    /// Most device pixels of a composed sheet.
+    pub fn sheet_pixels(&self) -> u64 {
+        self.max_sheet_pixels.unwrap_or(self.max_pixels)
+    }
+
+    /// The deadline of a whole sheet, in milliseconds.
+    pub fn sheet_timeout_ms(&self) -> u64 {
+        self.max_sheet_timeout_ms.unwrap_or(self.render_timeout_ms)
+    }
+
+    /// The external kill deadline of a whole sheet.
+    pub fn sheet_timeout(&self) -> Duration {
+        Duration::from_millis(self.sheet_timeout_ms())
+    }
+
+    /// The time the worker shares out between a sheet's cells: the sheet
+    /// deadline minus the same margin the render's interpreter limit
+    /// leaves, so composing and encoding the sheet fit before the kill.
+    pub fn sheet_time_budget(&self) -> Duration {
+        below_with_margin(self.sheet_timeout_ms())
+    }
+
+    /// The larger of the input limits that bound one tool call's text: the
+    /// source, the `handwrite` text and a sheet's sources together. The
+    /// HTTP body limit follows it.
+    pub fn max_text_bytes(&self) -> usize {
+        self.max_source_bytes
+            .max(self.max_handwrite_bytes)
+            .max(self.sheet_source_bytes())
     }
 
     /// PSCat's step limit, or `None` when disabled.
@@ -191,8 +262,26 @@ impl LimitsConfig {
         if self.max_pixels == 0 || self.max_pages == 0 || self.max_output_bytes == 0 {
             return Err("max-pixels, max-pages and max-output-bytes must be positive".into());
         }
+        if self.max_sheet_cells == 0
+            || self.sheet_source_bytes() == 0
+            || self.sheet_cell_pixels() == 0
+            || self.sheet_pixels() == 0
+            || self.sheet_timeout_ms() == 0
+        {
+            return Err(
+                "max-sheet-cells, max-sheet-source-bytes, max-sheet-cell-pixels, \
+                        max-sheet-pixels and max-sheet-timeout-ms must be positive"
+                    .into(),
+            );
+        }
         Ok(())
     }
+}
+
+/// `ms` less a margin of 10%, at least 250 ms, and never below 1 ms.
+fn below_with_margin(ms: u64) -> Duration {
+    let margin = (ms / 10).max(250);
+    Duration::from_millis(ms.saturating_sub(margin).max(1))
 }
 
 /// How the render worker is started.
@@ -317,6 +406,43 @@ mod tests {
             ..LimitsConfig::default()
         };
         assert!(bad.check().is_err());
+    }
+
+    #[test]
+    fn sheet_limits_default_to_the_render_limits() {
+        let l = LimitsConfig::default();
+        assert_eq!(l.max_sheet_cells, 32);
+        assert_eq!(l.sheet_source_bytes(), l.max_source_bytes);
+        assert_eq!(l.sheet_cell_pixels(), l.max_pixels);
+        assert_eq!(l.sheet_pixels(), l.max_pixels);
+        assert_eq!(l.sheet_timeout(), l.render_timeout());
+        assert_eq!(l.sheet_time_budget(), Duration::from_millis(18_000));
+        assert_eq!(l.max_text_bytes(), 256 * 1024);
+        let big = LimitsConfig {
+            max_sheet_source_bytes: Some(1 << 20),
+            max_pixels: 1000,
+            max_sheet_timeout_ms: Some(60_000),
+            ..LimitsConfig::default()
+        };
+        assert_eq!(big.max_text_bytes(), 1 << 20);
+        assert_eq!(big.sheet_pixels(), 1000);
+        assert_eq!(big.sheet_time_budget(), Duration::from_millis(54_000));
+        for bad in [
+            LimitsConfig {
+                max_sheet_cells: 0,
+                ..LimitsConfig::default()
+            },
+            LimitsConfig {
+                max_sheet_pixels: Some(0),
+                ..LimitsConfig::default()
+            },
+            LimitsConfig {
+                max_sheet_timeout_ms: Some(0),
+                ..LimitsConfig::default()
+            },
+        ] {
+            assert!(bad.check().is_err());
+        }
     }
 
     #[test]

@@ -745,6 +745,47 @@ async fn body_limit_follows_the_handwrite_text_limit() {
     assert_eq!(status, 413);
 }
 
+/// The body limit also follows a `review_sheet`'s sources together, which
+/// may be larger than one source.
+#[tokio::test(flavor = "multi_thread")]
+async fn body_limit_follows_the_sheet_source_limit() {
+    let srv = start(real_service(LimitsConfig {
+        max_source_bytes: 1024,
+        max_sheet_source_bytes: Some(100 * 1024),
+        max_sheet_cells: 200,
+        ..LimitsConfig::default()
+    }))
+    .await;
+    let sheet = |id: u64, entries: usize| {
+        let entries: Vec<Value> = (0..entries)
+            .map(|_| json!({ "source": "%".repeat(1000) }))
+            .collect();
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "review_sheet", "arguments": { "entries": entries } }
+        })
+    };
+    // About 90 KB of sources: past the source limit's body limit (1024 * 6 +
+    // 64 KiB), within the sheet's. Read and answered: 90 letter-size cells
+    // are over the pixel budget, and nothing runs.
+    let (status, _, resp) = post(&srv.mcp(), Some(TOKEN), None, &sheet(1, 90)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        error_code(&resp["result"]),
+        Some("too_many_pixels"),
+        "{resp}"
+    );
+    // Over the sheet's source limit: structured.
+    let (status, _, resp) = post(&srv.mcp(), Some(TOKEN), None, &sheet(2, 110)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        error_code(&resp["result"]),
+        Some("source_too_large"),
+        "{resp}"
+    );
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
 // ------------------------------------------- cancellation and chunked bodies
 
 /// Processes whose command line contains `tag`.

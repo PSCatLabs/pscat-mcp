@@ -36,8 +36,9 @@ apart:
 * `get_renderer_info` exists only on this server. It reports
   `server_version`, the limits in force, and a `renderer` block with the
   PSCat version and git revision.
-* Both servers have `chalkboard_math` and `handwrite`. Here SVG and PDF
-  come back inline and there is no `out_path`; `handwrite` is PNG only on both.
+* Both servers have `chalkboard_math`, `handwrite` and `review_sheet`. Here
+  SVG and PDF come back inline and there is no `out_path`; `handwrite` and
+  `review_sheet` are PNG only on both.
 
 ## 3. stdio
 

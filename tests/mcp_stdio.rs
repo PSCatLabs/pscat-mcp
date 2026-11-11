@@ -32,6 +32,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ("get_renderer_info", "PSCat renderer info"),
     ("handwrite", "Handwriting-style note"),
     ("render_postscript", "Render PostScript"),
+    ("review_sheet", "Review sheet"),
     ("validate_postscript", "Validate PostScript"),
 ];
 
@@ -552,6 +553,12 @@ async fn argument_type_errors_get_the_structured_envelope() {
         ("handwrite", json!({"text": "hi", "size": "big"})),
         ("handwrite", json!({"text": "hi", "width": -5})),
         ("handwrite", json!({"size": 36})),
+        ("review_sheet", json!({"entries": [{"source": 42}]})),
+        (
+            "review_sheet",
+            json!({"entries": [{"source": "showpage"}], "sizes": 1}),
+        ),
+        ("review_sheet", json!({"width": 100})),
         ("describe_art_capabilities", json!({"names": "pgcard"})),
         ("describe_art_capabilities", json!({"offset": -1})),
         (

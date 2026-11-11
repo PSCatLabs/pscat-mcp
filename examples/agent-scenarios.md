@@ -14,13 +14,14 @@ is also checked without a model by the server-layer scenarios in
 [`evals/server/scenarios/`](../evals/server/scenarios/), which run in CI; see
 [Server-layer evals](../docs/LOCAL_TESTING.md#10-server-layer-evals).
 
-The server exposes six tools:
+The server exposes seven tools:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}` |
 | `chalkboard_math` | `latex` (required), `size`, `irregular`, `slope`, `jitter`, `align`, `color`, `board`, `ghosting`, `seed`, `width`, `height` (points, default 800×400), `dpi` (default 144), `format`, `config` | The board as `render_postscript` returns a page, with the same envelope |
 | `handwrite` | `text` (required), `size` (points, default 36), `width` (points, default 612), `paper` (`plain` default, `ruled`), `ink` (`"R,G,B"` in 0–1, default `0.13,0.14,0.34`), `jitter` (default 16), `seed` (default 1985), `dpi` (default 72) | The note as a PNG, with the same envelope as `render_postscript`; the page height is fitted to the text |
+| `review_sheet` | `entries` (required: each `source`, optional `label`, `width`, `height`, `dpi` list), top-level `width`, `height` (default 612×792), `dpi` (default `[72]`; an item is a number or `{dpi, zoom}`), `labels`, `sizes` (default true) | One PNG `image` (the sheet) + a text line per cell; `structuredContent` `{ok, format, mime_type, width_px, height_px, bytes, failed_cells, cells[]{row, column, dpi, zoom, width_px, height_px, x, y, ok, error?{code, limit?, message}}, steps_used, elapsed_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
 | `get_renderer_info` | none | PSCat version, formats, limits in force |
@@ -28,7 +29,10 @@ The server exposes six tools:
 Every failure is `isError: true` with a text explanation and
 `structuredContent.error = {code, message, postscript?, program_output?, input?}`
 (`input` is `chalkboard_math`'s `{code, token?}` for a LaTeX or board error,
-and `handwrite`'s `{code: "height"}` for a note too tall).
+`handwrite`'s `{code: "height"}` for a note too tall, and `review_sheet`'s
+`{code}` naming the budget or argument that refused a sheet: `cells`,
+`sources`, `source`, `deadline`, `cell_side`, `cell_pixels`, `sheet_side`,
+`sheet_pixels`, `sheet_bytes`, `dpi`, `page`, `arguments`).
 `code` is one of: `invalid_request`, `source_too_large`, `unsupported_format`,
 `invalid_dimensions`, `too_many_pixels`, `postscript_error`, `limit_exceeded`,
 `timeout`, `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
@@ -462,6 +466,62 @@ through an agent against the container image.
 
 ---
 
+## 9. Compare candidates on a review sheet
+
+**Prompt**
+
+> I have two logo ideas for a 64x64 point icon: a red ring, and a blue
+> square with a white square hole in it. Show them side by side on one
+> review sheet at 128 pixels and at 32 pixels, with the 32 pixel version
+> also blown up 4x so I can see the pixels. Which one reads better small?
+
+**Expected tool calls**
+
+```json
+{ "name": "review_sheet", "arguments": {
+  "entries": [
+    { "source": "0.85 0.2 0.2 setrgbcolor 32 32 26 0 360 arc fill 1 setgray 32 32 12 0 360 arc fill showpage", "label": "ring" },
+    { "source": "0.2 0.3 0.8 setrgbcolor 8 8 48 48 rectfill 1 setgray 20 20 24 24 rectfill showpage", "label": "square" }
+  ],
+  "width": 64, "height": 64,
+  "dpi": [144, 36, { "dpi": 36, "zoom": 4 }]
+} }
+```
+
+**Expected result**
+
+- One PNG image of 363×396 pixels: two rows (`ring`, `square`) of three
+  cells each, a 128×128 render, a 32×32 render and the same 32×32 render
+  enlarged 4x with hard pixel edges, each with a grey hairline and a
+  `128x128 px` / `32x32 px` / `32x32 px (shown at 4x)` caption. `ok: true`,
+  `failed_cells: 0`, and `cells[]` gives each cell's size and place
+  (`cells[0]` at x 13, y 39). For the same programs, dpis and labels the
+  bytes are those `pscat sheet` writes. The agent compares the small renders
+  and answers.
+- A cell whose program fails is drawn as far as it got: the sheet still
+  comes back (`ok: true`), with `failed_cells: 1` and that cell's
+  `error: {code: "postscript_error", message: "PostScript error: %%[ Error:
+  undefined; OffendingCommand: ..."}`. A runaway cell stops at its own
+  limit (`limit_exceeded`, `limit: "steps"` or `"time"`, its share of the
+  sheet's time) and the cells after it render.
+- A sheet over a budget is refused before anything runs, with
+  `error.input.code` naming the budget: more than 32 cells
+  (`invalid_request`, `cells`), sources over 256 KiB in all
+  (`source_too_large`, `sources`), a cell over 8000 pixels a side
+  (`invalid_dimensions`, `cell_side`), cells over 16,000,000 pixels in all
+  (`too_many_pixels`, `cell_pixels`), a sheet over 16,000,000 pixels or 8000
+  a side (`sheet_pixels`, `sheet_side`). The agent lowers a dpi, a page
+  size, a zoom or the number of cells.
+- A dpi outside 9–1200 is `invalid_dimensions`; a zoom outside 2–16, a label
+  over 200 characters or a dpi that is not a list is `invalid_request`.
+
+This case is covered by `tests/review_sheet.rs` and
+`evals/server/scenarios/64-review-sheet.json`; the agent case is
+`evals/agent/cases/90-review-sheet.json` (unbaselined). It has not been run
+through an agent against the container image.
+
+---
+
 ## Checklist
 
 | # | Case | Tool | Pass condition |
@@ -477,3 +537,4 @@ through an agent against the container image.
 | 6 | Real names | `describe_art_capabilities` then `render_postscript` | Catalog lists templates and palettes; render uses a listed template and its `load` line |
 | 7 | Chalkboard | `chalkboard_math` | PNG 1600×800 board with yellow chalk; an unsupported command is `postscript_error` naming it |
 | 8 | Handwritten note | `handwrite` | PNG 612×146 on ruled paper in green ink; a note too tall for the limits is `invalid_dimensions` or `too_many_pixels` |
+| 9 | Review sheet | `review_sheet` | PNG 363×396, two rows of three cells (128 px, 32 px, 32 px at 4x); a failing cell drawn with its error; budgets refused before execution |
