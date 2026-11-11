@@ -54,6 +54,15 @@ REDACTED = "<redacted-token>"
 # Cases
 
 
+def cases_sha256() -> str:
+    """A hash of every case file (name and content), so a run or baseline
+    says which case definitions its verdicts were computed under."""
+    h = hashlib.sha256()
+    for path in sorted(CASES_DIR.glob("*.json")):
+        h.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()[:16]
+
+
 def load_cases() -> list[dict]:
     cases = []
     for path in sorted(CASES_DIR.glob("*.json")):
@@ -478,19 +487,24 @@ def compare(rows: list[dict], baseline: dict) -> tuple[list[str], int]:
     return lines, len(regressions)
 
 
-def make_baseline(run_dirs: list[Path], out: Path) -> dict:
+def make_baseline(run_dirs: list[Path], out: Path, rechecked: bool = False, server_commit: str | None = None) -> dict:
     """Merge the summary.json of one or more runs into a small baseline
     record: verdicts and pass counts per case x agent x transport, the
-    versions, and the sessions, turns and usage the runs took."""
+    versions, and the sessions, turns and usage the runs took. With
+    `rechecked`, the verdicts come from each run's recheck.json (written by
+    --recheck) instead, i.e. under the case files as they are now."""
     results: list[dict] = []
     headers = []
     for d in run_dirs:
-        data = json.loads((d / "summary.json").read_text())
+        name = "recheck.json" if rechecked else "summary.json"
+        if not (d / name).exists():
+            sys.exit(f"{d}: no {name}" + (" (run --recheck on it first)" if rechecked else ""))
+        data = json.loads((d / name).read_text())
         if data["header"].get("stopped"):
             sys.exit(f"{d}: that run stopped early ({data['header']['stopped']}); not a baseline")
         headers.append(data["header"])
         results.extend(data["runs"])
-    keys = ("server_version", "pscat_version", "pscat_revision", "server_sha256", "model", "effort", "clients")
+    keys = ("server_version", "pscat_version", "pscat_revision", "server_sha256", "model", "effort", "clients", "cases_sha256")
     h0 = headers[0]
     for h in headers[1:]:
         for k in keys:
@@ -501,13 +515,15 @@ def make_baseline(run_dirs: list[Path], out: Path) -> dict:
         "date": _dt.date.today().isoformat(),
         "server": {
             "version": h0["server_version"],
-            "commit": h0.get("repo_commit"),
+            "commit": server_commit or h0.get("repo_commit"),
             "binary_sha256": h0.get("server_sha256"),
         },
         "pscat": {"version": h0["pscat_version"], "revision": h0["pscat_revision"]},
         "clients": h0["clients"],
         "model": h0["model"],
         "effort": h0.get("effort"),
+        "cases_sha256": h0.get("cases_sha256"),
+        "verdicts": "rechecked under the cases above" if rechecked else "as run",
         "runs_from": [d.name for d in run_dirs],
         **run_totals(results),
         "usage": usage_span(results),
@@ -639,6 +655,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--from-run", type=Path, action="append", metavar="RUN_DIR", help="a run directory for --write-baseline")
     p.add_argument(
+        "--server-commit",
+        metavar="SHA",
+        help="with --write-baseline: the commit the server binary was built from, when the runs' record names a branch commit",
+    )
+    p.add_argument(
+        "--rechecked",
+        action="store_true",
+        help="with --write-baseline: take each run's verdicts from the recheck.json --recheck wrote",
+    )
+    p.add_argument(
         "--recheck",
         type=Path,
         metavar="RUN_DIR",
@@ -650,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.write_baseline:
         if not args.from_run:
             sys.exit("--write-baseline needs at least one --from-run RUN_DIR")
-        record = make_baseline(args.from_run, args.write_baseline)
+        record = make_baseline(args.from_run, args.write_baseline, args.rechecked, args.server_commit)
         print(f"wrote {args.write_baseline}: {len(record['rows'])} rows from {record['sessions']} sessions")
         return 0
     baseline = json.loads(args.compare.read_text()) if args.compare else None
@@ -710,6 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         "pscat_version": ctx0["pscat_version"],
         "pscat_revision": ctx0["pscat_revision"],
         "server_sha256": file_sha256(binary),
+        "cases_sha256": cases_sha256(),
         "repo_commit": repo_commit(),
         "clients": clients,
         "model": args.model,
@@ -793,12 +820,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if all(r["verdict"] == "pass" for r in rows) else 1
 
 
+POST_CHECK = "server logged a POST /mcp per tool call"
+
+
 def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | None = None) -> int:
-    """Evaluate saved transcripts again, e.g. after editing a case. The HTTP
-    POST count is not available offline and is skipped."""
+    """Evaluate saved transcripts again, e.g. after editing a case, and
+    write RUN_DIR/recheck.json (the summary.json shape, verdicts under the
+    current cases). The HTTP POST count is not available offline: a run
+    keeps the result that check had live. A run that ended in an error
+    (guard stop, timeout) stays an error."""
     by_id = {c["id"]: c for c in cases}
     header_path = run_dir / "summary.json"
-    header = json.loads(header_path.read_text())["header"] if header_path.exists() else None
+    saved = json.loads(header_path.read_text()) if header_path.exists() else None
+    header = saved["header"] if saved else None
+    originals = {r.get("transcript"): r for r in (saved or {}).get("runs", [])}
     if header:
         ctx0 = {
             "repo": str(REPO),
@@ -815,7 +850,13 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | Non
         header = {k: ctx0[k] for k in ("server_version", "pscat_version", "pscat_revision")}
         header.update(clients={}, model="?")
     results = []
-    for path in sorted((run_dir / "transcripts").glob("*.jsonl")):
+    # The live run's order, so usage spans run from the first session to the last.
+    order = {name: i for i, name in enumerate(originals)}
+    paths = sorted(
+        (run_dir / "transcripts").glob("*.jsonl"),
+        key=lambda p: (order.get(str(p.relative_to(run_dir)), len(order)), p.name),
+    )
+    for path in paths:
         case_id, agent, transport, _n = path.stem.split("__")
         case = by_id.get(case_id)
         if case is None:
@@ -824,15 +865,35 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | Non
         lines = path.read_text().splitlines()
         t = tx.parse_claude_stream(lines) if agent == "claude" else tx.parse_codex_jsonl(lines, SERVER_NAME)
         checks = tx.evaluate_case(case, t, SERVER_NAME, dict(ctx0), transport)
-        status = "pass" if all(c.ok for c in checks) else "fail"
+        rel = str(path.relative_to(run_dir))
+        orig = originals.get(rel) or {}
+        for c in orig.get("checks", []):
+            if c.get("name") == POST_CHECK:
+                checks.append(tx.Check(POST_CHECK, c.get("ok", False), c.get("detail", "") + " (from the live run)"))
+        if orig.get("status") == "error":
+            status = "error"
+        else:
+            status = "pass" if all(c.ok for c in checks) else "fail"
         print(f"- {path.stem} ... {status}")
         for c in checks:
             if not c.ok:
                 print(f"    FAIL {c.name}: {c.detail}")
-        results.append({"case": case_id, "agent": agent, "transport": transport, "status": status, "num_turns": t.num_turns})
+        record = {k: v for k, v in orig.items() if k not in ("checks", "status")}
+        record.update(
+            case=case_id,
+            agent=agent,
+            transport=transport,
+            transcript=rel,
+            num_turns=t.num_turns,
+            status=status,
+            checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+        )
+        results.append(record)
     rows = summarize(results)
     print()
     print_table(rows, header)
+    out_header = dict(header, cases_sha256=cases_sha256(), rechecked=_dt.datetime.now().isoformat(timespec="seconds"))
+    (run_dir / "recheck.json").write_text(json.dumps({"header": out_header, "rows": rows, "runs": results}, indent=2))
     if baseline:
         print("\n" + "\n".join(compare(rows, baseline)[0]))
     return 0 if all(r["verdict"] == "pass" for r in rows) else 1

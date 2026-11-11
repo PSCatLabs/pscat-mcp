@@ -366,6 +366,46 @@ class Recheck(unittest.TestCase):
         self.assertEqual(status, 1)  # the recorded one-line loop step fails
         self.assertIn("FAIL loop render", out.getvalue())
 
+    def test_recheck_writes_a_baseline_source_and_keeps_live_only_results(self):
+        import contextlib
+        import io
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "transcripts").mkdir()
+            for n in (1, 2):
+                shutil.copy(FIXTURE, d / "transcripts" / f"first-prompt__claude__http__{n}.jsonl")
+            header = {k: CTX[k] for k in ("server_version", "pscat_version", "pscat_revision")}
+            header.update(clients={}, model="claude-sonnet-5-5", server_sha256="abc", stopped=None)
+            post = {"name": run.POST_CHECK, "ok": False, "detail": "0 POST /mcp for 5 call(s)"}
+            runs = [
+                {"case": "first-prompt", "agent": "claude", "transport": "http", "status": "fail",
+                 "transcript": "transcripts/first-prompt__claude__http__1.jsonl", "checks": [post],
+                 "duration_s": 30.0, "usage": {"five_hour": [0.2, 0.21]}},
+                {"case": "first-prompt", "agent": "claude", "transport": "http", "status": "error",
+                 "transcript": "transcripts/first-prompt__claude__http__2.jsonl", "error": "timed out"},
+            ]
+            runs.reverse()  # live order: __2 ran first
+            (d / "summary.json").write_text(json.dumps({"header": header, "runs": runs}))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run.main(["--recheck", str(d)])
+            data = json.loads((d / "recheck.json").read_text())
+            self.assertEqual(data["header"]["cases_sha256"], run.cases_sha256())
+            second, first = data["runs"]
+            self.assertIn(run.POST_CHECK, [c["name"] for c in first["checks"] if not c["ok"]])
+            self.assertEqual(first["usage"], {"five_hour": [0.2, 0.21]})
+            self.assertEqual(second["status"], "error")
+            # Live order is kept even where file names sort differently.
+            self.assertEqual([r["transcript"] for r in data["runs"]], [r["transcript"] for r in runs])
+            rec = run.make_baseline([d], d / "base.json", rechecked=True)
+            self.assertEqual(rec["verdicts"], "rechecked under the cases above")
+            self.assertEqual(rec["cases_sha256"], run.cases_sha256())
+            self.assertEqual(rec["runs_from"], [d.name])
+            self.assertEqual(rec["duration_s"], 30.0)
+
 
 def _run(case_id, transport, status, turns=3, five=(0.1, 0.11)):
     return {
@@ -459,6 +499,20 @@ class Baseline(unittest.TestCase):
             status = run.main(["--repeat", "50", "--max-sessions", "120", "--server", "/nonexistent"])
         self.assertEqual(status, 2)
         self.assertIn("more than --max-sessions 120", err.getvalue())
+
+
+class CommittedBaseline(unittest.TestCase):
+    def test_newest_baseline_matches_the_case_files(self):
+        # A case edit must come with a baseline rechecked under it, or
+        # every later --compare reports changes that are only the edit.
+        newest = sorted((HERE / "baseline").glob("*.json"))[-1]
+        data = json.loads(newest.read_text())
+        self.assertEqual(data["cases_sha256"], run.cases_sha256(), f"rebuild {newest.name} with --recheck/--rechecked")
+        ids = {c["id"] for c in run.load_cases()}
+        self.assertEqual({r["case"] for r in data["rows"]}, ids)
+        text = newest.read_text()
+        for private in ("/Users/", "/Volumes/", "/private/", "/home/", "@"):
+            self.assertNotIn(private, text)
 
 
 class HttpLog(unittest.TestCase):

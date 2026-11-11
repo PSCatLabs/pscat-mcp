@@ -281,10 +281,10 @@ scripts/agent-eval.sh              # every case, stdio and HTTP, once
 | `--agent codex` | Also run Codex (repeat `--agent claude --agent codex` for both). Codex uses OpenAI usage, so it is opt-in. |
 | `--include-expensive` | Also run cases tagged `expensive` (scenario 5c pastes about 285 KB of PostScript). |
 | `--server PATH` | Server binary. Default `target/release/pscat-mcp-server`. |
-| `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case. No agent runs. |
+| `--recheck RUN_DIR` | Check a previous run's saved transcripts again against the current case files, for example after editing a case, and write `RUN_DIR/recheck.json`. No agent runs. The HTTP POST check and an error (guard stop, timeout) keep their live result. |
 | `--max-sessions N` | Refuse to start when the plan has more than N agent sessions (default 120). The cap is per invocation; keep your own count across runs. |
 | `--compare BASELINE` | After the table, list the rows that regressed, improved or stayed the same against a baseline JSON (see below). Works with `--recheck` too. |
-| `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions and model, and none may have stopped early. |
+| `--write-baseline OUT --from-run RUN_DIR` | Merge one or more runs' `summary.json` (repeat `--from-run`) into a baseline JSON at `OUT`. No agent runs. The runs must share the server binary, versions, model and case files, and none may have stopped early. `--rechecked` takes each run's `recheck.json` instead; `--server-commit SHA` names the commit the binary was built from. |
 
 `python3 -I evals/agent/run.py` takes the same options. The runner uses
 the Python 3 standard library only, so it needs no virtualenv and no
@@ -349,9 +349,21 @@ scripts/agent-eval.sh --case render-shapes --repeat 3 --compare evals/agent/base
 `--compare` lists regressions (a worse verdict, or a lower pass rate
 between two `flaky` rows), improvements and unchanged rows. With one or
 three runs per row, a single changed row is not evidence on its own;
-repeat the case before you act on it. The baseline records the verdicts
-of the cases as they were at its commit. A case edited later can show up
-as a change; check with `--recheck` of the baseline's run directory.
+repeat the case before you act on it.
+
+The baseline's verdicts hold for the case files named by its
+`cases_sha256`. Runs and rechecks record that hash too, and an offline
+test fails when the newest baseline doesn't match the case files. The
+committed 2026-11-10 baseline was rechecked under the case files it ships
+with, so the #44 case edits don't show up as improvements. When you edit
+a case, rebuild the baseline the same way from its archived run
+directories rather than compare across different case files:
+
+```bash
+python3 -I evals/agent/run.py --recheck RUN_DIR      # once per run directory
+python3 -I evals/agent/run.py --write-baseline evals/agent/baseline/<date>.json \
+  --rechecked --server-commit <sha> --from-run RUN_DIR [--from-run RUN_DIR ...]
+```
 
 ### Current agent behaviour
 
