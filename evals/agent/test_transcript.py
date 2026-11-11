@@ -225,6 +225,8 @@ class TriagedCases(unittest.TestCase):
         c.result = {"is_error": False, "text": json.dumps(report), "content_types": ["text"], "structured": report}
         self.assertTrue(self.passes("diagnose-undefined", [c], "Changing `shw` to `show` fixes it."))
         self.assertFalse(self.passes("diagnose-undefined", [c], "Line 4 has an undefined name."))
+        # `showpage` contains "show"; it is not the fix.
+        self.assertFalse(self.passes("diagnose-undefined", [c], "Line 4 calls `shw`; the page ends with showpage."))
         self.assertFalse(self.passes("diagnose-undefined", [self.render(src)], "`shw` should be `show`."))
 
     def test_huge_source_shortened_copy_must_be_disclosed(self):

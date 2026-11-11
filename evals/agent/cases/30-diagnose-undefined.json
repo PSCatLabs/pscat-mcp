@@ -31,8 +31,10 @@
     ],
     "answer": {
       "all": [
-        "shw",
-        "show"
+        "shw"
+      ],
+      "regex": [
+        "\\bshow\\b"
       ]
     }
   },
