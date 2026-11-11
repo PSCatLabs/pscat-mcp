@@ -2,8 +2,9 @@
 //!
 //! Two client-facing shapes share this one store: the explicit tools
 //! (`start_render`, `render_status`, `render_result`, `cancel_render`, as in
-//! the PSCat plugin) and the MCP Tasks extension (`tools/call` answered with
-//! a task handle, then `tasks/get` and `tasks/cancel`). Both live in
+//! the PSCat plugin) and the MCP Tasks extension (a `tools/call` still
+//! running past the task threshold answered with a task handle, then
+//! `tasks/get` and `tasks/cancel`; a quicker one never reaches this store). Both live in
 //! `src/mcp.rs`; [`RenderService`](crate::render::RenderService) owns the
 //! store and runs the jobs, so every MCP handler (HTTP builds one per
 //! request) sees the same jobs.
@@ -228,6 +229,18 @@ impl JobStore {
         owner: &str,
         tool: &str,
     ) -> Result<(String, CancellationToken), RenderError> {
+        self.insert_since(owner, tool, Instant::now())
+    }
+
+    /// [`Self::insert`] for a job that began at `started`: a Tasks call
+    /// promoted to a task once its render had run for a while. Its elapsed
+    /// time and creation stamp count from `started`.
+    pub(crate) fn insert_since(
+        &self,
+        owner: &str,
+        tool: &str,
+        started: Instant,
+    ) -> Result<(String, CancellationToken), RenderError> {
         if !self.enabled() {
             return Err(RenderError::new(
                 ErrorCode::InvalidRequest,
@@ -333,14 +346,15 @@ impl JobStore {
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         let now = SystemTime::now();
+        let created_at = now.checked_sub(started.elapsed()).unwrap_or(now);
         inner.charged += need;
         inner.jobs.insert(
             id.clone(),
             Job {
                 owner: owner.to_string(),
                 tool: tool.to_string(),
-                created: Instant::now(),
-                created_at: now,
+                created: started,
+                created_at,
                 updated_at: now,
                 finished: None,
                 state: State::Queued,
@@ -370,6 +384,11 @@ impl JobStore {
     /// Wait for a running-job permit.
     pub(crate) async fn running_permit(&self) -> Option<OwnedSemaphorePermit> {
         self.running.clone().acquire_owned().await.ok()
+    }
+
+    /// A running-job permit if one is free now.
+    pub(crate) fn try_running_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.running.clone().try_acquire_owned().ok()
     }
 
     /// Record that `id`'s worker is starting.

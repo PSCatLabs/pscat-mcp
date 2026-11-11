@@ -119,14 +119,35 @@ service:
    `cancel_render` stops it. They are ordinary tools, so every client can
    use them. They run `render_postscript` only.
 2. **The MCP Tasks extension** (SEP-2663, `io.modelcontextprotocol/tasks`),
-   with `PSCAT_MCP_TASKS=true`. The server then advertises the extension,
-   and a `tools/call` of `render_postscript`, `chalkboard_math` or
-   `handwrite` that declares it in its client capabilities gets a task
-   handle; `tasks/get` returns the tool's result once it is done, and
-   `tasks/cancel` kills the worker. A call that does not declare it gets
-   today's synchronous result. A task is a job: the explicit tools see it
-   too. `review_sheet` always answers synchronously: its plan shares out its
-   own deadline (`PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) between its cells.
+   with `PSCAT_MCP_TASKS=true`. The server then advertises the extension.
+   A `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
+   that declares it in its client capabilities runs synchronously at
+   first; only a call still running after `PSCAT_MCP_TASK_AFTER_MS` (2 s by
+   default) becomes a task, and the client gets a task handle. `tasks/get`
+   returns the tool's result once it is done, and `tasks/cancel` kills the
+   worker. A call that does not declare the extension gets today's
+   synchronous result. A task is a job: the explicit tools see it too.
+   `review_sheet` always answers synchronously: its plan shares out its own
+   deadline (`PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) between its cells.
+
+   **Only long calls become tasks.** The extension leaves the choice to the
+   server, call by call: it may answer a Tasks client with the plain result,
+   and the client must accept either. So a call that finishes within the
+   threshold returns its result directly, as for any other client: it never
+   counts against the job caps, reserves nothing from the results budget and
+   needs no running-job permit, and it is held to the sync deadline. A call
+   still running at the threshold becomes a task with the same worker and
+   render slot (no second render), and from then on it is a job: it takes a
+   running-job permit, counts against the caps, reserves its largest result
+   and runs to the job deadline. Its worker starts under the job limits (a
+   worker's limits are fixed when it starts), and until it becomes a task
+   the server holds it to the sync deadline itself. If it cannot become a
+   task at the threshold (no running-job permit free, the client's or the
+   server's job cap, the budget), it carries on as a synchronous call and is
+   stopped at the sync deadline with `timeout`. A `notifications/cancelled`
+   for the call kills its worker until it has become a task; after that
+   `tasks/cancel` does. `PSCAT_MCP_TASK_AFTER_MS=0` makes every such call a
+   task at once.
 
 How it behaves:
 
@@ -408,6 +429,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
 | `PSCAT_MCP_TASKS` | `false` | also serve the MCP Tasks extension on top of the jobs (needs async jobs) |
+| `PSCAT_MCP_TASK_AFTER_MS` | 2000 | with `PSCAT_MCP_TASKS`: how long a Tasks client's call runs (from when its worker starts) before it becomes a task; a quicker call returns its result directly and never touches the job caps or budget. Must be below `PSCAT_MCP_RENDER_TIMEOUT_MS`; 0 makes every eligible call a task at once. Above 0, the job limits must be no tighter than the sync ones (`PSCAT_MCP_JOB_TIMEOUT_MS` ≥ `PSCAT_MCP_RENDER_TIMEOUT_MS`, the job step limit ≥ `PSCAT_MCP_MAX_STEPS`), since such a call's worker starts under them |
 | `PSCAT_MCP_JOB_TIMEOUT_MS` | 600000 | wall-clock deadline of one job's worker (SIGKILL after it); PSCat's time limit and the CPU rlimit follow it |
 | `PSCAT_MCP_JOB_MAX_STEPS` | 25000000000 (0 if `PSCAT_MCP_MAX_STEPS` is 0) | PSCat step limit of a job |
 | `PSCAT_MCP_MAX_RUNNING_JOBS` | half the render slots, at least 1 | jobs running at once (more wait queued); must stay below `PSCAT_MCP_MAX_CONCURRENT_RENDERS` (1 with one slot) |
@@ -596,7 +618,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 px (800×400 pt) board (dark slate, bright chalk, same image twice), the size reported in points and pixels, `board: false` transparent and an RGB board, PDF inline, SVG as text with the limit raised and as a blob by default, and over the output cap `output_too_large` with board advice, the LaTeX size limit, an unsupported command as `postscript_error` naming it, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |
 | `tests/handwrite.rs` | `handwrite` over stdio: the tool's schema matches the plugin's arguments, a default 612×146 note with ink pixels in the ink colour, ink, size, width, dpi and `paper: ruled` (ruled lines and margin rule, none on plain paper), the same seed twice giving identical bytes, the text limit, a note too tall for the pixel cap or the side limit as a structured error (and a 500 000-line text refused, not killed) with the server serving the next call, the measuring pass under the step limit (and a limit hit inside a megabyte word keeping the reply small), argument errors through the envelope, and empty, whitespace-only, non-Latin and control-character text |
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
-| `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, a client over its share of the budget refused with the limit named in `error.input` while the budget has room (`get_renderer_info` reports the share), argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client gets a task handle (render and `handwrite`), a plain one or one on a server without `--tasks` the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only; a `start_render` job whose SVG is over `PSCAT_MCP_MAX_SVG_BYTES` (set through the environment, over stdio) ends `done` and `render_result` returns it as a blob resource holding the whole SVG, and `render_result` returns SVG as text or as a blob by the limit, like `render_postscript` |
+| `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, a client over its share of the budget refused with the limit named in `error.input` while the budget has room (`get_renderer_info` reports the share), argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client's slow render becomes a task past `PSCAT_MCP_TASK_AFTER_MS` with the same worker (one worker, one execution, past the sync deadline) and `tasks/get` completes it, its quick calls (render, `handwrite`, a failed render) return the result directly with the job caps, running-job permit and budget all full and untouched, `tasks/cancel` of a promoted task and `notifications/cancelled` before the threshold both kill the worker, a slow call that cannot become a task stops at the sync deadline with `timeout`, a threshold of 0 makes every eligible call a task at once (`handwrite`, a failed render), a plain client or one on a server without `--tasks` gets the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only; a `start_render` job whose SVG is over `PSCAT_MCP_MAX_SVG_BYTES` (set through the environment, over stdio) ends `done` and `render_result` returns it as a blob resource holding the whole SVG, and `render_result` returns SVG as text or as a blob by the limit, like `render_postscript` |
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the PSCat checkout cargo resolves, and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |

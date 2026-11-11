@@ -426,14 +426,33 @@ pub struct JobsConfig {
     pub job_results_per_principal_bytes: Option<usize>,
 
     /// Serve the MCP Tasks extension (SEP-2663, `io.modelcontextprotocol/tasks`)
-    /// on top of the async jobs: a client that declares the extension on a
-    /// `tools/call` of `render_postscript`, `chalkboard_math` or `handwrite`
-    /// gets a task handle and the job deadline; one that does not gets the
-    /// synchronous result. Off by default: no client we have tested sends
-    /// the capability on `tools/call`. Needs async jobs.
+    /// on top of the async jobs. A `tools/call` of `render_postscript`,
+    /// `chalkboard_math` or `handwrite` from a client that declares the
+    /// extension runs synchronously at first; only one still running after
+    /// `--task-after-ms` becomes a task (a job, with the job deadline). A
+    /// client that does not declare it gets the synchronous result. Off by
+    /// default: no client we have tested sends the capability on
+    /// `tools/call`. Needs async jobs.
     #[arg(long, env = "PSCAT_MCP_TASKS", default_value_t = false)]
     pub tasks: bool,
+
+    /// With `--tasks`: how long, in milliseconds, a Tasks client's call runs
+    /// before it becomes a task, counted from when its worker starts. A call
+    /// that finishes sooner returns its result directly and never touches
+    /// the job caps or the results budget. A call that cannot become a task
+    /// then (the job caps, the budget, or every running-job permit taken)
+    /// carries on synchronously under the sync deadline. Must be below
+    /// `--render-timeout-ms`. 0 makes every such call a task at once. Above
+    /// 0, such a call's worker starts under the job limits, so they must be
+    /// no tighter than the sync ones (`--job-timeout-ms` at least
+    /// `--render-timeout-ms`, the job step limit at least `--max-steps`).
+    #[arg(long, env = "PSCAT_MCP_TASK_AFTER_MS", default_value_t = DEFAULT_TASK_AFTER_MS)]
+    pub task_after_ms: u64,
 }
+
+/// The default of `--task-after-ms`: well above what a typical render takes,
+/// well below the 20 s sync deadline and the clients' tool-call timeouts.
+pub const DEFAULT_TASK_AFTER_MS: u64 = 2_000;
 
 impl Default for JobsConfig {
     fn default() -> Self {
@@ -448,6 +467,7 @@ impl Default for JobsConfig {
             job_results_budget_bytes: 128 * 1024 * 1024,
             job_results_per_principal_bytes: None,
             tasks: false,
+            task_after_ms: DEFAULT_TASK_AFTER_MS,
         }
     }
 }
@@ -462,6 +482,12 @@ impl JobsConfig {
     /// The deadline of one job.
     pub fn job_timeout(&self) -> Duration {
         Duration::from_millis(self.job_timeout_ms)
+    }
+
+    /// How long a Tasks client's call runs before it becomes a task; zero
+    /// for at once.
+    pub fn task_after(&self) -> Duration {
+        Duration::from_millis(self.task_after_ms)
     }
 
     /// How long a finished job is kept.
@@ -541,6 +567,33 @@ impl JobsConfig {
                  positive"
                     .into(),
             );
+        }
+        if self.tasks && self.task_after_ms > 0 && self.task_after_ms >= limits.render_timeout_ms {
+            return Err(format!(
+                "task-after-ms ({}) must be below render-timeout-ms ({}): a call would reach \
+                 the sync deadline before it could become a task (0 makes every call a task at \
+                 once)",
+                self.task_after_ms, limits.render_timeout_ms
+            ));
+        }
+        // A Tasks call's worker starts under the job limits, before anyone
+        // knows whether it will be quick: they must be no tighter than a
+        // synchronous call's, or a quick call would be held to less.
+        if self.tasks && self.task_after_ms > 0 {
+            if self.job_timeout_ms < limits.render_timeout_ms {
+                return Err(format!(
+                    "with --tasks, job-timeout-ms ({}) must be at least render-timeout-ms ({}): a \
+                     Tasks client's call starts under the job limits",
+                    self.job_timeout_ms, limits.render_timeout_ms
+                ));
+            }
+            let (sync, job) = (limits.max_steps, self.job_limits(limits).max_steps);
+            if job != 0 && (sync == 0 || job < sync) {
+                return Err(format!(
+                    "with --tasks, the job step limit ({job}) must be at least max-steps ({sync}, \
+                     0 for none): a Tasks client's call starts under the job limits"
+                ));
+            }
         }
         let slots = limits.concurrency();
         let running = self.running_jobs(limits);
@@ -916,8 +969,69 @@ mod tests {
                 tasks: true,
                 ..JobsConfig::default()
             },
+            // A call would reach the sync deadline before it could become
+            // a task.
+            JobsConfig {
+                tasks: true,
+                task_after_ms: l.render_timeout_ms,
+                ..j.clone()
+            },
+            // A Tasks call starts under the job limits: no tighter than the
+            // sync ones.
+            JobsConfig {
+                tasks: true,
+                job_timeout_ms: l.render_timeout_ms - 1,
+                ..j.clone()
+            },
+            JobsConfig {
+                tasks: true,
+                job_max_steps: Some(l.max_steps - 1),
+                ..j.clone()
+            },
         ] {
             assert!(bad.check(&l).is_err(), "{bad:?}");
+        }
+        // The task threshold: below the sync deadline, or 0 (a task at
+        // once); without --tasks it is not checked.
+        for (tasks, after) in [
+            (true, DEFAULT_TASK_AFTER_MS),
+            (true, l.render_timeout_ms - 1),
+            (true, 0),
+            (false, l.render_timeout_ms),
+        ] {
+            let set = JobsConfig {
+                tasks,
+                task_after_ms: after,
+                ..j.clone()
+            };
+            assert!(set.check(&l).is_ok(), "{set:?}");
+        }
+        assert!(DEFAULT_TASK_AFTER_MS < LimitsConfig::default().render_timeout_ms);
+        // Job limits equal to the sync ones are fine, and so is an unlimited
+        // job step count; a limited one under unlimited sync steps is not.
+        let unlimited_steps = LimitsConfig {
+            max_steps: 0,
+            ..l.clone()
+        };
+        for (limits, job_max_steps, ok) in [
+            (&l, Some(l.max_steps), true),
+            (&l, Some(0), true),
+            (&unlimited_steps, None, true),
+            (&unlimited_steps, Some(7), false),
+        ] {
+            let set = JobsConfig {
+                tasks: true,
+                job_max_steps,
+                job_timeout_ms: l.render_timeout_ms,
+                ..j.clone()
+            };
+            assert_eq!(set.check(limits).is_ok(), ok, "{set:?}");
+            // Without --tasks no Tasks call starts under them.
+            let off = JobsConfig {
+                tasks: false,
+                ..set
+            };
+            assert!(off.check(limits).is_ok(), "{off:?}");
         }
         // With jobs off (HTTP by default) none of their settings matter,
         // even with an output limit larger than the default budget.
