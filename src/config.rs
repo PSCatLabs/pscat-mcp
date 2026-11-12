@@ -654,6 +654,15 @@ pub struct WorkerConfig {
     /// subcommand. Defaults to this server's own executable.
     #[arg(long, env = "PSCAT_MCP_WORKER_EXE")]
     pub worker_exe: Option<PathBuf>,
+
+    /// A PSCat data root the worker reads font packs from: packs live in
+    /// `DIR/fonts/packs/<pack>/`, the layout `PSCAT_HOME=DIR pscat fonts
+    /// install` writes. Passed to the worker, and only the worker, as
+    /// `PSCAT_HOME`; the worker's other environment stays empty. Read-only
+    /// by construction: programs still cannot read or write files there.
+    /// Unset (the default): only PSCat's compiled-in fonts.
+    #[arg(long, env = "PSCAT_MCP_FONT_PACK_DIR")]
+    pub font_pack_dir: Option<PathBuf>,
 }
 
 impl WorkerConfig {
@@ -663,6 +672,33 @@ impl WorkerConfig {
             Some(p) => Ok(p.clone()),
             None => std::env::current_exe(),
         }
+    }
+
+    /// The font-pack directory to pass to the worker: absolute and
+    /// canonical (the worker runs in `/`, so a relative path would resolve
+    /// there). `Ok(None)` when unset or empty. An error, naming the flag and
+    /// the variable, when the path does not exist or is not a directory.
+    pub fn font_pack_dir(&self) -> Result<Option<PathBuf>, String> {
+        let Some(dir) = self
+            .font_pack_dir
+            .as_ref()
+            .filter(|d| !d.as_os_str().is_empty())
+        else {
+            return Ok(None);
+        };
+        let canonical = std::fs::canonicalize(dir).map_err(|e| {
+            format!(
+                "--font-pack-dir / PSCAT_MCP_FONT_PACK_DIR {}: {e}",
+                dir.display()
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(format!(
+                "--font-pack-dir / PSCAT_MCP_FONT_PACK_DIR {} is not a directory",
+                dir.display()
+            ));
+        }
+        Ok(Some(canonical))
     }
 }
 
@@ -1066,5 +1102,48 @@ mod tests {
             ..LimitsConfig::default()
         };
         assert_eq!(one.concurrency(), 1);
+    }
+
+    #[test]
+    fn the_font_pack_dir_is_checked_and_made_absolute() {
+        let unset = WorkerConfig::default();
+        assert_eq!(unset.font_pack_dir(), Ok(None));
+        let empty = WorkerConfig {
+            font_pack_dir: Some(PathBuf::new()),
+            ..WorkerConfig::default()
+        };
+        assert_eq!(empty.font_pack_dir(), Ok(None));
+
+        let dir = std::env::temp_dir();
+        let ok = WorkerConfig {
+            font_pack_dir: Some(dir.clone()),
+            ..WorkerConfig::default()
+        };
+        let got = ok.font_pack_dir().unwrap().unwrap();
+        assert!(got.is_absolute());
+        assert_eq!(got, std::fs::canonicalize(&dir).unwrap());
+
+        // A relative path is made absolute: the worker runs in `/`.
+        let relative = WorkerConfig {
+            font_pack_dir: Some(PathBuf::from(".")),
+            ..WorkerConfig::default()
+        };
+        assert!(relative.font_pack_dir().unwrap().unwrap().is_absolute());
+
+        let missing = WorkerConfig {
+            font_pack_dir: Some(dir.join("pscat-mcp-no-such-dir")),
+            ..WorkerConfig::default()
+        };
+        let err = missing.font_pack_dir().unwrap_err();
+        assert!(err.contains("PSCAT_MCP_FONT_PACK_DIR"), "{err}");
+        assert!(err.contains("--font-pack-dir"), "{err}");
+
+        let file = WorkerConfig {
+            font_pack_dir: Some(PathBuf::from(file!())),
+            ..WorkerConfig::default()
+        };
+        // `file!()` is relative to the workspace, which is the test's cwd.
+        let err = file.font_pack_dir().unwrap_err();
+        assert!(err.contains("is not a directory"), "{err}");
     }
 }

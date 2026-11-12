@@ -67,6 +67,7 @@ async fn start(capture: Option<Arc<Capture>>) -> TestServer {
         LimitsConfig::default(),
         &WorkerConfig {
             worker_exe: Some(env!("CARGO_BIN_EXE_pscat-mcp-server").into()),
+            ..WorkerConfig::default()
         },
     )
     .expect("service");

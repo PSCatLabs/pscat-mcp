@@ -721,6 +721,19 @@ pub struct RendererInfo {
     pub jobs: JobsInfo,
     /// What a program can and cannot reach.
     pub capabilities: Vec<String>,
+    /// Font packs, present only when the operator configured a font-pack
+    /// directory (`PSCAT_MCP_FONT_PACK_DIR`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_packs: Option<FontPackInfo>,
+}
+
+/// The font packs the workers can use, in `get_renderer_info`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FontPackInfo {
+    /// Names of the installed packs, such as `cjk-thai`. The directory
+    /// itself is not reported. Absent if the catalog could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<Vec<String>>,
 }
 
 /// Which transport a handler serves. It decides who owns an async job: the
@@ -933,8 +946,23 @@ impl PscatMcp {
         crate::catalog::slice(&catalog, query)
     }
 
-    fn renderer_info(&self) -> RendererInfo {
+    async fn renderer_info(&self) -> RendererInfo {
         let l = self.service.limits();
+        // The packs come from the catalog the worker reads (the server never
+        // looks at the directory); fetched once, then kept.
+        let font_packs = if self.service.font_packs_configured() {
+            Some(FontPackInfo {
+                installed: self.service.capabilities().await.ok().map(|c| {
+                    c.font_packs
+                        .installed
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect()
+                }),
+            })
+        } else {
+            None
+        };
         let returned_as = |f: OutputFormat| match f {
             OutputFormat::Png => "one image content block per page",
             OutputFormat::Svg => {
@@ -992,7 +1020,7 @@ impl PscatMcp {
                     results_per_principal_bytes: c.principal_share_bytes(l),
                 }
             },
-            capabilities: vec![
+            capabilities: [
                 "File reads are confined to PSCat's built-in lib/ directory (for example \
                  `(lib/artkit.ps) run`); other paths fail with invalidfileaccess."
                     .into(),
@@ -1001,7 +1029,15 @@ impl PscatMcp {
                 "Each render runs in its own short-lived worker process with step, time and \
                  memory limits."
                     .into(),
-            ],
+            ]
+            .into_iter()
+            .chain(font_packs.is_some().then(|| {
+                "Fonts also come from the font packs the server operator installed (see \
+                 font_packs); programs cannot read the pack files themselves."
+                    .to_string()
+            }))
+            .collect(),
+            font_packs,
         }
     }
 }
@@ -1436,7 +1472,8 @@ impl PscatMcp {
         description = "Reports the PSCat renderer version, this server's version, the supported \
                        output formats with their MIME types, the limits in force (source size, \
                        timeout, pixels, pages, output size, dpi range, concurrency) and what \
-                       programs can access. Runs no PostScript.",
+                       programs can access, and the installed font packs when the server has \
+                       a font-pack directory. Runs no PostScript.",
         annotations(
             title = "PSCat renderer info",
             read_only_hint = true,
@@ -1446,7 +1483,7 @@ impl PscatMcp {
         )
     )]
     async fn get_renderer_info(&self) -> Json<RendererInfo> {
-        Json(self.renderer_info())
+        Json(self.renderer_info().await)
     }
 }
 

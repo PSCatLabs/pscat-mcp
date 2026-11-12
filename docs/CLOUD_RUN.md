@@ -110,6 +110,45 @@ result by default, so lower it when several tokens share the service). A hosted 
 result store, and a place the render gets CPU, such as a Cloud Run Job) is
 tracked in the `pscat-cloud` brief, not here.
 
+## Font packs
+
+The image has PSCat's compiled-in fonts only, and the worker's empty
+environment does not find packs installed anywhere else. To add the `extras`
+or `cjk-thai` pack (Korean, Japanese and Thai labels in `review_sheet`, and
+programs that select a pack face):
+
+1. Install the packs into a directory with the PSCat CLI, outside the image:
+   `PSCAT_HOME=/srv/pscat-data pscat fonts install --pack cjk-thai`. The
+   result is `/srv/pscat-data/fonts/packs/cjk-thai/`.
+2. Put that directory on a **read-only volume** (a Cloud Storage bucket
+   mount with `readonly=true`, or an NFS/Filestore share mounted read-only)
+   and mount it in the container, for example at `/fonts`.
+3. Set `PSCAT_MCP_FONT_PACK_DIR=/fonts`. The path is the data root, the
+   directory that *contains* `fonts/packs/`, not `fonts/packs` itself.
+
+The image runs as uid 65532 and needs read access only. The server refuses to
+start if the path is not a directory, so a missing mount shows at startup
+rather than as `?` labels. `describe_art_capabilities` lists the packs the
+workers found, and `get_renderer_info` reports their names. The directory is
+not added to what programs can read; see "The font-pack directory" in
+[ARCHITECTURE.md](ARCHITECTURE.md#the-font-pack-directory).
+
+Plan for memory: a face is read whole into a worker when a program first
+selects it (Noto Sans JP is 9.5 MB), counted against
+`PSCAT_MCP_MAX_MEMORY_BYTES`. Network-backed volumes are slower to read on a
+cold instance than a baked-in file would be.
+
+**Not done here: baking packs into the image.** It would remove the mount,
+at a cost: `cjk-thai` is large (about 70 MB of the four Noto and Nanum faces),
+so the image, its pull time and its cold start grow, and every pack-train
+bump rebuilds it. The packs are SIL OFL 1.1 (each pack carries its
+`manifest.json` and the upstream licence files, which must ship with the
+fonts), so redistributing them in the image is allowed, but the image would
+then carry a second set of licences. Follow-up: an optional build argument
+that runs `pscat fonts install` in a build stage and copies the
+`fonts/packs` tree into the final image, with `PSCAT_MCP_FONT_PACK_DIR` set
+to it by default.
+
 ## Sandbox
 
 Use the **first-generation execution environment** (gVisor) for public
