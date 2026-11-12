@@ -461,7 +461,7 @@ agent against the container image.
   size it would have been. The agent shortens the text, widens the note
   or lowers `size`.
 - A text over `PSCAT_MCP_MAX_HANDWRITE_BYTES` is `source_too_large`; a bad
-  `paper`, `ink`, `size`, `jitter` (not a whole number too) or `seed` is `invalid_request`; `dpi` or
+  `paper`, `ink`, `size`, `jitter` (out of range or not a whole number) or `seed` is `invalid_request`; `dpi` or
   `width` out of range is `invalid_dimensions`.
 - The styles are hand-drawn faces for notes, cards and art, not for
   imitating a specific person's handwriting.

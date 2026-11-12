@@ -292,7 +292,7 @@ pub struct HandwriteArgs {
     pub ink: Option<String>,
     /// Ink wobble in glyph units; 0 is calm. A whole number. Default 16.
     #[serde(default)]
-    #[schemars(schema_with = "jitter_schema")]
+    #[schemars(schema_with = "jitter_schema", transform = drop_default)]
     pub jitter: Option<f64>,
     /// Random seed; the same seed gives the same note. Default 1985.
     #[schemars(range(min = -2147483648_i64, max = 2147483647_i64))]
@@ -302,8 +302,15 @@ pub struct HandwriteArgs {
 }
 
 /// `jitter` is a whole number: PSCat's handwriting font takes it with `mod`.
+/// Optional, so the type admits null, as the other optional numbers' do.
 fn jitter_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({ "type": "integer", "minimum": 0, "maximum": 10000 })
+    schemars::json_schema!({ "type": ["integer", "null"], "minimum": 0, "maximum": 10000 })
+}
+
+/// Drops the `default` that `#[serde(default)]` adds, to match the other
+/// optional arguments' schemas.
+fn drop_default(schema: &mut schemars::Schema) {
+    schema.remove("default");
 }
 
 impl HandwriteArgs {
