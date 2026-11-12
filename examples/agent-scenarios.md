@@ -132,11 +132,11 @@ and fix any reported error before rendering.
   five nodes in a column, a side "Structured error" box on the "no" branch,
   arrows between them, and legible labels.
 - If the first attempt raises a PostScript error (for example an operator
-  PSCat does not implement, such as `arcto`), the result is
+  PSCat does not implement, such as `execuserobject`), the result is
   `isError: true`, `structuredContent.error.code == "postscript_error"`, and
-  `error.postscript = {"name": "undefined", "report": "%%[ Error: undefined; OffendingCommand: arcto; Line: N ]%%"}`.
+  `error.postscript = {"name": "undefined", "report": "%%[ Error: undefined; OffendingCommand: execuserobject; Line: N ]%%"}`.
   The agent should read the offending command and line, rewrite that part
-  (e.g. with `arc`), and render again without asking the user.
+  (for a user object, inline the procedure it names), and render again without asking the user.
 
 ---
 

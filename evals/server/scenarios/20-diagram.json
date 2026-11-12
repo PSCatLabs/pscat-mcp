@@ -1,6 +1,6 @@
 {
   "id": "diagram",
-  "title": "Scenario 2: the example flowchart renders and validates; an unsupported operator (arcto) is a postscript_error with the offending command",
+  "title": "Scenario 2: the example flowchart renders and validates; an unsupported operator (execuserobject) is a postscript_error with the offending command",
   "origin": "examples/agent-scenarios.md section 2",
   "steps": [
     {
@@ -51,10 +51,10 @@
       }
     },
     {
-      "label": "arcto is not implemented",
+      "label": "execuserobject is not implemented",
       "tool": "render_postscript",
       "args": {
-        "source": "%!PS\n0 0 moveto 50 50 50 50 10 arcto\nshowpage\n"
+        "source": "%!PS\n7 execuserobject\nshowpage\n"
       },
       "result": {
         "is_error": true,
@@ -69,7 +69,7 @@
           "error.postscript.name": "undefined",
           "error.postscript.report": {
             "contains": [
-              "OffendingCommand: arcto",
+              "OffendingCommand: execuserobject",
               "Line: 2"
             ]
           }
