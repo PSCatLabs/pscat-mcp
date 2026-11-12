@@ -20,7 +20,7 @@ The server exposes seven tools:
 | --- | --- | --- |
 | `render_postscript` | `source` (required), `format` (`png` default, `svg`, `pdf`), `width`, `height` (points), `dpi` (9–1200, default 72), `halftone` (boolean, PNG only, default false) | One content block per artifact (PNG `image`, SVG text resource up to 40 KiB in all and blob resource above, PDF blob resource) + a text summary; `structuredContent` envelope `{ok, format, mime_type, page_count, artifacts[], program_output, steps_used, elapsed_ms, renderer}`, each artifact with `returned_as` (`image`, `text`, `blob`) |
 | `chalkboard_math` | `latex` (required), `size`, `irregular`, `slope`, `jitter`, `align`, `color`, `board`, `ghosting`, `seed`, `width`, `height` (points, default 800×400), `dpi` (default 144), `format`, `config` | The board as `render_postscript` returns a page, with the same envelope |
-| `handwrite` | `text` (required), `size` (points, default 36), `width` (points, default 612), `paper` (`plain` default, `ruled`), `ink` (`"R,G,B"` in 0–1, default `0.13,0.14,0.34`), `jitter` (default 16), `seed` (default 1985), `dpi` (default 72) | The note as a PNG, with the same envelope as `render_postscript`; the page height is fitted to the text |
+| `handwrite` | `text` (required), `size` (points, default 36), `width` (points, default 612), `paper` (`plain` default, `ruled`), `ink` (`"R,G,B"` in 0–1, default `0.13,0.14,0.34`), `jitter` (a whole number, default 16), `seed` (default 1985), `dpi` (default 72) | The note as a PNG, with the same envelope as `render_postscript`; the page height is fitted to the text |
 | `review_sheet` | `entries` (required: each `source`, optional `label`, `width`, `height`, `dpi` list), top-level `width`, `height` (default 612×792), `dpi` (default `[72]`; an item is a number or `{dpi, zoom}`), `labels`, `sizes` (default true) | One PNG `image` (the sheet) + a text line per cell; `structuredContent` `{ok, format, mime_type, width_px, height_px, bytes, failed_cells, cells[]{row, column, dpi, zoom, width_px, height_px, width_pt, height_pt, x, y, ok, error?{code, limit?, message}}, steps_used, elapsed_ms, wall_ms, renderer}` |
 | `validate_postscript` | `source` | Text summary; `structuredContent` `{ok, valid, syntax{ok,tokens,error?}, execution_error?{name,limit,report}, lint[], page_count, program_output, steps_used, renderer}` |
 | `describe_art_capabilities` | none, or `kind`, or `names` (≤ 20), with `kind` `offset`/`limit` | Under 24 KB, same information as text and as `structuredContent` (Claude Code shows the model the JSON). None: `{view:"index", index[]{kind,count,names[]}, details, font_packs, pscat_version, catalog_signature, renderer}`. `kind`: `{view:"kind", kind, total, offset, next_offset?, summaries[]{name,description}}`. `names`: `{view:"names", entries[] (name, kind, description, parameters[], source, load, example, availability), not_found[], omitted[]}` |
@@ -461,7 +461,7 @@ agent against the container image.
   size it would have been. The agent shortens the text, widens the note
   or lowers `size`.
 - A text over `PSCAT_MCP_MAX_HANDWRITE_BYTES` is `source_too_large`; a bad
-  `paper`, `ink`, `size`, `jitter` or `seed` is `invalid_request`; `dpi` or
+  `paper`, `ink`, `size`, `jitter` (out of range or not a whole number) or `seed` is `invalid_request`; `dpi` or
   `width` out of range is `invalid_dimensions`.
 - The styles are hand-drawn faces for notes, cards and art, not for
   imitating a specific person's handwriting.

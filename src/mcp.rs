@@ -290,14 +290,27 @@ pub struct HandwriteArgs {
     pub paper: Option<String>,
     /// Ink colour as "R,G,B", each from 0 to 1. Default "0.13,0.14,0.34".
     pub ink: Option<String>,
-    /// Ink wobble in glyph units; 0 is calm. Default 16.
-    #[schemars(range(min = 0, max = 10000))]
+    /// Ink wobble in glyph units; 0 is calm. A whole number. Default 16.
+    #[serde(default)]
+    #[schemars(schema_with = "jitter_schema", transform = drop_default)]
     pub jitter: Option<f64>,
     /// Random seed; the same seed gives the same note. Default 1985.
     #[schemars(range(min = -2147483648_i64, max = 2147483647_i64))]
     pub seed: Option<i64>,
     /// Resolution in dots per inch, 9 to 1200. Default 72.
     pub dpi: Option<f64>,
+}
+
+/// `jitter` is a whole number: PSCat's handwriting font takes it with `mod`.
+/// Optional, so the type admits null, as the other optional numbers' do.
+fn jitter_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": ["integer", "null"], "minimum": 0, "maximum": 10000 })
+}
+
+/// Drops the `default` that `#[serde(default)]` adds, to match the other
+/// optional arguments' schemas.
+fn drop_default(schema: &mut schemars::Schema) {
+    schema.remove("default");
 }
 
 impl HandwriteArgs {
@@ -1224,7 +1237,8 @@ impl PscatMcp {
                        handwriting or presenting writing as someone else's. The script has \
                        the letters a to z (capitals are written as lowercase), the digits 0 to \
                        9, and . , - ' ! ?; other characters leave a gap. Newlines force line \
-                       breaks. `paper` ruled adds ruled lines and a margin rule. The same \
+                       breaks. `paper` ruled adds ruled lines and a margin rule. `jitter` is a whole \
+                       number from 0 to 10000 (default 16). The same \
                        arguments give the same image. The default note is 612 points wide at \
                        72 dpi, 36 point type in dark blue ink; a one-line note is 146 points \
                        tall and each further line adds 54 points. A note whose height would \
