@@ -705,3 +705,72 @@ async fn pack_face_note_lists_the_packs_the_catalog_reports() {
     }
     client.cancel().await.ok();
 }
+
+/// A scratch directory removed on drop.
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The worker cannot start until the test links the server binary to its
+/// path. Until then the catalog read fails, and the guide says so; once the
+/// worker works, the next request reads the catalog again (a failed fetch is
+/// kept neither in the catalog nor in the guide).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_catalog_degrades_the_guide_and_the_next_request_retries() {
+    const UNREAD: &str = "could not be read just now";
+    const LISTED: &str = "Font packs installed on this server: `cjk-thai`.";
+
+    let pack = PackDir::fixture_copy();
+    // The path is absent, as in the worker-failed scenario: spawning fails.
+    let dir = ScratchDir(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("guide-worker-{}", uuid::Uuid::new_v4().simple())),
+    );
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let worker = dir.0.join("pscat-mcp-server");
+    let client = common::start_stdio(
+        env!("CARGO_BIN_EXE_pscat-mcp-server"),
+        &[
+            ("PSCAT_MCP_FONT_PACK_DIR", pack.path()),
+            ("PSCAT_MCP_WORKER_EXE", worker.to_str().unwrap()),
+        ],
+    )
+    .await;
+
+    // The read fails: each document still reads, with the line that says so.
+    for doc in PACK_DOCS {
+        let text = read_text(&client, &guide::uri(doc)).await;
+        assert!(text.contains(UNREAD), "{doc}");
+        assert!(
+            !text.contains("Font packs installed on this server"),
+            "{doc}"
+        );
+    }
+    // A prompt degrades too; it does not error.
+    let got = client
+        .get_prompt(GetPromptRequestParams::new("generative_art"))
+        .await
+        .expect("prompts/get must degrade, not fail");
+    let text = &got.messages[0].content.as_text().expect("text").text;
+    assert!(text.contains(UNREAD), "generative_art, while unreadable");
+
+    // The worker starts now. The same requests read the catalog again.
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_pscat-mcp-server"), &worker).unwrap();
+    for doc in PACK_DOCS {
+        let text = read_text(&client, &guide::uri(doc)).await;
+        assert!(text.contains(LISTED), "{doc}, after recovery");
+        assert!(!text.contains(UNREAD), "{doc}, after recovery");
+    }
+    let got = client
+        .get_prompt(GetPromptRequestParams::new("generative_art"))
+        .await
+        .expect("prompts/get after recovery");
+    let text = &got.messages[0].content.as_text().expect("text").text;
+    assert!(text.contains(LISTED), "generative_art, after recovery");
+    client.cancel().await.ok();
+}
