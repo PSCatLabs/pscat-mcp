@@ -428,8 +428,16 @@ off), checked at startup when jobs are on. A refusal names the limit in
 the requester's own fetched results first, oldest first, then anyone
 else's; a principal over its share gives up only its own. A job that
 cannot fit even after every fetched result is dropped is refused before
-anything is dropped. Unfetched results and cancelled jobs' bookkeeping are
-never dropped early. A finished job is kept for the result TTL after it
+anything is dropped. A cancelled job has no result to deliver, so once it
+has stopped it is evictable like a fetched one: its 4 KiB of bookkeeping
+stays charged (which bounds how many records a start-and-cancel loop can
+leave behind) but is dropped first when the share or the budget is short,
+so cancelling never leaves a principal at its share unable to start. The
+charge is kept rather than released at cancel time for that bound, and the
+record stays visible (`render_status` says `cancelled`) until room is
+needed or the TTL passes; `cancel_job` treats a job dropped between two
+of its polls as cancelled. Unfetched results (done or failed) are never
+dropped early. A finished job is kept for the result TTL after it
 finished; the store is swept on every access.
 
 **States.** `queued`, `running`, `done`, `failed` (the render's own error:
