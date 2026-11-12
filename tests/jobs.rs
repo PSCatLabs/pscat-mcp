@@ -1615,9 +1615,9 @@ async fn over_http_a_call_dropped_before_the_threshold_kills_its_worker() {
     client.cancel().await.ok();
 }
 
-/// A 2026-07-28 request (no session; client capabilities in `_meta`), as
-/// Claude Code sends them.
-async fn post_current(srv: &Http, token: &str, method: &str, params: Value, tasks: bool) -> Value {
+/// The body and `Mcp-Name` of a 2026-07-28 request (no session; client
+/// capabilities in `_meta`), as Claude Code sends them.
+fn current_request(method: &str, params: Value, tasks: bool) -> (String, String) {
     let mut params = params;
     let caps = if tasks {
         json!({ "extensions": { "io.modelcontextprotocol/tasks": {} } })
@@ -1635,6 +1635,12 @@ async fn post_current(srv: &Http, token: &str, method: &str, params: Value, task
         .or(params["taskId"].as_str())
         .unwrap_or_default()
         .to_string();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    (body.to_string(), name)
+}
+
+async fn post_current(srv: &Http, token: &str, method: &str, params: Value, tasks: bool) -> Value {
+    let (body, name) = current_request(method, params, tasks);
     let mut req = reqwest::Client::new()
         .post(&srv.base)
         .header("Content-Type", "application/json")
@@ -1645,8 +1651,7 @@ async fn post_current(srv: &Http, token: &str, method: &str, params: Value, task
     if !name.is_empty() {
         req = req.header("Mcp-Name", name);
     }
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let resp = req.body(body.to_string()).send().await.unwrap();
+    let resp = req.body(body).send().await.unwrap();
     serde_json::from_str(&resp.text().await.unwrap()).unwrap()
 }
 
@@ -1698,6 +1703,128 @@ async fn over_http_a_task_is_found_by_a_later_request_of_its_owner_only() {
     let (w, h, px) = png_of(result);
     assert_eq!((w, h), (20, 10));
     assert!(px.iter().all(|p| *p == [255, 0, 0, 255]));
+}
+
+// ------------------------------------------------- raw TCP clients (no rmcp)
+
+/// Write a `tools/call` for a program that never ends to the server as a
+/// hand-written HTTP/1.1 request on a raw socket: no rmcp, no HTTP client
+/// library. The response is never read.
+async fn raw_slow_call(srv: &Http, tasks: bool) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let (body, name) = current_request(
+        "tools/call",
+        json!({
+            "name": "render_postscript",
+            "arguments": { "source": FOREVER, "width": 20, "height": 20 }
+        }),
+        tasks,
+    );
+    let addr = srv
+        .base
+        .trim_start_matches("http://")
+        .trim_end_matches("/mcp");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\n\
+         Authorization: Bearer {TOKEN_A}\r\n\
+         MCP-Protocol-Version: 2026-07-28\r\n\
+         Mcp-Method: tools/call\r\nMcp-Name: {name}\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    stream.flush().await.expect("flush");
+    stream
+}
+
+/// Drop a raw connection: a plain close (FIN), or a reset (RST, as when the
+/// client process dies or a middlebox drops the flow). tokio deprecates
+/// `set_linger` because a non-zero linger blocks on drop; zero does not.
+#[allow(deprecated)]
+fn drop_connection(stream: tokio::net::TcpStream, reset: bool) {
+    if reset {
+        stream.set_linger(Some(Duration::ZERO)).expect("linger 0");
+        drop(stream);
+    } else {
+        drop(stream);
+    }
+}
+
+/// A raw client sends the slow call, waits until its worker is running,
+/// and drops the connection, once closed and once reset. Each time the
+/// worker must be killed, and no job made. `tasks` sends the Tasks
+/// capability, as Claude Code would on `tools/call`.
+async fn raw_drop_kills_the_worker(svc: Arc<RenderService>, tag: &str, tasks: bool) {
+    let srv = serve_http(svc.clone()).await;
+    for (round, reset) in [false, true].into_iter().enumerate() {
+        let stream = raw_slow_call(&srv, tasks).await;
+        wait_for("the worker starts", Duration::from_secs(30), async || {
+            processes_with(tag) == 1
+        })
+        .await;
+        assert_eq!(
+            svc.counters.executed.load(Ordering::SeqCst),
+            round as u64 + 1
+        );
+        drop_connection(stream, reset);
+        wait_for("the worker is gone", Duration::from_secs(10), async || {
+            processes_with(tag) == 0
+        })
+        .await;
+        assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 0);
+        assert_eq!(svc.jobs().unfinished(), 0);
+        assert_eq!(svc.jobs().charged_bytes(), 0);
+    }
+    // The slot is free and the server serves the next call.
+    let r = post_current(
+        &srv,
+        TOKEN_A,
+        "tools/call",
+        json!({ "name": "render_postscript", "arguments": { "source": QUICK_BLUE } }),
+        false,
+    )
+    .await;
+    assert_ne!(r["result"]["isError"], true, "{r}");
+}
+
+/// The realistic failure of #86's cancelled-request case: the client
+/// vanishes at the TCP level, not through a protocol message. A plain
+/// `render_postscript` leaves no worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn over_http_a_raw_tcp_drop_kills_the_worker() {
+    let tag = tag();
+    let limits = LimitsConfig {
+        max_steps: 0,
+        // Only the drop can end the loop within the test's time frame.
+        render_timeout_ms: 60_000,
+        ..relaxed()
+    };
+    let jobs = JobsConfig {
+        job_timeout_ms: 70_000,
+        ..jobs()
+    };
+    let svc = service(limits, jobs, &tag);
+    raw_drop_kills_the_worker(svc, &tag, false).await;
+}
+
+/// The same with the Tasks capability on the request and `--tasks` on: the
+/// threshold is far above the program's start-up, so the call is dropped
+/// before it would become a task, and no job is made. (The 2026-07-28 shape
+/// is what carries the capability to this stateless server; the request is
+/// the one `over_http_a_task_is_found_by_a_later_request_of_its_owner_only`
+/// turns into a task past a short threshold.)
+#[tokio::test(flavor = "multi_thread")]
+async fn over_http_a_raw_tcp_drop_before_the_threshold_kills_its_worker() {
+    let tag = tag();
+    let limits = LimitsConfig {
+        max_steps: 0,
+        ..relaxed()
+    };
+    let svc = service(limits, tasks_after(LONG_THRESHOLD_MS), &tag);
+    raw_drop_kills_the_worker(svc, &tag, true).await;
 }
 
 /// `render_result` returns what `render_postscript` would: SVG as text up
