@@ -47,7 +47,7 @@ There is deliberately no build argument or environment variable that overrides t
    - merges are squash-only, with linear history;
    - no force-pushes or deletion. PSCat release notes may change rendering. Check the README examples, or `examples/*.ps`, against the new version if anything looks different.
 
-3. **Tag the release** from the merged `main`:
+3. **Tag the release** from the merged `main`. Before tagging `vX.Y.Z`, the `X.Y.Z` milestone must have no open issues or PRs: move anything left over to the next milestone, or land it.
 
    ```bash
    gh release create v0.2.0 --target main --generate-notes \
@@ -58,6 +58,8 @@ There is deliberately no build argument or environment variable that overrides t
    - `0.2.0`
    - `pscat-0.7.0`
    - `sha-<commit>`
+
+   Once the release is published, close the `X.Y.Z` milestone and create the next one if it doesn't exist.
 
 4. **Deploy** by tag or digest. See [CLOUD_RUN.md](CLOUD_RUN.md).
 

@@ -175,6 +175,17 @@ starts on an issue, and swaps it for `in-review` when the PR opens. Both
 are removed once the PR merges.
 `deferred` parks an issue until the owner revives it.
 
+**Milestones** are named for the release, `X.Y.Z`, as in PSCat.
+* The next release's milestone (such as `0.1.0`) holds only release
+  blockers: issues and PRs that must land before the tag.
+* The following release's milestone (such as `0.2.0`) holds work held
+  back, plus whatever backlog grooming assigns.
+* An issue waiting on an outside trigger (`deferred` with no date, such
+  as #84 and #91) may have no milestone.
+* Whoever files an issue sets its milestone. The coordinator checks it
+  when dispatching.
+* A PR takes the milestone of its issue.
+
 ## Dispatching several issues
 
 When the coordinating session runs issues through implementation agents:
