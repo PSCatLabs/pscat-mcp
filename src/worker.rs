@@ -703,7 +703,7 @@ fn encode(
             // The whole size first, so an SVG over the output cap is never
             // base64 encoded, copied into a result or sent to the server.
             // Whether it goes back as text or as a blob is the server's
-            // choice (`PSCAT_MCP_MAX_SVG_BYTES`).
+            // choice (`PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES`).
             let svg_total = svgs.iter().fold(0usize, |n, s| n.saturating_add(s.len()));
             if svg_total > max_bytes {
                 return Err(WorkerFailure::OutputTooLarge {

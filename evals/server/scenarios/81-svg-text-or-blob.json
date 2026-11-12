@@ -1,9 +1,9 @@
 {
   "id": "svg-text-or-blob",
-  "title": "SVG up to PSCAT_MCP_MAX_SVG_BYTES is an embedded text resource, over it an embedded blob resource (base64) up to the output cap",
+  "title": "SVG up to PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES is an embedded text resource, over it an embedded blob resource (base64) up to the output cap",
   "origin": "issues #52, #63; README Output formats",
   "server_env": {
-    "PSCAT_MCP_MAX_SVG_BYTES": "20000",
+    "PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES": "20000",
     "PSCAT_MCP_MAX_OUTPUT_BYTES": "4000000"
   },
   "steps": [
@@ -13,7 +13,7 @@
       "args": {},
       "result": {
         "structured": {
-          "limits.max_svg_bytes": 20000,
+          "limits.svg_blob_threshold_bytes": 20000,
           "limits.max_output_bytes": 4000000
         }
       }
@@ -86,7 +86,7 @@
         },
         "text_contains": [
           "over 20000 bytes",
-          "PSCAT_MCP_MAX_SVG_BYTES",
+          "PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES",
           "blob"
         ]
       }

@@ -57,6 +57,9 @@ pub fn build_service_with_jobs(
     worker: &config::WorkerConfig,
 ) -> anyhow::Result<Arc<render::RenderService>> {
     limits.check().map_err(anyhow::Error::msg)?;
+    if let Some(warning) = limits.deprecation_warning() {
+        tracing::warn!("{warning}");
+    }
     jobs.check(&limits).map_err(anyhow::Error::msg)?;
     let exe = worker.exe()?;
     let font_pack_dir = worker.font_pack_dir().map_err(anyhow::Error::msg)?;

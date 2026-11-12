@@ -6,7 +6,7 @@
 //!
 //! * `render_postscript` — on success, one content block per artifact (PNG
 //!   as `image` content; SVG as an embedded text resource, or a blob
-//!   resource when all pages together are over `PSCAT_MCP_MAX_SVG_BYTES`;
+//!   resource when all pages together are over `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES`;
 //!   PDF as an embedded blob resource) plus a short text summary. `structuredContent`
 //!   is a [`RenderToolOutput`] envelope without the artifact bytes. On
 //!   failure, `isError: true`, a text explanation, and the same envelope
@@ -461,9 +461,9 @@ pub struct ArtifactSummary {
     /// MIME type of the artifact.
     pub mime_type: String,
     /// How the artifact's content block carries it: `image` (PNG),
-    /// `text` (an embedded text resource: SVG up to `max_svg_bytes`) or
+    /// `text` (an embedded text resource: SVG up to `svg_blob_threshold_bytes`) or
     /// `blob` (an embedded base64 resource: PDF, and SVG over
-    /// `max_svg_bytes`).
+    /// `svg_blob_threshold_bytes`).
     pub returned_as: ReturnedAs,
 }
 
@@ -664,7 +664,7 @@ pub struct LimitsInfo {
     /// Most bytes of SVG (all pages together) returned as embedded text
     /// resources; at most `max_output_bytes`. A larger SVG is returned as
     /// embedded blob resources (base64), up to `max_output_bytes`.
-    pub max_svg_bytes: usize,
+    pub svg_blob_threshold_bytes: usize,
     /// Most bytes of program stdout returned.
     pub max_program_output_bytes: usize,
     /// Smallest accepted dpi.
@@ -810,7 +810,7 @@ impl PscatMcp {
                     limits.max_pixels,
                     limits.max_pages,
                     limits.max_output_bytes,
-                    limits.svg_bytes(),
+                    limits.svg_blob_threshold_bytes(),
                     limits.render_timeout_ms
                 )
                 .into(),
@@ -828,7 +828,7 @@ impl PscatMcp {
                     limits.max_latex_bytes,
                     limits.max_pixels,
                     limits.max_output_bytes,
-                    limits.svg_bytes(),
+                    limits.svg_blob_threshold_bytes(),
                     limits.render_timeout_ms
                 )
                 .into(),
@@ -1024,7 +1024,7 @@ impl PscatMcp {
             OutputFormat::Png => "one image content block per page",
             OutputFormat::Svg => {
                 "one embedded text resource per page, or one embedded blob resource (base64) per \
-                 page when all pages together are over max_svg_bytes"
+                 page when all pages together are over svg_blob_threshold_bytes"
             }
             OutputFormat::Pdf => "one embedded blob resource holding every page",
         };
@@ -1053,7 +1053,7 @@ impl PscatMcp {
                 max_side_px: PSCAT_MAX_SIDE_PX,
                 max_pages: l.max_pages,
                 max_output_bytes: l.max_output_bytes,
-                max_svg_bytes: l.svg_bytes(),
+                svg_blob_threshold_bytes: l.svg_blob_threshold_bytes(),
                 max_program_output_bytes: l.max_program_output_bytes,
                 min_dpi: MIN_DPI,
                 max_dpi: MAX_DPI,
@@ -1169,7 +1169,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
+            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
             Err(err) => render_failure(err),
         }
     }
@@ -1209,7 +1209,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
+            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
             Err(err) => failure_with("Chalkboard failed", err),
         }
     }
@@ -1250,7 +1250,7 @@ impl PscatMcp {
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_bytes()),
+            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
             Err(err) => failure_with("Handwrite failed", err),
         }
     }
@@ -1488,7 +1488,7 @@ impl PscatMcp {
         match principal(self.transport, &ext)
             .and_then(|owner| self.service.jobs().result(&owner, &args.job_id))
         {
-            Ok(result) => job_result(result, self.service.limits().svg_bytes()),
+            Ok(result) => job_result(result, self.service.limits().svg_blob_threshold_bytes()),
             Err(err) => failure_with("No render result", err),
         }
     }
@@ -1580,7 +1580,7 @@ impl ServerHandler for PscatMcp {
                             tool: tool.to_string(),
                             outcome: outcome.map(Arc::new).map_err(Arc::new),
                         },
-                        self.service.limits().svg_bytes(),
+                        self.service.limits().svg_blob_threshold_bytes(),
                     )),
                 },
             );
@@ -1608,7 +1608,10 @@ impl ServerHandler for PscatMcp {
             // A render that failed is still a completed tool call, with
             // `isError: true` (SEP-2663: `failed` is for JSON-RPC errors).
             (_, Some(result)) => TaskPayload::Completed {
-                result: result_object(&job_result(result, self.service.limits().svg_bytes())),
+                result: result_object(&job_result(
+                    result,
+                    self.service.limits().svg_blob_threshold_bytes(),
+                )),
             },
             _ => TaskPayload::Working,
         };
@@ -1977,7 +1980,7 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
     let mut text = success_text(&out, &renderer);
     if out.format == OutputFormat::Svg && !svg_as_text {
         text.push_str(&format!(
-            "\nThe SVG is over {svg_text_max} bytes (PSCAT_MCP_MAX_SVG_BYTES), so each page is a \
+            "\nThe SVG is over {svg_text_max} bytes (PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES), so each page is a \
              blob resource (base64) rather than text."
         ));
     }
