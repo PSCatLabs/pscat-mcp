@@ -1828,7 +1828,7 @@ async fn over_http_a_raw_tcp_drop_before_the_threshold_kills_its_worker() {
 }
 
 /// `render_result` returns what `render_postscript` would: SVG as text up
-/// to `PSCAT_MCP_MAX_SVG_BYTES`, as a blob over it, with `returned_as` to
+/// to `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES`, as a blob over it, with `returned_as` to
 /// match.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_returns_svg_as_text_or_blob_by_the_svg_limit() {
@@ -1837,7 +1837,7 @@ async fn a_job_returns_svg_as_text_or_blob_by_the_svg_limit() {
         let tag = tag();
         let svc = service(
             LimitsConfig {
-                max_svg_bytes: Some(limit),
+                svg_blob_threshold_bytes: Some(limit),
                 ..relaxed()
             },
             jobs(),
@@ -1899,7 +1899,7 @@ async fn a_job_whose_svg_is_over_the_cap_returns_a_blob() {
     let cap = SVG_CAP.to_string();
     let client = common::start_stdio(
         env!("CARGO_BIN_EXE_pscat-mcp-server"),
-        &[("PSCAT_MCP_MAX_SVG_BYTES", &cap)],
+        &[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", &cap)],
     )
     .await;
     let start = client

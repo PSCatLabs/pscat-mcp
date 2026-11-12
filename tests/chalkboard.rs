@@ -256,7 +256,7 @@ async fn board_false_is_chalk_on_a_transparent_page() {
 async fn svg_and_pdf_come_back_inline() {
     // A board's SVG is large, so the text limit is raised to the output
     // cap to get it as text.
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "8388608")]).await;
     let small = |format: &str| json!({"latex": r"\frac{1}{2}", "format": format, "width": 300, "height": 150, "dpi": 72});
     let svg = call(&client, small("svg")).await;
     assert_eq!(svg.is_error, Some(false), "{}", text_of(&svg));

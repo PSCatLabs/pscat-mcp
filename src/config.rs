@@ -34,7 +34,11 @@ use clap::Args;
 ///   its content blocks, so it sees neither form (source reading).
 ///
 /// The earlier default, 128 KiB, was a cap: over it the call failed.
-pub const DEFAULT_MAX_SVG_BYTES: usize = 40 * 1024;
+pub const DEFAULT_SVG_BLOB_THRESHOLD_BYTES: usize = 40 * 1024;
+
+/// The environment variable the old name of the SVG threshold was read from.
+/// Kept as a deprecated alias (see [`LimitsConfig::deprecated_max_svg_bytes`]).
+pub const DEPRECATED_MAX_SVG_BYTES_ENV: &str = "PSCAT_MCP_MAX_SVG_BYTES";
 /// Hard per-side ceiling PSCat applies to every page.
 pub const PSCAT_MAX_SIDE_PX: u32 = 8000;
 /// The most pixels a review sheet can have: 8000 a side.
@@ -120,8 +124,13 @@ pub struct LimitsConfig {
     /// files, up to the output limit. 0 returns every SVG as a blob.
     /// Defaults to 40 KiB, or the output limit if that is smaller; it may
     /// not exceed the output limit.
-    #[arg(long, env = "PSCAT_MCP_MAX_SVG_BYTES")]
-    pub max_svg_bytes: Option<usize>,
+    #[arg(long, env = "PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES")]
+    pub svg_blob_threshold_bytes: Option<usize>,
+
+    /// Deprecated alias of `--svg-blob-threshold-bytes`, kept for existing
+    /// deployments. Setting both is refused at startup.
+    #[arg(long = "max-svg-bytes", env = "PSCAT_MCP_MAX_SVG_BYTES", hide = true)]
+    pub deprecated_max_svg_bytes: Option<usize>,
 
     /// Most bytes of program stdout (`print`, `=`) returned.
     #[arg(long, env = "PSCAT_MCP_MAX_PROGRAM_OUTPUT_BYTES", default_value_t = 16 * 1024)]
@@ -186,7 +195,8 @@ impl Default for LimitsConfig {
             max_pixels: 16_000_000,
             max_pages: 10,
             max_output_bytes: 8 * 1024 * 1024,
-            max_svg_bytes: None,
+            svg_blob_threshold_bytes: None,
+            deprecated_max_svg_bytes: None,
             max_program_output_bytes: 16 * 1024,
             max_concurrent_renders: None,
             queue_timeout_ms: 10_000,
@@ -216,11 +226,25 @@ impl LimitsConfig {
     }
 
     /// Most bytes of SVG (all pages together) returned as text: the
-    /// configured limit, or [`DEFAULT_MAX_SVG_BYTES`] held to the output
-    /// limit.
-    pub fn svg_bytes(&self) -> usize {
-        self.max_svg_bytes
-            .unwrap_or_else(|| DEFAULT_MAX_SVG_BYTES.min(self.max_output_bytes))
+    /// configured limit (or its deprecated alias), or
+    /// [`DEFAULT_SVG_BLOB_THRESHOLD_BYTES`] held to the output limit.
+    pub fn svg_blob_threshold_bytes(&self) -> usize {
+        self.svg_blob_threshold_bytes
+            .or(self.deprecated_max_svg_bytes)
+            .unwrap_or_else(|| DEFAULT_SVG_BLOB_THRESHOLD_BYTES.min(self.max_output_bytes))
+    }
+
+    /// The one-line deprecation warning, when only the deprecated alias is
+    /// set. `None` when the new name is set or neither is.
+    pub fn deprecation_warning(&self) -> Option<String> {
+        match (self.svg_blob_threshold_bytes, self.deprecated_max_svg_bytes) {
+            (None, Some(_)) => Some(format!(
+                "{DEPRECATED_MAX_SVG_BYTES_ENV} (--max-svg-bytes) is deprecated; \
+                 use PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES (--svg-blob-threshold-bytes) \
+                 instead. The value is used as before."
+            )),
+            _ => None,
+        }
     }
 
     /// Most bytes of PostScript in one sheet.
@@ -326,10 +350,17 @@ impl LimitsConfig {
         if self.max_pixels == 0 || self.max_pages == 0 || self.max_output_bytes == 0 {
             return Err("max-pixels, max-pages and max-output-bytes must be positive".into());
         }
-        if self.svg_bytes() > self.max_output_bytes {
+        if self.svg_blob_threshold_bytes.is_some() && self.deprecated_max_svg_bytes.is_some() {
+            return Err(
+                "set only one of PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES (--svg-blob-threshold-bytes) \
+                 and its deprecated alias PSCAT_MCP_MAX_SVG_BYTES (--max-svg-bytes), not both"
+                    .into(),
+            );
+        }
+        if self.svg_blob_threshold_bytes() > self.max_output_bytes {
             return Err(format!(
-                "max-svg-bytes ({}) may not exceed max-output-bytes ({})",
-                self.svg_bytes(),
+                "svg-blob-threshold-bytes ({}) may not exceed max-output-bytes ({})",
+                self.svg_blob_threshold_bytes(),
                 self.max_output_bytes
             ));
         }
@@ -818,37 +849,70 @@ mod tests {
     #[test]
     fn the_svg_text_limit_defaults_below_the_output_cap_and_never_exceeds_it() {
         let l = LimitsConfig::default();
-        assert_eq!(l.svg_bytes(), 40 * 1024);
+        assert_eq!(l.svg_blob_threshold_bytes(), 40 * 1024);
         assert!(l.check().is_ok());
         // A small output cap pulls the default down with it.
         let small = LimitsConfig {
             max_output_bytes: 6000,
             ..LimitsConfig::default()
         };
-        assert_eq!(small.svg_bytes(), 6000);
+        assert_eq!(small.svg_blob_threshold_bytes(), 6000);
         assert!(small.check().is_ok());
         // An explicit cap above the output cap is refused, not clamped:
         // the operator asked for something the server cannot do.
         let over = LimitsConfig {
-            max_svg_bytes: Some(l.max_output_bytes + 1),
+            svg_blob_threshold_bytes: Some(l.max_output_bytes + 1),
             ..LimitsConfig::default()
         };
         let e = over.check().unwrap_err();
         assert!(
-            e.contains("max-svg-bytes") && e.contains("max-output-bytes"),
+            e.contains("svg-blob-threshold-bytes") && e.contains("max-output-bytes"),
             "{e}"
         );
         let at = LimitsConfig {
-            max_svg_bytes: Some(l.max_output_bytes),
+            svg_blob_threshold_bytes: Some(l.max_output_bytes),
             ..LimitsConfig::default()
         };
         assert!(at.check().is_ok());
         // Zero is allowed: every SVG is returned as a blob.
         let zero = LimitsConfig {
-            max_svg_bytes: Some(0),
+            svg_blob_threshold_bytes: Some(0),
             ..LimitsConfig::default()
         };
         assert!(zero.check().is_ok());
+    }
+
+    #[test]
+    fn the_deprecated_svg_alias_works_alone_and_is_refused_beside_the_new_name() {
+        let old = LimitsConfig {
+            deprecated_max_svg_bytes: Some(20_000),
+            ..LimitsConfig::default()
+        };
+        assert_eq!(old.svg_blob_threshold_bytes(), 20_000);
+        assert!(old.check().is_ok());
+        assert!(old.deprecation_warning().is_some());
+        let new = LimitsConfig {
+            svg_blob_threshold_bytes: Some(20_000),
+            ..LimitsConfig::default()
+        };
+        assert_eq!(new.svg_blob_threshold_bytes(), 20_000);
+        assert!(new.check().is_ok());
+        assert!(new.deprecation_warning().is_none());
+        assert!(LimitsConfig::default().deprecation_warning().is_none());
+        let both = LimitsConfig {
+            svg_blob_threshold_bytes: Some(20_000),
+            deprecated_max_svg_bytes: Some(10_000),
+            ..LimitsConfig::default()
+        };
+        let e = both.check().unwrap_err();
+        assert!(
+            e.contains("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES")
+                && e.contains("PSCAT_MCP_MAX_SVG_BYTES")
+                && e.contains("--svg-blob-threshold-bytes")
+                && e.contains("--max-svg-bytes")
+                && e.contains("not both"),
+            "{e}"
+        );
     }
 
     #[test]

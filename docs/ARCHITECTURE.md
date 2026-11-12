@@ -16,7 +16,7 @@ boundaries are, and where to extend it.
     body limit, Host/Origin    ▼           ▼
                          mcp.rs  (rmcp #[tool] handlers: translate args/results only;
                                   PNG → image block, PDF → blob resource, SVG → text
-                                  resources up to PSCAT_MCP_MAX_SVG_BYTES, else blobs)
+                                  resources up to PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES, else blobs)
                                │
                                ▼
                          render.rs  RenderService

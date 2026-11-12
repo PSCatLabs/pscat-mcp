@@ -875,8 +875,8 @@ Inspector. Codex 0.167.1's binary contains the strings `Mcp-Method`,
 
 An SVG comes back from `render_postscript`, `chalkboard_math` and
 `render_result` as embedded **text** resources while all its pages together
-are at most `PSCAT_MCP_MAX_SVG_BYTES` (40 KiB by default; see
-`DEFAULT_MAX_SVG_BYTES` in `src/config.rs`), and as embedded **blob**
+are at most `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES` (40 KiB by default; see
+`DEFAULT_SVG_BLOB_THRESHOLD_BYTES` in `src/config.rs`), and as embedded **blob**
 resources (base64) above that, up to `PSCAT_MCP_MAX_OUTPUT_BYTES`. A PDF is
 always a blob. A client may hand a resource to the model as text, shorten
 it, save it to a file or refuse it. Issue #64 measured Claude Code with SVG
@@ -935,7 +935,7 @@ What this shows:
   usable `.svg` file up to the output cap. The cost: an SVG between 40 KiB
   and the roughly 150,000 characters claude.ai documents reaches that
   client as a blob, and what claude.ai does with one is not measured.
-  Raise `PSCAT_MCP_MAX_SVG_BYTES` for a client that shows long text
+  Raise `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES` for a client that shows long text
   results, or set it to 0 to return every SVG as a blob. Until #63 the
   setting was a cap (128 KiB, chosen in #64 from claude.ai's documented
   limit): over it the call failed.
@@ -955,7 +955,7 @@ limit was what got measured, with a wrapper script passed as `--server`:
 
 ```bash
 #!/bin/sh
-PSCAT_MCP_MAX_SVG_BYTES=4194304 exec target/release/pscat-mcp-server "$@"
+PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES=4194304 exec target/release/pscat-mcp-server "$@"
 ```
 
 (8388608 for the 5 MB run.) Each case asked for one `render_postscript` call

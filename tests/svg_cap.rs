@@ -1,4 +1,4 @@
-//! How SVG is returned (`PSCAT_MCP_MAX_SVG_BYTES`) end to end: a real rmcp
+//! How SVG is returned (`PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES`) end to end: a real rmcp
 //! client on the real server binary over stdio, real PSCat in the worker.
 //! Up to the limit (all pages together) each page is an embedded text
 //! resource; above it, an embedded blob resource (base64), up to the output
@@ -145,7 +145,7 @@ async fn assert_in_schema(client: &Client, s: &Value) {
 
 #[tokio::test]
 async fn an_svg_up_to_the_limit_is_a_text_resource() {
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "20000")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "20000")]).await;
     let r = render(&client, SHAPES, "svg").await;
     let (pages, returned_as) = pages(&r);
     assert_eq!(pages.len(), 1);
@@ -159,7 +159,7 @@ async fn an_svg_up_to_the_limit_is_a_text_resource() {
 #[tokio::test]
 async fn an_svg_over_the_limit_is_a_blob_resource_with_the_same_markup() {
     // The same program with the limit out of the way: text.
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "8388608")]).await;
     let r = render(&client, MARKS, "svg").await;
     let (text_pages, returned_as) = pages(&r);
     assert_eq!(returned_as, ["text"]);
@@ -167,7 +167,7 @@ async fn an_svg_over_the_limit_is_a_blob_resource_with_the_same_markup() {
     assert!(size > 40_000, "{size}");
     client.cancel().await.ok();
 
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "20000")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "20000")]).await;
     let r = render(&client, MARKS, "svg").await;
     let (blob_pages, returned_as) = pages(&r);
     assert_eq!(blob_pages.len(), 1);
@@ -184,7 +184,7 @@ async fn an_svg_over_the_limit_is_a_blob_resource_with_the_same_markup() {
     let text = text_of(&r);
     assert!(
         text.contains("over 20000 bytes")
-            && text.contains("PSCAT_MCP_MAX_SVG_BYTES")
+            && text.contains("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES")
             && text.contains("blob"),
         "{text}"
     );
@@ -197,7 +197,7 @@ async fn an_svg_over_the_limit_is_a_blob_resource_with_the_same_markup() {
 /// together are over it.
 #[tokio::test]
 async fn the_limit_counts_every_page_together() {
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "8388608")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "8388608")]).await;
     let r = render(&client, TWO_PAGES, "svg").await;
     let (text_pages, returned_as) = pages(&r);
     assert_eq!(returned_as, ["text", "text"]);
@@ -206,7 +206,7 @@ async fn the_limit_counts_every_page_together() {
     let total: usize = sizes.iter().sum();
     let limit = sizes.iter().max().unwrap() + 1;
     assert!(limit < total, "{sizes:?}");
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", &limit.to_string())]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", &limit.to_string())]).await;
     let r = render(&client, TWO_PAGES, "svg").await;
     let (blob_pages, returned_as) = pages(&r);
     assert_eq!(returned_as, ["blob", "blob"]);
@@ -215,7 +215,7 @@ async fn the_limit_counts_every_page_together() {
         assert_eq!(b.svg, t.svg);
     }
     // Exactly at the limit is still text.
-    let client2 = start(&[("PSCAT_MCP_MAX_SVG_BYTES", &total.to_string())]).await;
+    let client2 = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", &total.to_string())]).await;
     let r = render(&client2, TWO_PAGES, "svg").await;
     assert_eq!(pages(&r).1, ["text", "text"]);
     client.cancel().await.ok();
@@ -225,7 +225,7 @@ async fn the_limit_counts_every_page_together() {
 /// 0 returns every SVG as a blob; PNG and PDF are unaffected.
 #[tokio::test]
 async fn a_limit_of_zero_returns_every_svg_as_a_blob() {
-    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "0")]).await;
+    let client = start(&[("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "0")]).await;
     let r = render(&client, SHAPES, "svg").await;
     assert_eq!(pages(&r).1, ["blob"]);
     let png = render(&client, SHAPES, "png").await;
@@ -248,7 +248,7 @@ async fn a_limit_of_zero_returns_every_svg_as_a_blob() {
 async fn an_svg_over_the_output_cap_is_output_too_large() {
     let client = start(&[
         ("PSCAT_MCP_MAX_OUTPUT_BYTES", "30000"),
-        ("PSCAT_MCP_MAX_SVG_BYTES", "10000"),
+        ("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "10000"),
     ])
     .await;
     let r = render(&client, MARKS, "svg").await;
@@ -286,7 +286,7 @@ async fn the_default_is_40_kib_and_the_limit_is_in_the_descriptions_and_renderer
         .unwrap();
     let info = info.structured_content.unwrap();
     let limits = &info["limits"];
-    assert_eq!(limits["max_svg_bytes"], 40 * 1024);
+    assert_eq!(limits["svg_blob_threshold_bytes"], 40 * 1024);
     assert_eq!(limits["max_output_bytes"], 8 * 1024 * 1024);
     let svg = info["formats"]
         .as_array()
@@ -309,6 +309,7 @@ async fn the_default_is_40_kib_and_the_limit_is_in_the_descriptions_and_renderer
         );
         assert!(!d.contains("over it the call fails"), "{name}: {d}");
     }
+    assert!(limits.get("max_svg_bytes").is_none(), "{limits}");
     client.cancel().await.ok();
     // A small output cap pulls the default down with it.
     let client = start(&[("PSCAT_MCP_MAX_OUTPUT_BYTES", "10000")]).await;
@@ -317,7 +318,7 @@ async fn the_default_is_40_kib_and_the_limit_is_in_the_descriptions_and_renderer
         .await
         .unwrap();
     assert_eq!(
-        info.structured_content.unwrap()["limits"]["max_svg_bytes"],
+        info.structured_content.unwrap()["limits"]["svg_blob_threshold_bytes"],
         10_000
     );
     client.cancel().await.ok();
@@ -329,7 +330,7 @@ fn an_svg_limit_above_the_output_cap_is_refused_at_startup() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server"))
         .arg("serve-stdio")
         .env("PSCAT_MCP_MAX_OUTPUT_BYTES", "1000")
-        .env("PSCAT_MCP_MAX_SVG_BYTES", "1001")
+        .env("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "1001")
         .env("RUST_LOG", "warn")
         .stdin(std::process::Stdio::null())
         .output()
@@ -337,7 +338,63 @@ fn an_svg_limit_above_the_output_cap_is_refused_at_startup() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("max-svg-bytes") && err.contains("max-output-bytes"),
+        err.contains("svg-blob-threshold-bytes") && err.contains("max-output-bytes"),
+        "{err}"
+    );
+}
+
+/// The deprecated name still sets the limit, and `get_renderer_info` reports
+/// it under the new field name.
+#[tokio::test]
+async fn the_deprecated_env_name_still_sets_the_limit() {
+    let client = start(&[("PSCAT_MCP_MAX_SVG_BYTES", "20000")]).await;
+    let info = client
+        .call_tool(CallToolRequestParams::new("get_renderer_info"))
+        .await
+        .unwrap();
+    let limits = info.structured_content.unwrap()["limits"].clone();
+    assert_eq!(limits["svg_blob_threshold_bytes"], 20_000, "{limits}");
+    assert!(limits.get("max_svg_bytes").is_none(), "{limits}");
+    client.cancel().await.ok();
+}
+
+/// The deprecated name is logged as deprecated at startup (on stderr; stdout
+/// carries the protocol). The server exits by itself on EOF on stdin.
+#[test]
+fn the_deprecated_env_name_logs_a_warning_at_startup() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server"))
+        .arg("serve-stdio")
+        .env("PSCAT_MCP_MAX_SVG_BYTES", "20000")
+        .env("RUST_LOG", "warn")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the server");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("PSCAT_MCP_MAX_SVG_BYTES")
+            && err.contains("deprecated")
+            && err.contains("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES"),
+        "{err}"
+    );
+}
+
+/// Both names together are refused at startup, and the error names both.
+#[test]
+fn both_svg_names_together_are_refused_at_startup() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pscat-mcp-server"))
+        .arg("serve-stdio")
+        .env("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES", "20000")
+        .env("PSCAT_MCP_MAX_SVG_BYTES", "20000")
+        .env("RUST_LOG", "warn")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the server");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES")
+            && err.contains("PSCAT_MCP_MAX_SVG_BYTES")
+            && err.contains("not both"),
         "{err}"
     );
 }
