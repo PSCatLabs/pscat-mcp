@@ -69,12 +69,12 @@ use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{ChalkboardParams, GenerateJob};
-use crate::guide::{Guide, ServerFacts};
+use crate::guide::{Guide, PackFaces, ServerFacts};
 use crate::handwrite::HandwriteParams;
 use crate::jobs::{JobResult, JobState, JobStatus, LOCAL_PRINCIPAL};
 use crate::render::{
-    DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, JobRequest, RenderError, RenderOutput,
-    RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
+    ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, JobRequest, RenderError,
+    RenderOutput, RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
 };
 use crate::sheet::{
     MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
@@ -736,6 +736,16 @@ pub struct FontPackInfo {
     pub installed: Option<Vec<String>>,
 }
 
+/// The names of the font packs in a catalog, in its order.
+fn installed_packs(catalog: &ArtCatalog) -> Vec<String> {
+    catalog
+        .font_packs
+        .installed
+        .iter()
+        .map(|p| p.name.clone())
+        .collect()
+}
+
 /// Which transport a handler serves. It decides who owns an async job: the
 /// one local user over stdio, the authenticated principal over HTTP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -753,7 +763,11 @@ pub struct PscatMcp {
     service: Arc<RenderService>,
     transport: Transport,
     tool_router: ToolRouter<Self>,
-    guide: Arc<Guide>,
+    /// The guide, built on first use (see [`PscatMcp::guide`]).
+    guide: Arc<tokio::sync::OnceCell<Arc<Guide>>>,
+    /// What the guide is built from, before the installed font packs are
+    /// known.
+    guide_facts: Arc<ServerFacts>,
 }
 
 impl From<CapabilitiesArgs> for CatalogQuery {
@@ -923,12 +937,20 @@ impl PscatMcp {
             render_timeout_ms: limits.render_timeout_ms,
             job_timeout_ms: jobs.enabled().then_some(jobs.config().job_timeout_ms),
             max_prompt_argument_bytes: limits.max_prompt_argument_bytes,
+            // Known now only when no pack directory is configured; otherwise
+            // `guide()` reads the installed packs from the catalog first.
+            pack_faces: if service.font_packs_configured() {
+                PackFaces::Configured { installed: None }
+            } else {
+                PackFaces::NotConfigured
+            },
         };
         PscatMcp {
             service,
             transport,
             tool_router,
-            guide: Arc::new(Guide::new(&facts)),
+            guide: Arc::new(tokio::sync::OnceCell::new()),
+            guide_facts: Arc::new(facts),
         }
     }
 
@@ -946,19 +968,54 @@ impl PscatMcp {
         crate::catalog::slice(&catalog, query)
     }
 
+    /// The guide. With no font-pack directory it is built once, with no
+    /// worker. With one, the installed packs come from the art catalog (a
+    /// worker, run once and kept); a catalog that cannot be read gives a
+    /// guide that says so, which is not kept, so the next call asks again.
+    async fn guide(&self) -> Arc<Guide> {
+        if let Some(guide) = self.guide.get() {
+            return guide.clone();
+        }
+        if !self.service.font_packs_configured() {
+            return self.build_guide(None).await;
+        }
+        match self.service.capabilities().await {
+            Ok(catalog) => self.build_guide(Some(installed_packs(&catalog))).await,
+            Err(_) => Arc::new(Guide::new(&self.guide_facts_with(None))),
+        }
+    }
+
+    /// Build and keep the guide, with `installed` as its pack facts
+    /// (`None` when no pack directory is configured).
+    async fn build_guide(&self, installed: Option<Vec<String>>) -> Arc<Guide> {
+        let facts = self.guide_facts_with(installed);
+        self.guide
+            .get_or_init(|| async { Arc::new(Guide::new(&facts)) })
+            .await
+            .clone()
+    }
+
+    /// `guide_facts` with the pack facts for `installed`.
+    fn guide_facts_with(&self, installed: Option<Vec<String>>) -> ServerFacts {
+        let mut facts = (*self.guide_facts).clone();
+        if self.service.font_packs_configured() {
+            facts.pack_faces = PackFaces::Configured { installed };
+        }
+        facts
+    }
+
     async fn renderer_info(&self) -> RendererInfo {
         let l = self.service.limits();
         // The packs come from the catalog the worker reads (the server never
         // looks at the directory); fetched once, then kept.
         let font_packs = if self.service.font_packs_configured() {
             Some(FontPackInfo {
-                installed: self.service.capabilities().await.ok().map(|c| {
-                    c.font_packs
-                        .installed
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect()
-                }),
+                installed: self
+                    .service
+                    .capabilities()
+                    .await
+                    .ok()
+                    .map(|c| installed_packs(&c)),
             })
         } else {
             None
@@ -1589,7 +1646,9 @@ impl ServerHandler for PscatMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
-        Ok(ListPromptsResult::with_all_items(self.guide.prompts()))
+        Ok(ListPromptsResult::with_all_items(
+            self.guide().await.prompts(),
+        ))
     }
 
     async fn get_prompt(
@@ -1597,7 +1656,8 @@ impl ServerHandler for PscatMcp {
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResponse, ErrorData> {
-        self.guide
+        self.guide()
+            .await
             .prompt(&request.name, request.arguments.as_ref())
             .map(GetPromptResponse::from)
     }
@@ -1607,7 +1667,9 @@ impl ServerHandler for PscatMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(self.guide.resources()))
+        Ok(ListResourcesResult::with_all_items(
+            self.guide().await.resources(),
+        ))
     }
 
     async fn read_resource(
@@ -1615,7 +1677,8 @@ impl ServerHandler for PscatMcp {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        self.guide
+        self.guide()
+            .await
             .read(&request.uri)
             .map(ReadResourceResponse::from)
     }

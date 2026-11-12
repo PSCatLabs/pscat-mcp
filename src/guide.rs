@@ -87,6 +87,29 @@ const FILE_NOTES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The guide files that name font-pack faces (`/Bangers`, the Korean, Japanese
+/// and Thai faces, ...). Each gets a line from [`PackFaces`]. A test checks
+/// that every path is vendored.
+const PACK_FACE_FILES: &[&str] = &[
+    "pscat/SKILL.md",
+    "psart/SKILL.md",
+    "psart/references/styles-and-type.md",
+];
+
+/// Which font-pack faces this server can reach, as far as the guide says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PackFaces {
+    /// No font-pack directory is configured, so no pack is ever reachable.
+    #[default]
+    NotConfigured,
+    /// A directory is configured. `installed` names the packs the worker's
+    /// catalog lists, or is `None` when the catalog could not be read.
+    Configured {
+        /// The installed pack names, or `None` when they could not be read.
+        installed: Option<Vec<String>>,
+    },
+}
+
 /// Where the vendored files came from (`guide/SOURCE.json`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Source {
@@ -132,6 +155,8 @@ pub struct ServerFacts {
     pub job_timeout_ms: Option<u64>,
     /// Longest value of one prompt argument, in bytes.
     pub max_prompt_argument_bytes: usize,
+    /// Which font-pack faces are reachable (see [`PackFaces`]).
+    pub pack_faces: PackFaces,
 }
 
 impl ServerFacts {
@@ -358,11 +383,54 @@ fn title_of(path: &str, text: &str) -> String {
 
 /// `a`, `a or b`, `a, b or c` (each in backticks).
 fn either(items: &[&str]) -> String {
+    list(items, "or")
+}
+
+/// `a`, `a and b`, `a, b and c` (each in backticks), with `conjunction`
+/// before the last item.
+fn list(items: &[&str], conjunction: &str) -> String {
     let quoted: Vec<String> = items.iter().map(|i| format!("`{i}`")).collect();
     match quoted.split_last() {
         None => String::new(),
         Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        Some((last, rest)) => format!("{} {conjunction} {last}", rest.join(", ")),
+    }
+}
+
+/// The note's line on font-pack faces.
+fn pack_line(packs: &PackFaces) -> String {
+    match packs {
+        PackFaces::NotConfigured => {
+            "- Font-pack faces are not available on this server (no font-pack directory is \
+             configured). A name from a pack, such as `/Bangers` or a Korean, Japanese or \
+             Thai face, falls back to a built-in face. The standard 35 and the `lib/fonts` \
+             faces are built in."
+                .to_string()
+        }
+        PackFaces::Configured { installed: None } => {
+            "- The font packs installed on this server could not be read just now, so a name \
+             from a pack may fall back to a built-in face. `get_renderer_info` reports \
+             `font_packs.installed`."
+                .to_string()
+        }
+        PackFaces::Configured {
+            installed: Some(names),
+        } if names.is_empty() => {
+            "- No font pack is installed on this server, so a name from a pack falls back to a \
+             built-in face. The standard 35 and the `lib/fonts` faces are built in."
+                .to_string()
+        }
+        PackFaces::Configured {
+            installed: Some(names),
+        } => {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            format!(
+                "- Font packs installed on this server: {}. Their faces are available; a face \
+                 from any other pack falls back to a built-in face. `describe_art_capabilities` \
+                 lists the faces.",
+                list(&names, "and")
+            )
+        }
     }
 }
 
@@ -467,6 +535,9 @@ fn note(path: &str, facts: &ServerFacts) -> String {
          lists every limit.",
         facts.render_timeout_ms.div_ceil(1000)
     ));
+    if PACK_FACE_FILES.contains(&path) {
+        lines.push(pack_line(&facts.pack_faces));
+    }
     for (p, extra) in FILE_NOTES {
         if *p == path {
             lines.push(format!("- {extra}"));
@@ -679,6 +750,7 @@ mod tests {
             render_timeout_ms: 20_000,
             job_timeout_ms: None,
             max_prompt_argument_bytes: MAX_PROMPT_ARGUMENT_BYTES,
+            pack_faces: PackFaces::NotConfigured,
         }
     }
 
@@ -764,6 +836,56 @@ mod tests {
         assert_eq!(either(&["a"]), "`a`");
         assert!(!n.contains("`bands`, "));
         assert!(n.contains("20 s"));
+    }
+
+    #[test]
+    fn pack_files_are_vendored() {
+        for path in PACK_FACE_FILES {
+            assert!(files().iter().any(|(p, _)| p == path), "{path}");
+        }
+    }
+
+    #[test]
+    fn pack_line_follows_the_pack_facts() {
+        let mut f = facts();
+        let none = note("pscat/SKILL.md", &f);
+        assert!(none.contains("Font-pack faces are not available on this server"));
+        assert!(!none.contains("Font packs installed"));
+
+        f.pack_faces = PackFaces::Configured {
+            installed: Some(vec!["cjk-thai".into()]),
+        };
+        let some = note("pscat/SKILL.md", &f);
+        assert!(some.contains("Font packs installed on this server: `cjk-thai`."));
+        assert!(!some.contains("not available on this server"));
+
+        f.pack_faces = PackFaces::Configured {
+            installed: Some(vec!["cjk-thai".into(), "extras".into()]),
+        };
+        assert!(
+            note("psart/SKILL.md", &f).contains("`cjk-thai` and `extras`"),
+            "two packs are joined with and"
+        );
+
+        f.pack_faces = PackFaces::Configured {
+            installed: Some(vec![]),
+        };
+        let empty = note("pscat/SKILL.md", &f);
+        assert!(empty.contains("No font pack is installed on this server"));
+
+        f.pack_faces = PackFaces::Configured { installed: None };
+        let unread = note("pscat/SKILL.md", &f);
+        assert!(unread.contains("could not be read just now"));
+        assert!(unread.contains("`font_packs.installed`"));
+    }
+
+    #[test]
+    fn only_the_pack_face_files_get_the_pack_line() {
+        let f = facts();
+        for (path, _) in files() {
+            let has = note(path, &f).contains("Font-pack faces are not available");
+            assert_eq!(has, PACK_FACE_FILES.contains(path), "{path}");
+        }
     }
 
     #[test]
