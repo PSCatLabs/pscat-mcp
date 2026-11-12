@@ -54,7 +54,7 @@
       "label": "execuserobject is not implemented",
       "tool": "render_postscript",
       "args": {
-        "source": "%!PS\n0 0 moveto 50 50 50 50 10 execuserobject\nshowpage\n"
+        "source": "%!PS\n7 execuserobject\nshowpage\n"
       },
       "result": {
         "is_error": true,

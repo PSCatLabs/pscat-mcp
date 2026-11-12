@@ -136,7 +136,7 @@ and fix any reported error before rendering.
   `isError: true`, `structuredContent.error.code == "postscript_error"`, and
   `error.postscript = {"name": "undefined", "report": "%%[ Error: undefined; OffendingCommand: execuserobject; Line: N ]%%"}`.
   The agent should read the offending command and line, rewrite that part
-  (e.g. with `arc`), and render again without asking the user.
+  (for a user object, inline the procedure it names), and render again without asking the user.
 
 ---
 
