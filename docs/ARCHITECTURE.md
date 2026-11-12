@@ -31,7 +31,8 @@ boundaries are, and where to extend it.
                                ▼
                          backend.rs  SubprocessBackend
                            • spawn `pscat-mcp-server render-worker` per job
-                           • env cleared, cwd "/", rlimits, own process group
+                           • env cleared (PSCAT_HOME only if a font-pack dir is
+                             configured), cwd "/", rlimits, own process group
                            • stdout/stderr caps, deadline → SIGKILL group + reap
                                │  stdin: job   stdout: WorkerResult (JSON)
                                ▼
@@ -562,7 +563,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | CPU time | kernel `RLIMIT_CPU` | deadline + 2 s |
 | Address space | kernel `RLIMIT_AS` (**Linux only**) | memory + 1 GiB |
 | File writes | PSCat (no write roots) + kernel `RLIMIT_FSIZE=0` | none allowed |
-| File reads | PSCat read roots: only compiled-in `lib/` | — |
+| File reads | PSCat read roots: only compiled-in `lib/` (also with a font-pack directory) | — |
 | Open files | kernel `RLIMIT_NOFILE` | 64 |
 | Output bytes | worker (artifact cap: `output_too_large`, `error.input.code` `output_bytes`) + server (stdout cap, kill) | 8 MiB |
 | SVG returned as text (all pages together; at most the output cap) | server, when it builds the result: up to the limit each page is an embedded text resource, above it an embedded blob resource (base64). Not a failure; the worker holds SVG to the output cap, from the SVG text's length before any page is encoded (`output_too_large`, `error.input.code` `output_bytes`) | 40 KiB |
@@ -579,6 +580,45 @@ the same binary). A pre-forked pool is a possible later optimisation.
 PSCat has **no operators for processes, network or environment access**
 (see PSCat's `SECURITY.md`). The worker's environment is cleared anyway
 (only `PSCAT_NO_CHECKOUT=1` is set), so nothing secret is inherited.
+
+### The font-pack directory
+
+`PSCAT_MCP_FONT_PACK_DIR` (`--font-pack-dir`) is the one opening in that
+environment. When set, `SubprocessBackend` adds `PSCAT_HOME=<dir>` to the
+worker's environment, and nothing else: PSCat documents `PSCAT_HOME` as the
+data root it searches first, and finds packs in `<dir>/fonts/packs/<pack>/`
+(`pscat::paths`, `pscat::fontpacks`; both public). It is not a new PSCat API
+and `pscat_extras` does not change. Unset, the worker is started exactly as
+before; a unit test pins its environment to `PSCAT_NO_CHECKOUT` alone.
+The server canonicalises the path at startup (the worker runs in `/`) and
+refuses to start if it is missing or not a directory.
+
+What it does and does not loosen:
+
+* **The programs' read roots stay empty.** PSCat's font lookup is not a
+  program-chosen path (`src/read_roots.rs` in PSCat says so): it matches
+  the requested name against file stems in the font directories, so it
+  works without a read root. A program's `file`, `run` and `filenameforall`
+  still see nothing on disk: every candidate under `PSCAT_HOME` lies outside
+  every root and is skipped, an absolute name or one with `..` is
+  `invalidfileaccess`, and a symlink out of the directory leads nowhere
+  either. A `lib/artkit.ps` planted in the directory does not shadow the
+  compiled-in one, since the disk candidate is skipped. The directory is
+  never added to the read roots, so no program can read a pack file.
+* **No write access.** No write roots, `RLIMIT_FSIZE=0`; the operator
+  should also mount the directory read-only.
+* **What `PSCAT_HOME` also means to PSCat.** A `fonts/catalog/` directory
+  in it is a font override that wins over packs, and a font file in it is
+  parsed by PSCat's font loader. The directory is trusted operator
+  content, like the binary; nothing a client sends writes to it.
+* **No other inheritance.** The server's `HOME`, `XDG_*`, `PSCAT_HOME`,
+  `PSCAT_ROOT` and `PSCAT_LIB` never reach the worker, so PSCat's per-user
+  data directory is not searched. Untrusted input is still processed only in
+  the worker.
+* **Reporting.** The catalog the worker returns lists the packs it found;
+  `pscat_extras` strips the paths. `get_renderer_info` reads the pack names
+  from that cached catalog (a `font_packs` field, present only when the
+  setting is on) and never looks at the directory itself.
 
 Known gaps:
 

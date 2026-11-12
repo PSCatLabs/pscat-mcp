@@ -68,6 +68,11 @@ pub struct SubprocessBackend {
     /// Passed to the worker as `--tag <tag>` when set. The worker ignores
     /// it; it lets tests find their worker processes (`pgrep -f <tag>`).
     pub tag: Option<String>,
+    /// Handed to the worker as `PSCAT_HOME`, its only environment variable
+    /// besides `PSCAT_NO_CHECKOUT`, so PSCat finds font packs in
+    /// `<dir>/fonts/packs/`. `None`: the worker's environment is the one
+    /// variable it always had, and only the compiled-in fonts exist.
+    pub font_pack_dir: Option<PathBuf>,
 }
 
 impl SubprocessBackend {
@@ -77,7 +82,19 @@ impl SubprocessBackend {
             exe,
             limits,
             tag: None,
+            font_pack_dir: None,
         }
+    }
+
+    /// The same backend, giving every worker `dir` as PSCat's data root
+    /// (`PSCAT_HOME`) so it finds the font packs under `dir/fonts/packs/`.
+    /// The caller checks that `dir` is an absolute path to a directory
+    /// ([`crate::config::WorkerConfig::font_pack_dir`]). The worker's read
+    /// roots do not change: font lookup is not a program-chosen path, and
+    /// programs still cannot read `dir`.
+    pub fn with_font_pack_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.font_pack_dir = Some(dir.into());
+        self
     }
 
     /// The same backend, passing `--tag <tag>` to every worker.
@@ -105,9 +122,13 @@ impl SubprocessBackend {
         if let Some(tag) = &self.tag {
             cmd.arg("--tag").arg(tag);
         }
-        cmd.env_clear()
-            .env("PSCAT_NO_CHECKOUT", "1")
-            .current_dir("/")
+        // The worker's whole environment: nothing is inherited, so not the
+        // server's HOME, XDG_*, PSCAT_HOME or PSCAT_LIB either.
+        cmd.env_clear().env("PSCAT_NO_CHECKOUT", "1");
+        if let Some(dir) = &self.font_pack_dir {
+            cmd.env("PSCAT_HOME", dir);
+        }
+        cmd.current_dir("/")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -462,5 +483,44 @@ mod sys {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envs(b: &SubprocessBackend) -> Vec<(String, Option<String>)> {
+        let cmd = b.command(Duration::from_secs(1));
+        let mut v: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Unset, the worker is started exactly as before: one variable.
+    #[test]
+    fn the_worker_gets_pscat_home_only_when_a_pack_dir_is_configured() {
+        let plain = SubprocessBackend::new(PathBuf::from("/x"), LimitsConfig::default());
+        assert_eq!(
+            envs(&plain),
+            [("PSCAT_NO_CHECKOUT".to_string(), Some("1".to_string()))]
+        );
+        let with = plain.with_font_pack_dir("/packs");
+        assert_eq!(
+            envs(&with),
+            [
+                ("PSCAT_HOME".to_string(), Some("/packs".to_string())),
+                ("PSCAT_NO_CHECKOUT".to_string(), Some("1".to_string()))
+            ]
+        );
     }
 }

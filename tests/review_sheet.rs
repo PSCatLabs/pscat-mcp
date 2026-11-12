@@ -727,6 +727,7 @@ async fn refused_sheets_execute_nothing() {
         limits,
         &WorkerConfig {
             worker_exe: Some(env!("CARGO_BIN_EXE_pscat-mcp-server").into()),
+            ..WorkerConfig::default()
         },
     )
     .expect("service");

@@ -559,6 +559,9 @@ pub struct RenderService {
     /// The art catalog, fetched from a worker on first use. A failed fetch
     /// leaves it empty, so the next call tries again.
     catalog: tokio::sync::OnceCell<Arc<ArtCatalog>>,
+    /// Whether the operator configured a font-pack directory for the worker
+    /// ([`RenderService::with_font_packs_configured`]). Only reported.
+    font_packs_configured: bool,
     /// Async jobs (off unless [`RenderService::with_jobs`] turned them on).
     jobs: JobStore,
     /// Counters for health and tests.
@@ -575,8 +578,22 @@ impl RenderService {
             limits,
             slots,
             catalog: tokio::sync::OnceCell::new(),
+            font_packs_configured: false,
             counters: Arc::new(Counters::default()),
         }
+    }
+
+    /// The same service, told whether its backend gives workers a
+    /// font-pack directory. It changes nothing about how jobs run; it makes
+    /// `get_renderer_info` report the packs the workers can see.
+    pub fn with_font_packs_configured(mut self, configured: bool) -> Self {
+        self.font_packs_configured = configured;
+        self
+    }
+
+    /// Whether the operator configured a font-pack directory.
+    pub fn font_packs_configured(&self) -> bool {
+        self.font_packs_configured
     }
 
     /// The same service serving async jobs with `jobs` (on only when
