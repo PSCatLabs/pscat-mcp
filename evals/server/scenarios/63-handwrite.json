@@ -243,6 +243,29 @@
       }
     },
     {
+      "label": "a fractional jitter",
+      "tool": "handwrite",
+      "args": {
+        "text": "hi",
+        "jitter": 16.5
+      },
+      "result": {
+        "is_error": true,
+        "error_code": "invalid_request",
+        "forbid_content_types": [
+          "image",
+          "resource"
+        ],
+        "structured": {
+          "ok": false,
+          "error.message": {
+            "contains": "jitter must be a whole number"
+          }
+        },
+        "renders_executed": 0
+      }
+    },
+    {
       "label": "a width past the page limit",
       "tool": "handwrite",
       "args": {

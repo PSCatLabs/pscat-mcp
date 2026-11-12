@@ -138,6 +138,7 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
             "dpi", "ink", "jitter", "paper", "seed", "size", "text", "width"
         ]
     );
+    assert_eq!(props["jitter"]["type"], "integer", "{props:?}");
     assert_eq!(t.input_schema["required"], json!(["text"]));
     assert_eq!(props["paper"]["enum"], json!(["plain", "ruled"]));
     let d = t.description.as_deref().unwrap();
@@ -369,6 +370,11 @@ async fn argument_errors_use_the_envelope() {
             json!({"text": "hi", "jitter": -1}),
             "invalid_request",
             "jitter must be",
+        ),
+        (
+            json!({"text": "hi", "jitter": 16.5}),
+            "invalid_request",
+            "jitter must be a whole number",
         ),
         (
             json!({"text": "hi", "seed": 5_000_000_000_i64}),

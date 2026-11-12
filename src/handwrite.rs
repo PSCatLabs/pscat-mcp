@@ -63,7 +63,7 @@ pub struct HandwriteParams {
     /// Ink colour as `R,G,B` in 0..1. Default `0.13,0.14,0.34`.
     #[serde(default)]
     pub ink: Option<String>,
-    /// Ink wobble in glyph units, 0 calm. Default 16.
+    /// Ink wobble in glyph units, 0 calm; a whole number. Default 16.
     #[serde(default)]
     pub jitter: Option<f64>,
     /// Random seed. Default 1985.
@@ -167,6 +167,11 @@ impl HandwriteParams {
         }
         let size = ranged("size", self.size, 36.0, 0.0, 2000.0)?;
         let jitter = ranged("jitter", self.jitter, 16.0, 0.0, 10_000.0)?;
+        if jitter.fract() != 0.0 {
+            return Err(format!(
+                "jitter must be a whole number from 0 to 10000, got {jitter}"
+            ));
+        }
         let paper = match self.paper.as_deref() {
             None | Some("plain") => "plain",
             Some("ruled") => "ruled",
@@ -399,6 +404,8 @@ mod tests {
         assert!(err(with(&|p| p.size = Some(2001.0))).contains("size must be"));
         assert!(err(with(&|p| p.size = Some(-1.0))).contains("size must be"));
         assert!(err(with(&|p| p.jitter = Some(1e9))).contains("jitter must be"));
+        assert!(err(with(&|p| p.jitter = Some(16.5))).contains("whole number"));
+        assert!(with(&|p| p.jitter = Some(16.0)).resolve().is_ok());
         assert!(err(with(&|p| p.seed = Some(1 << 40))).contains("seed must be"));
         assert!(err(with(&|p| p.paper = Some("lined".into()))).contains("plain or ruled"));
         for bad in [
