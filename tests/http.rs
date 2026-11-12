@@ -46,6 +46,7 @@ fn real_service(limits: LimitsConfig) -> Arc<RenderService> {
         limits,
         &WorkerConfig {
             worker_exe: Some(worker_exe()),
+            ..WorkerConfig::default()
         },
     )
     .expect("service")

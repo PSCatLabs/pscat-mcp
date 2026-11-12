@@ -289,6 +289,46 @@ mentions, and its model can read resources itself; Codex's model can read
 resources but Codex has no prompts; Claude.ai lets the user attach both;
 ChatGPT appears to use neither.
 
+## Font packs
+
+PSCat ships a few dozen faces inside its binary. The rest are downloadable
+packs: `extras` (display and monospaced faces) and `cjk-thai` (Korean,
+Japanese and Thai, about 70 MB). The worker runs with an empty environment,
+so it does not see packs installed for the user. To give it some, install
+them into a directory of your own and point the server at it:
+
+```bash
+PSCAT_HOME=/srv/pscat-data pscat fonts install --pack cjk-thai   # the PSCat CLI
+PSCAT_MCP_FONT_PACK_DIR=/srv/pscat-data pscat-mcp-server serve-http ...
+```
+
+The directory is a PSCat data root: packs are in `DIR/fonts/packs/<pack>/`
+(not `DIR` itself, and not `.../fonts/packs`). The server passes it to each
+worker as `PSCAT_HOME`, which PSCat documents as the first place it looks,
+and sets nothing else: the server's own `HOME`, `XDG_*`, `PSCAT_HOME` and
+`PSCAT_ROOT` are never passed on.
+
+* **Opt-in.** Unset, the worker is started exactly as before.
+* **Startup check.** The server refuses to start if the path is missing or
+  is not a directory, and warns if it has no `fonts/` directory.
+* **Read-only, and not readable by programs.** The directory is not added to
+  the programs' read roots, which stay empty: `(path) (r) file`, `run` and
+  `filenameforall` still cannot reach it, with `..` or a symlink or without.
+  PSCat's font lookup reads the pack itself, as it does for the compiled-in
+  fonts. Nothing in the worker writes to it (no write roots, `RLIMIT_FSIZE=0`);
+  mount it read-only as well. Its contents are trusted operator content, as
+  the binary is: a `fonts/catalog/` directory in it is an override that wins
+  over packs, and a font file in it (or a symlink to one) is parsed by PSCat.
+* **Reporting.** `describe_art_capabilities` lists the installed packs and
+  their faces, and `get_renderer_info` has a `font_packs.installed` list of
+  pack names when the setting is on. The directory's path is never reported.
+* **Memory.** A face is read whole into the worker's heap when a program
+  first selects it (Noto Sans JP is 9.5 MB), which counts toward
+  `PSCAT_MCP_MAX_MEMORY_BYTES`.
+
+In the container, mount the directory read-only and set the variable; see
+[docs/CLOUD_RUN.md](docs/CLOUD_RUN.md#font-packs).
+
 ## Build
 
 Requires Rust 1.89+ (developed with 1.96) and network access to GitHub for
@@ -429,6 +469,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_SHEET_CELL_PIXELS` | `PSCAT_MCP_MAX_PIXELS` | device pixels the cells of one `review_sheet` render, all together, before zoom |
 | `PSCAT_MCP_MAX_SHEET_PIXELS` | `PSCAT_MCP_MAX_PIXELS`, at most 64000000 | device pixels of a composed `review_sheet` (and 8000 a side, so at most 64000000); the sheet's canvas, 4 bytes a pixel, is held outside the cells' memory limits (see `docs/CLOUD_RUN.md`) |
 | `PSCAT_MCP_MAX_SHEET_TIMEOUT_MS` | `PSCAT_MCP_RENDER_TIMEOUT_MS` | wall-clock deadline of one whole `review_sheet`; its worker is SIGKILLed after it |
+| `PSCAT_MCP_FONT_PACK_DIR` | unset | `--font-pack-dir`: a PSCat data root holding font packs (`DIR/fonts/packs/<pack>/`, what `PSCAT_HOME=DIR pscat fonts install` writes). The workers get it as `PSCAT_HOME` and nothing else of the environment; unset, only the compiled-in fonts exist. The server refuses to start if the path is missing or not a directory. Read-only: programs still cannot read or write there. See [Font packs](#font-packs) |
 | `PSCAT_MCP_RENDER_TIMEOUT_MS` | 20000 | wall-clock deadline; worker is SIGKILLed after it |
 | `PSCAT_MCP_MAX_STEPS` | 5000000000 | PSCat step limit |
 | `PSCAT_MCP_MAX_MEMORY_BYTES` | 536870912 | PSCat heap-growth limit per render |
@@ -482,8 +523,8 @@ untrusted code. Each render or validation:
    dumps, and on Linux an address-space cap;
 3. runs under **PSCat's own limits**: steps, time and heap growth (exact per
    process via PSCat's counting allocator), plus a pixel cap on
-   `setpagedevice`; file reads are confined to PSCat's built-in `lib/`, and
-   there are no write roots;
+   `setpagedevice`; file reads are confined to PSCat's built-in `lib/` (also
+   with a font-pack directory configured), and there are no write roots;
 4. is **SIGKILLed** at the wall-clock deadline, or when the client cancels
    or disconnects, even if it is stuck inside a single long operator;
 5. has its output size, page count and stdout capped.
@@ -525,10 +566,15 @@ control is enforced by PSCat and which by the server.
 * **Survival after a server kill.** If the server is SIGKILLed itself, a
   running worker lives until its CPU or time limit, a few seconds.
 * **Fonts.** The fonts compiled into PSCat are available (base-35
-  equivalents, Liberation, TeX Gyre). Downloadable font packs are not
-  supported or tested. `describe_art_capabilities` reports the faces PSCat's
-  font scan finds in the worker's environment (an empty one, so `PSCAT_HOME`
-  is not used), which with a standard install are the compiled-in ones.
+  equivalents, Liberation, TeX Gyre). The downloadable font packs (`extras`,
+  `cjk-thai`) are available only if the operator sets
+  `PSCAT_MCP_FONT_PACK_DIR` (see [Font packs](#font-packs)); the worker's
+  environment is otherwise empty, so it does not find a pack installed for
+  the user. Without the setting a program that selects a pack face gets
+  PSCat's stand-in (Helvetica, or Courier for the monospaced faces), and
+  `review_sheet` labels in Korean, Japanese, Chinese or Thai are drawn as
+  `?`. `describe_art_capabilities` and, with the setting, `get_renderer_info`
+  report the packs the workers can see.
 * **Chalkboard vector output is large.** A board's SVG and PDF keep every
   chalk grain as a vector mark: the default board is about 0.3 MB as PNG,
   2.6 MB as PDF and 7 to 10 MB as SVG. A board's SVG is always over the
@@ -560,8 +606,8 @@ control is enforced by PSCat and which by the server.
   a sheet near the pixel or side limit whose labels are wider than its cells
   can be refused where the plugin would draw it; `labels: false` avoids that.
   Labels in Korean, Japanese, Chinese or Thai need PSCat's `cjk-thai` font
-  pack, which the worker's empty environment does not find with a standard
-  install: they are drawn as `?`. A label is text only, never PostScript.
+  pack: without `PSCAT_MCP_FONT_PACK_DIR` pointing at a directory that holds
+  it, they are drawn as `?`. A label is text only, never PostScript.
 * **Async jobs are in memory.** They live in the server process: lost on
   a restart, killed at shutdown, and on HTTP usable only on a single
   always-on instance (off by default there). `render_status` has no
@@ -631,6 +677,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
 | `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, a client over its share of the budget refused with the limit named in `error.input` while the budget has room (`get_renderer_info` reports the share), argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, two bearer tokens over HTTP with a small budget (one fills its share and is refused with `results_per_principal_bytes` while the other still starts, neither sees the other's jobs, and cancelling frees the share at once), a cancelled job never holding a principal at its share (unit tests of the store), another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client's slow render becomes a task past `PSCAT_MCP_TASK_AFTER_MS` with the same worker (one worker, one execution, past the sync deadline) and `tasks/get` completes it, its quick calls (render, `handwrite`, a failed render) return the result directly with the job caps, running-job permit and budget all full and untouched, `tasks/cancel` of a promoted task and `notifications/cancelled` before the threshold both kill the worker, a slow call that cannot become a task stops at the sync deadline with `timeout`, a threshold of 0 makes every eligible call a task at once (`handwrite`, a failed render), a plain client or one on a server without `--tasks` gets the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only, and a Tasks-capable rmcp client over HTTP that drops a call before the threshold kills its worker and makes no job; a `start_render` job whose SVG is over `PSCAT_MCP_MAX_SVG_BYTES` (set through the environment, over stdio) ends `done` and `render_result` returns it as a blob resource holding the whole SVG, and `render_result` returns SVG as text or as a blob by the limit, like `render_postscript` |
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the PSCat checkout cargo resolves, and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
+| `tests/font_pack.rs` | the font-pack directory with a 13 KB `cjk-thai` stand-in (`tests/data/font-pack`): the worker finds the pack face and, unset, does not; the catalog lists the pack and no path (also in `get_renderer_info`); programs cannot read the directory (absolute, relative, `..`, symlink out, `filenameforall`, a planted `lib/`), nor write there; the worker's environment is `PSCAT_HOME` only (a fake worker), and the server's `HOME`, `XDG_DATA_HOME`, `PSCAT_HOME` and `PSCAT_ROOT` are not inherited; a Japanese `review_sheet` label differs from `???` with the pack and is identical without it; a missing path or a file refuses to start |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |

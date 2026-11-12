@@ -1,0 +1,7 @@
+{
+  "pack": "cjk-thai",
+  "tag": "fonts-test",
+  "pack_sha256": "bc0b0a91fbc253c994ee5594b735d6c95bf70fc9a1b089d8b635a9ecb7b03876",
+  "index_sha256": null,
+  "source": "tests/data/font-pack: a subset of Noto Sans JP Regular (OFL-1.1), made with pyftsubset, not a real pack"
+}

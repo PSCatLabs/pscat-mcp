@@ -59,8 +59,20 @@ pub fn build_service_with_jobs(
     limits.check().map_err(anyhow::Error::msg)?;
     jobs.check(&limits).map_err(anyhow::Error::msg)?;
     let exe = worker.exe()?;
-    let backend = Arc::new(backend::SubprocessBackend::new(exe, limits.clone()));
+    let font_pack_dir = worker.font_pack_dir().map_err(anyhow::Error::msg)?;
+    let mut backend = backend::SubprocessBackend::new(exe, limits.clone());
+    if let Some(dir) = &font_pack_dir {
+        if !dir.join("fonts").is_dir() {
+            tracing::warn!(
+                "the font-pack directory has no fonts/ directory; PSCat reads packs from \
+                 <dir>/fonts/packs/<pack>/, so it will find none"
+            );
+        }
+        backend = backend.with_font_pack_dir(dir);
+    }
     Ok(Arc::new(
-        render::RenderService::new(backend, limits).with_jobs(jobs),
+        render::RenderService::new(Arc::new(backend), limits)
+            .with_font_packs_configured(font_pack_dir.is_some())
+            .with_jobs(jobs),
     ))
 }
