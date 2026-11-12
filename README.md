@@ -228,6 +228,14 @@ Which clients send the Tasks capability (November 2026):
 So the Tasks path is off by default and the explicit tools are the way in
 for the clients in use today.
 
+Over Streamable HTTP, a client gets MCP Tasks only if it connects with the
+2026-07-28 discover lifecycle. A client that starts with the legacy
+`initialize` handshake, such as rmcp's default `serve`, gets plain
+synchronous results even with `--tasks` on, because its Tasks capability
+never reaches this stateless server. For rmcp, connect with
+`serve_with_lifecycle(.., ClientLifecycleMode::Discover { preferred_versions: [V_2026_07_28] })`.
+`tests/jobs.rs::over_http_an_rmcp_tasks_client_gets_a_task` pins this.
+
 ## Prompts and resources
 
 PSCat's own plugin teaches an agent to write good PSCat PostScript with four
