@@ -223,6 +223,11 @@ review sheet, and start from a guide prompt. Beyond those and the prompt above:
   Also interrupt the agent mid-render (Esc) and note whether the render
   stops: over stdio the client should send `notifications/cancelled`; over
   HTTP the server's log shows whether the request ended early.
+* **Tasks over HTTP.** With `--tasks` on, a slow render becomes a task only
+  for a client on the 2026-07-28 discover lifecycle. A client on the legacy
+  `initialize` handshake, such as rmcp's default `serve`, gets the plain
+  synchronous result, so that alone does not mean Tasks are broken.
+  `tests/jobs.rs::over_http_an_rmcp_tasks_client_gets_a_task` pins this.
 * **Renderer info.** Ask which PSCat version is running.
 * **Guides.** In Claude Code, type `/` and look for the `diagram`,
   `generative_art` and `chart` prompts (see below), or `@pscat-render:` for
