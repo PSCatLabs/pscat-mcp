@@ -152,6 +152,7 @@ times.
 * Don't delete Docker images, and don't change repository or
   organisation settings.
 * Don't remove your worktree; the coordinator does that after merging.
+* Don't set milestones on issues or PRs; the coordinator does that (see `SDLC.md`, "Milestones").
 
 ## Your final report
 
