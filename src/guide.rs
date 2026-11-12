@@ -104,7 +104,10 @@ pub enum PackFaces {
     NotConfigured,
     /// A directory is configured. `installed` names the packs the worker's
     /// catalog lists, or is `None` when the catalog could not be read.
-    Configured { installed: Option<Vec<String>> },
+    Configured {
+        /// The installed pack names, or `None` when they could not be read.
+        installed: Option<Vec<String>>,
+    },
 }
 
 /// Where the vendored files came from (`guide/SOURCE.json`).
