@@ -668,29 +668,34 @@ async fn concurrent_renders_are_isolated_and_bounded() {
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 7);
 }
 
+/// The job holding the only slot never ends by itself (a 60 s deadline, no
+/// step or interpreter limit), so no load can make it finish before the
+/// second request has been refused. The test ends it by dropping the
+/// connection, as `client_disconnect_kills_the_worker_and_frees_the_slot`
+/// does.
 #[tokio::test(flavor = "multi_thread")]
 async fn full_queue_returns_server_busy() {
-    let srv = start(real_service(LimitsConfig {
+    let tag = format!("pscat-mcp-busy-{}", uuid::Uuid::new_v4());
+    let limits = LimitsConfig {
         max_concurrent_renders: Some(1),
         queue_timeout_ms: 100,
-        render_timeout_ms: 1500,
+        render_timeout_ms: 60_000,
+        interp_time_limit_ms: Some(0),
+        max_steps: 0,
         ..LimitsConfig::default()
-    }))
-    .await;
+    };
+    let backend = SubprocessBackend::new(worker_exe(), limits.clone()).with_tag(tag.clone());
+    let srv = start(Arc::new(RenderService::new(Arc::new(backend), limits))).await;
 
     let url = srv.mcp();
     let slow = tokio::spawn(async move {
         post(&url, Some(TOKEN), None, &render_call(1, "{ } loop", 20, 20)).await
     });
-    // Wait until the slow job holds the only slot.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while srv.service.counters.executed.load(Ordering::SeqCst) == 0 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "slow job never started"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    // Wait until the slow job holds the only slot: its worker is running.
+    wait_for("worker started", Duration::from_secs(30), || {
+        !processes_with(&tag).is_empty()
+    })
+    .await;
 
     let (status, _, resp) = post(
         &srv.mcp(),
@@ -702,15 +707,22 @@ async fn full_queue_returns_server_busy() {
     assert_eq!(status, 200, "{resp}");
     assert_eq!(resp["result"]["isError"], true, "{resp}");
     assert_eq!(error_code(&resp["result"]), Some("server_busy"), "{resp}");
-
-    let (status, _, slow) = slow.await.unwrap();
-    assert_eq!(status, 200);
-    let code = error_code(&slow["result"]);
-    assert!(
-        matches!(code, Some("limit_exceeded") | Some("timeout")),
-        "slow job ended with {code:?}: {slow}"
+    assert_eq!(
+        srv.service.counters.executed.load(Ordering::SeqCst),
+        1,
+        "the refused request must not reach the backend"
     );
-    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+
+    // The slow job is still running; end it by closing its connection.
+    assert!(!slow.is_finished(), "the slow job ended on its own");
+    slow.abort();
+    let _ = slow.await;
+    wait_for(
+        "worker killed after disconnect",
+        Duration::from_secs(30),
+        || processes_with(&tag).is_empty(),
+    )
+    .await;
 }
 
 // ------------------------------------------------------ configuration rules

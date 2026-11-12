@@ -38,6 +38,9 @@ const JOB_TIMEOUT_MS: u64 = 15_000;
 /// Waits 2 s of wall time, then fills the page red.
 const SLOW_RED: &str = "realtime /t0 exch def { realtime t0 sub 2000 gt { exit } if } loop \
                         1 0 0 setrgbcolor -10 -10 100 100 rectfill showpage";
+/// How long a finished job's result is kept in the expiry test: the time
+/// the first fetch has, and so (at most) how long the test takes.
+const RESULT_TTL_MS: u64 = 5_000;
 const QUICK_BLUE: &str = "0 0 1 setrgbcolor -10 -10 100 100 rectfill showpage";
 /// Never ends: only a kill stops it (steps and interpreter time are off).
 const FOREVER: &str = "{ } loop";
@@ -387,22 +390,48 @@ async fn a_job_past_its_deadline_is_killed_and_fails_with_timeout() {
     client.cancel().await.ok();
 }
 
+/// The TTL runs from the moment the job finishes, whether or not its result
+/// was fetched (#86 changed which jobs a budget may evict early, not when
+/// they expire). The TTL only has to outlast the first fetch, so it is long
+/// enough for a loaded machine; the test then polls until the job is gone
+/// instead of sleeping past a guess.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expired_result_is_gone() {
     let svc = service(
         limits(),
         JobsConfig {
-            job_result_ttl_ms: 1_500,
+            job_result_ttl_ms: RESULT_TTL_MS,
             ..jobs()
         },
         &tag(),
     );
     let client = connect(svc.clone(), false).await;
     let id = start_job(&client, QUICK_BLUE).await;
-    poll_until_finished(&client, &id).await;
+    let (_, status) = poll_until_finished(&client, &id).await;
+    let left = structured(&status)["expires_in_seconds"]
+        .as_f64()
+        .expect("a finished job reports when it expires");
+    assert!(
+        left > 0.0,
+        "the result expired before it could be fetched; raise RESULT_TTL_MS: {status}"
+    );
     let r = call(&client, "render_result", json!({ "job_id": id })).await;
-    assert_ne!(r["isError"], true, "{r}");
-    tokio::time::sleep(Duration::from_millis(1_800)).await;
+    assert_ne!(
+        r["isError"], true,
+        "fetched after {RESULT_TTL_MS} ms ttl: {r}"
+    );
+
+    // Poll for the expiry; the deadline is far past the TTL.
+    let deadline = Instant::now() + Duration::from_millis(RESULT_TTL_MS) + Duration::from_secs(60);
+    loop {
+        let r = call(&client, "render_status", json!({ "job_id": id })).await;
+        if r["isError"] == true {
+            assert_eq!(error_code(&r), "unknown_job", "{r}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the result never expired: {r}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     for tool in ["render_status", "render_result", "cancel_render"] {
         let r = call(&client, tool, json!({ "job_id": id })).await;
         assert_eq!(r["isError"], true, "{tool}: {r}");

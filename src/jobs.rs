@@ -888,10 +888,14 @@ mod tests {
         assert!(s.status("p", &p).is_ok(), "refused, so nothing was dropped");
     }
 
+    /// The TTL only has to outlast the first `status` call, so it is long
+    /// enough for a loaded machine; the test then polls for the expiry
+    /// under a deadline far past it, with no fixed sleep.
     #[test]
     fn finished_jobs_expire_after_the_ttl() {
+        const TTL_MS: u64 = 3_000;
         let s = store(JobsConfig {
-            job_result_ttl_ms: 50,
+            job_result_ttl_ms: TTL_MS,
             ..JobsConfig::default()
         });
         let (id, _) = s.insert("p", "render_postscript").unwrap();
@@ -900,9 +904,24 @@ mod tests {
             ErrorCode::JobNotFinished
         );
         s.finish(&id, None);
-        assert_eq!(s.status("p", &id).unwrap().state, JobState::Cancelled);
-        std::thread::sleep(Duration::from_millis(80));
-        assert_eq!(s.status("p", &id).unwrap_err().code, ErrorCode::UnknownJob);
+        assert_eq!(
+            s.status("p", &id).unwrap().state,
+            JobState::Cancelled,
+            "the job expired before its first status; raise TTL_MS"
+        );
+        let deadline = Instant::now() + Duration::from_millis(TTL_MS) + Duration::from_secs(60);
+        loop {
+            match s.status("p", &id) {
+                Err(e) => {
+                    assert_eq!(e.code, ErrorCode::UnknownJob);
+                    break;
+                }
+                Ok(_) => {
+                    assert!(Instant::now() < deadline, "the job never expired");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
         assert_eq!(s.charged_bytes(), 0);
     }
 
