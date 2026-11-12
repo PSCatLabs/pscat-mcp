@@ -572,3 +572,136 @@ async fn every_library_the_guides_name_loads_here() {
     }
     client.cancel().await.ok();
 }
+
+// ------------------------------------------------------ font-pack faces
+
+/// The guide files that name font-pack faces (`PACK_FACE_FILES` in
+/// `src/guide.rs`), and the line their note gets without a pack directory.
+const PACK_DOCS: &[&str] = &[
+    "pscat/SKILL.md",
+    "psart/SKILL.md",
+    "psart/references/styles-and-type.md",
+];
+const NOT_AVAILABLE: &str = "Font-pack faces are not available on this server";
+
+/// A copy of the test font pack in a scratch directory, removed on drop.
+struct PackDir(PathBuf);
+
+impl PackDir {
+    fn fixture_copy() -> PackDir {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("guide-pack-{}", uuid::Uuid::new_v4().simple()));
+        copy_tree(&repo().join("tests/data/font-pack"), &dir);
+        // Canonical, as the server resolves it (macOS /var is /private/var).
+        PackDir(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    fn path(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+}
+
+impl Drop for PackDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+async fn read_text(client: &Client, uri: &str) -> String {
+    let read = client
+        .read_resource(ReadResourceRequestParams::new(uri))
+        .await
+        .unwrap_or_else(|e| panic!("read {uri}: {e}"));
+    match &read.contents[0] {
+        ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        other => panic!("{uri} is not text: {other:?}"),
+    }
+}
+
+async fn renderer_info(client: &Client) -> Value {
+    let params = CallToolRequestParams::new("get_renderer_info");
+    let r = tokio::time::timeout(CALL_TIMEOUT, client.call_tool(params))
+        .await
+        .expect("timed out")
+        .expect("get_renderer_info");
+    r.structured_content.expect("structured content")
+}
+
+#[tokio::test]
+async fn pack_face_note_says_packs_are_unavailable_without_a_pack_dir() {
+    let client = start().await;
+    for doc in PACK_DOCS {
+        let text = read_text(&client, &guide::uri(doc)).await;
+        assert!(text.contains(NOT_AVAILABLE), "{doc}");
+        assert!(
+            !text.contains("Font packs installed on this server"),
+            "{doc}"
+        );
+    }
+    // A document that names no pack faces gets no such line.
+    let psviz = read_text(&client, &guide::uri("psviz/SKILL.md")).await;
+    assert!(!psviz.contains(NOT_AVAILABLE));
+    // A prompt carries its document, note included.
+    let got = client
+        .get_prompt(GetPromptRequestParams::new("generative_art"))
+        .await
+        .expect("prompts/get");
+    let text = &got.messages[0].content.as_text().expect("text").text;
+    assert!(text.contains(NOT_AVAILABLE), "generative_art");
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn pack_face_note_lists_the_packs_the_catalog_reports() {
+    let pack = PackDir::fixture_copy();
+    let client = common::start_stdio(
+        env!("CARGO_BIN_EXE_pscat-mcp-server"),
+        &[("PSCAT_MCP_FONT_PACK_DIR", pack.path())],
+    )
+    .await;
+    // The note reads the same list get_renderer_info reports.
+    let info = renderer_info(&client).await;
+    let installed: Vec<&str> = info["font_packs"]["installed"]
+        .as_array()
+        .expect("font_packs.installed")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(installed, ["cjk-thai"], "{info}");
+
+    let line = "Font packs installed on this server: `cjk-thai`.";
+    for doc in PACK_DOCS {
+        let text = read_text(&client, &guide::uri(doc)).await;
+        assert!(text.contains(line), "{doc}");
+        assert!(!text.contains(NOT_AVAILABLE), "{doc}");
+        assert!(!text.contains(pack.path()), "{doc} shows the host path");
+    }
+    let got = client
+        .get_prompt(GetPromptRequestParams::new("generative_art"))
+        .await
+        .expect("prompts/get");
+    let text = &got.messages[0].content.as_text().expect("text").text;
+    assert!(text.contains(line), "generative_art");
+
+    // The size resources/list gives is the length of what a read returns,
+    // with the packs known.
+    let resources = client.list_all_resources().await.expect("resources/list");
+    for r in &resources {
+        let text = read_text(&client, &r.uri).await;
+        assert_eq!(r.size, Some(text.len() as u64), "{}", r.uri);
+    }
+    client.cancel().await.ok();
+}

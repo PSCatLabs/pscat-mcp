@@ -452,8 +452,9 @@ extension queued and running are `working`; done and failed are both
 ## Agent guidance (prompts and resources)
 
 `src/guide.rs` serves the PSCat plugin's skills (issue #39). It runs no
-PostScript and starts no worker: everything it returns is text compiled into
-the binary.
+PostScript. Everything it returns is text compiled into the binary, except
+that the font-pack line (below) reads the installed packs from the art
+catalog, which runs one worker, when a font-pack directory is configured.
 
 **Where the text comes from.** `guide/skills/` is a byte-for-byte copy of
 `plugin/skills/` at the PSCat commit `Cargo.lock` pins, with PSCat's
@@ -525,7 +526,14 @@ unchanged. The note says:
   `bbox` and `out_path` (taken from its input schema);
 * the render deadline;
 * one line for each of a few files (`FILE_NOTES`; a unit test checks that
-  each key is a vendored file).
+  each key is a vendored file);
+* for the files that name font-pack faces (`PACK_FACE_FILES`: `pscat`'s
+  and `psart`'s `SKILL.md` and `psart`'s `styles-and-type.md`), which pack
+  faces are reachable. Without `PSCAT_MCP_FONT_PACK_DIR` the line says none
+  are. With it, the line lists the packs `font_packs.installed` names. The
+  guide is built with the installed packs on the first guide request. A
+  catalog that cannot be read gives a line saying so, which is not kept,
+  so the next request asks again.
 
 Because the lists come from the router and the schema, the render job tools
 (#33) are listed as available where async jobs are on (stdio, or HTTP with
