@@ -620,6 +620,13 @@ pub struct SheetCellReport {
     pub width_px: u32,
     /// The render's height in pixels.
     pub height_px: u32,
+    /// The page's width in points (1/72 inch) as drawn: `width_px * 72 /
+    /// dpi`, rounded to 0.01 (see `width_px` and `dpi`; zoom not counted).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub width_pt: Option<f64>,
+    /// The page's height in points; see `width_pt`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub height_pt: Option<f64>,
     /// Left of the cell's image on the sheet, in pixels.
     pub x: u32,
     /// Top of the cell's image on the sheet, in pixels.
@@ -869,6 +876,7 @@ pub fn compose(p: &SheetParams, cx: &GenerateContext<'_>) -> Result<ComposedShee
             if error.is_some() {
                 report.failed_cells += 1;
             }
+            let (width_pt, height_pt) = crate::worker::points_from_px(cell.dpi, w as u32, h as u32);
             report.cells.push(SheetCellReport {
                 row: r,
                 column: c,
@@ -876,6 +884,8 @@ pub fn compose(p: &SheetParams, cx: &GenerateContext<'_>) -> Result<ComposedShee
                 zoom: cell.zoom,
                 width_px: w as u32,
                 height_px: h as u32,
+                width_pt: Some(width_pt),
+                height_pt: Some(height_pt),
                 x: at.0,
                 y: at.1,
                 ok: error.is_none(),

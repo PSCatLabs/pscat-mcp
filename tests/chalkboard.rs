@@ -199,8 +199,10 @@ async fn reports_the_board_in_points_and_pixels() {
     assert_eq!(a["height_pt"].as_f64(), Some(200.0), "{a}");
     assert_eq!(a["width_px"], 800);
     assert_eq!(a["height_px"], 400);
+    // The default dpi is 144, reported with the sizes.
+    assert_eq!(a["dpi"].as_f64(), Some(144.0), "{a}");
     assert!(
-        text_of(&r).contains("400x200 pt = 800x400 px"),
+        text_of(&r).contains("400x200 pt at 144 dpi = 800x400 px"),
         "{}",
         text_of(&r)
     );
