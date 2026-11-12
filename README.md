@@ -329,6 +329,45 @@ and sets nothing else: the server's own `HOME`, `XDG_*`, `PSCAT_HOME` and
 In the container, mount the directory read-only and set the variable; see
 [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md#font-packs).
 
+### Where the worker looks for font files
+
+Font files come from these places and no others. The worker's environment is
+empty, its working directory is `/`, and it finds nothing through the
+server's own `HOME`, `XDG_*`, `APPDATA`, `PSCAT_HOME` or `PSCAT_ROOT`.
+
+Font overrides (`fonts/catalog/<family>/<stem>.ttf`), searched first, in
+this order:
+
+1. `$PSCAT_HOME/fonts/catalog/`, only when `PSCAT_MCP_FONT_PACK_DIR` is set;
+2. `<directory of the server binary>/fonts/catalog/`. In the container that
+   is `/usr/local/bin/fonts/catalog`; in a development build,
+   `target/release/fonts/catalog` or `target/debug/fonts/catalog`;
+3. `/fonts/catalog/`, because the worker's working directory is `/`.
+
+Installed packs (`<root>/fonts/packs/<pack>/`), searched after the overrides:
+
+4. `$PSCAT_HOME/fonts/packs/`, only when the setting is on;
+5. `<directory of the server binary>/fonts/packs/`.
+
+Nothing else is searched:
+
+* **No per-user data directory.** PSCat's per-user data directory comes from
+  `HOME`, `XDG_DATA_HOME` or `APPDATA`, which are all unset in the worker, so
+  that step finds nothing.
+* **No checkout.** The server sets `PSCAT_NO_CHECKOUT=1`, which turns off
+  PSCat's debug-build checkout heuristics.
+* **Operator-controlled.** Every location above is set by the operator: the
+  install path of the binary, the fixed working directory, and the font-pack
+  setting. A client cannot choose one, and a program cannot read the
+  directories: programs' read roots stay empty, as in
+  [The font-pack directory](docs/ARCHITECTURE.md#the-font-pack-directory).
+
+To add a face beside the binary, copy the font into a `fonts/catalog/<family>/`
+directory next to it. Each render starts a new worker, so the next render
+finds it. `describe_art_capabilities` keeps its catalog for the life of the
+server, so restart the server to see the face listed there; the override is
+reported under `font_packs.overrides`, without its path.
+
 ## Build
 
 Requires Rust 1.89+ (developed with 1.96) and network access to GitHub for
@@ -677,7 +716,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/review_sheet.rs` | `review_sheet` over stdio: the schema matches the plugin's arguments (no `$ref`, the cell cap in it), a 2×2 sheet of real programs with each cell at its true size, colour, hairline and position checked by pixel probes, each cell byte for byte the `render_postscript` page of its program (72, 144 and 100 dpi), nearest-neighbour zoom, labels and captions turned off (exact sheet sizes), a failing cell drawn as far as it got with its error while the others render, a runaway cell stopped at its own step limit and at its share of the sheet's time while the rest render, the output limit, every budget refused before execution (and nothing executed, by the service's counters), argument errors through the envelope, a reply under 24 KB with 32 failed cells, the worker's own sheet deadline as a `timeout` envelope valid against the output schema (and counted), a sheet at the pixel limit (16,000,000 and 64,000,000) with one cell zoomed 16x, a cell's memory limit giving the same result alone and beside a 62 MB sheet, and odd programs and labels never crashing the server |
 | `tests/jobs.rs` | async jobs with the real worker and short deadlines: a job past the sync deadline completes and its PNG is fetched (twice), states seen in order (`queued` behind a running job, `running`, `done`), a failed job keeps its PostScript error, `cancel_render` and `tasks/cancel` kill the worker (by `pgrep` and the counters) and a queued job never starts, the job deadline kills and reports `timeout`, an expired result is `unknown_job`, the per-client and total caps and the results budget with their codes, a client over its share of the budget refused with the limit named in `error.input` while the budget has room (`get_renderer_info` reports the share), argument errors through the envelope, shutdown kills running jobs, the job tools listed only with jobs on (also over HTTP), and the guide note naming them as missing exactly when they are not listed, two bearer tokens over HTTP with a small budget (one fills its share and is refused with `results_per_principal_bytes` while the other still starts, neither sees the other's jobs, and cancelling frees the share at once), a cancelled job never holding a principal at its share (unit tests of the store), another bearer token sees `unknown_job` with the same message as an unknown id, and the Tasks extension: a Tasks-capable rmcp client's slow render becomes a task past `PSCAT_MCP_TASK_AFTER_MS` with the same worker (one worker, one execution, past the sync deadline) and `tasks/get` completes it, its quick calls (render, `handwrite`, a failed render) return the result directly with the job caps, running-job permit and budget all full and untouched, `tasks/cancel` of a promoted task and `notifications/cancelled` before the threshold both kill the worker, a slow call that cannot become a task stops at the sync deadline with `timeout`, a threshold of 0 makes every eligible call a task at once (`handwrite`, a failed render), a plain client or one on a server without `--tasks` gets the sync result, and over HTTP a later `tasks/get` (a new handler) finds the task for its token only, and a Tasks-capable rmcp client over HTTP that drops a call before the threshold kills its worker and makes no job; a `start_render` job whose SVG is over `PSCAT_MCP_MAX_SVG_BYTES` (set through the environment, over stdio) ends `done` and `render_result` returns it as a blob resource holding the whole SVG, and `render_result` returns SVG as text or as a blob by the limit, like `render_postscript` |
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the PSCat checkout cargo resolves, and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
-| `tests/font_pack.rs` | the font-pack directory with a 13 KB `cjk-thai` stand-in (`tests/data/font-pack`): the worker finds the pack face and, unset, does not; the catalog lists the pack and no path (also in `get_renderer_info`); programs cannot read the directory (absolute, relative, `..`, symlink out, `filenameforall`, a planted `lib/`), nor write there; the worker's environment is `PSCAT_HOME` only (a fake worker), and the server's `HOME`, `XDG_DATA_HOME`, `PSCAT_HOME` and `PSCAT_ROOT` are not inherited; a Japanese `review_sheet` label differs from `???` with the pack and is identical without it; a missing path or a file refuses to start |
+| `tests/font_pack.rs` | the font-pack directory with a 13 KB `cjk-thai` stand-in (`tests/data/font-pack`): the worker finds the pack face and, unset, does not; a `fonts/catalog/` beside a copy of the server binary (the executable-directory case) is found with the setting unset, and the same copy without it is not; the catalog lists the pack and no path (also in `get_renderer_info`); programs cannot read the directory (absolute, relative, `..`, symlink out, `filenameforall`, a planted `lib/`), nor write there; the worker's environment is `PSCAT_HOME` only (a fake worker), and the server's `HOME`, `XDG_DATA_HOME`, `PSCAT_HOME` and `PSCAT_ROOT` are not inherited; a Japanese `review_sheet` label differs from `???` with the pack and is identical without it; a missing path or a file refuses to start |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |

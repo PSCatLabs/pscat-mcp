@@ -623,6 +623,16 @@ What it does and does not loosen:
   `PSCAT_ROOT` and `PSCAT_LIB` never reach the worker, so PSCat's per-user
   data directory is not searched. Untrusted input is still processed only in
   the worker.
+* **Other font roots, all operator-controlled.** Besides `PSCAT_HOME`, the
+  worker loads font overrides from `<binary dir>/fonts/catalog/` and
+  `/fonts/catalog/` (its working directory is `/`), and packs from
+  `<binary dir>/fonts/packs/`. The per-user data directory is empty (the
+  worker has no `HOME`, `XDG_*` or `APPDATA`), and `PSCAT_NO_CHECKOUT=1` turns
+  off the checkout heuristics. These are trusted like `PSCAT_HOME`: the
+  operator chooses them, a client cannot, and programs' read roots stay
+  empty. The full order is in the README's "Where the worker looks for font
+  files". `tests/font_pack.rs` pins the binary-directory case, and the
+  `/fonts/catalog/` case is documented only.
 * **Reporting.** The catalog the worker returns lists the packs it found;
   `pscat_extras` strips the paths. `get_renderer_info` reads the pack names
   from that cached catalog (a `font_packs` field, present only when the
