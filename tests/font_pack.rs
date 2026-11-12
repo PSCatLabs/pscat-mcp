@@ -555,6 +555,79 @@ async fn a_japanese_label_renders_with_the_pack() {
     without.cancel().await.ok();
 }
 
+/// The server copy at `exe`, over stdio, with no font-pack setting.
+async fn start_copy(exe: &Path) -> Client {
+    common::start_stdio(exe, &[]).await
+}
+
+/// A copy of the server binary in `dir`. The worker is the same file, so
+/// its executable directory is `dir`.
+fn copy_server(dir: &Path) -> PathBuf {
+    let exe = dir.join("pscat-mcp-server");
+    std::fs::copy(SERVER, &exe).unwrap();
+    exe
+}
+
+/// The Noto Sans JP face of the test pack, laid out as a catalog override:
+/// `<root>/fonts/catalog/<family>/<stem>.ttf` (no `install.json`).
+fn install_catalog_face(root: &Path) {
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/font-pack/fonts/packs/cjk-thai/NotoSansJP"),
+        &root.join("fonts/catalog/NotoSansJP"),
+    );
+}
+
+/// The `font_packs` overrides and installed packs a server reports.
+async fn font_pack_status(client: &Client) -> (Vec<Value>, Vec<Value>) {
+    let caps = call_tool(client, "describe_art_capabilities", json!({})).await;
+    assert_eq!(caps.is_error, Some(false), "{}", text_of(&caps));
+    let fp = &structured(&caps)["font_packs"];
+    (
+        fp["overrides"].as_array().expect("overrides").clone(),
+        fp["installed"].as_array().expect("installed").clone(),
+    )
+}
+
+/// The worker finds `fonts/catalog/` beside the server binary, with the
+/// font-pack setting unset and the worker's cwd at `/`: a Japanese label
+/// is drawn with that face, and the same binary without the directory
+/// draws it as `?` marks, as before. The catalog is reported as an
+/// override, and its path is not.
+#[tokio::test]
+async fn a_catalog_beside_the_server_binary_is_picked_up() {
+    let with = Scratch::new("exe-dir-with");
+    let without = Scratch::new("exe-dir-without");
+    let with_exe = copy_server(with.path());
+    let without_exe = copy_server(without.path());
+    install_catalog_face(with.path());
+
+    let found = start_copy(&with_exe).await;
+    let bare = start_copy(&without_exe).await;
+    let (ja_found, q_found) = (sheet(&found, "日本語").await, sheet(&found, "???").await);
+    let (ja_bare, q_bare) = (sheet(&bare, "日本語").await, sheet(&bare, "???").await);
+    assert_ne!(
+        ja_found, q_found,
+        "the catalog face beside the binary was not used"
+    );
+    assert_eq!(ja_bare, q_bare, "Japanese was drawn without a catalog face");
+    assert_ne!(ja_found, ja_bare);
+
+    let (overrides, installed) = font_pack_status(&found).await;
+    assert_eq!(overrides.len(), 1, "{overrides:?}");
+    assert!(installed.is_empty(), "{installed:?}");
+    let caps = call_tool(&found, "describe_art_capabilities", json!({})).await;
+    let reply = format!("{}\n{}", structured(&caps), text_of(&caps));
+    assert!(
+        !reply.contains(&with.unique()),
+        "the host path is in the catalog"
+    );
+    let (overrides, installed) = font_pack_status(&bare).await;
+    assert!(overrides.is_empty() && installed.is_empty());
+    found.cancel().await.ok();
+    bare.cancel().await.ok();
+}
+
 // ---------------------------------------------------------------------
 // Startup.
 // ---------------------------------------------------------------------
