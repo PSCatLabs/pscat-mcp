@@ -22,9 +22,9 @@ use pscat_mcp::render::RenderService;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams,
     ClientCapabilities, ClientConfig, ClientRequest, GetTaskParams, Implementation,
-    ResourceContents, TaskPayload, TaskStatus,
+    ProtocolVersion, ResourceContents, TaskPayload, TaskStatus,
 };
-use rmcp::service::{PeerRequestOptions, RunningService};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, PeerRequestOptions, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{RoleClient, ServiceExt};
@@ -481,11 +481,18 @@ async fn job_caps_and_the_results_budget_are_enforced() {
     )
     .await;
     assert_eq!(error_code(&r), "results_budget_exceeded", "{r}");
-    // Cancelled, it keeps only its bookkeeping.
+    // Cancelled, it keeps only its bookkeeping, which room is made from:
+    // the next job starts, and the third drops the cancelled one.
     call(&client, "cancel_render", json!({ "job_id": running })).await;
     let done = start_job(&client, QUICK_BLUE).await;
     poll_until_finished(&client, &done).await;
-    // A finished result that was never fetched is kept.
+    let r = call(&client, "render_status", json!({ "job_id": running })).await;
+    assert_eq!(state(&r), "cancelled", "kept until room is needed: {r}");
+    let third = start_job(&client, QUICK_BLUE).await;
+    poll_until_finished(&client, &third).await;
+    let r = call(&client, "render_status", json!({ "job_id": running })).await;
+    assert_eq!(error_code(&r), "unknown_job", "{r}");
+    // Finished results that were never fetched are kept.
     let r = call(
         &client,
         "start_render",
@@ -1371,6 +1378,97 @@ async fn over_http_another_token_cannot_see_the_job() {
     b.cancel().await.ok();
 }
 
+/// Two bearer tokens over HTTP, a small results budget and a share of it
+/// that holds one reservation: A fills its share and is refused with the
+/// limit named, while B can still start; neither sees the other's jobs; and
+/// cancelling frees A's share at once (a cancelled job's bookkeeping does
+/// not hold it).
+#[tokio::test(flavor = "multi_thread")]
+async fn over_http_one_token_filling_its_share_leaves_the_other_able_to_start() {
+    let small = LimitsConfig {
+        max_output_bytes: 30_000,
+        ..unlimited()
+    };
+    let largest = JobsConfig::max_result_bytes(&small);
+    let tag = tag();
+    let svc = service(
+        small,
+        JobsConfig {
+            // Room for three reservations; each token may hold one.
+            job_results_budget_bytes: 3 * largest,
+            job_results_per_principal_bytes: Some(largest),
+            ..jobs()
+        },
+        &tag,
+    );
+    let srv = serve_http(svc.clone()).await;
+    let a = http_client(&srv, TOKEN_A).await;
+    let b = http_client(&srv, TOKEN_B).await;
+    let start = json!({ "source": FOREVER, "width": 20, "height": 10 });
+
+    let r = http_call(&a, "start_render", start.clone()).await;
+    assert_eq!(structured(&r)["ok"], true, "{r}");
+    let a1 = structured(&r)["job_id"].as_str().unwrap().to_string();
+
+    // A is at its share; the budget has room.
+    let r = http_call(&a, "start_render", start.clone()).await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert_eq!(error_code(&r), "results_budget_exceeded", "{r}");
+    let input = &structured(&r)["error"]["input"];
+    assert_eq!(input["code"], "results_per_principal_bytes", "{r}");
+    assert_eq!(input["limit_bytes"], largest, "{r}");
+    assert_eq!(input["reached_bytes"], 2 * largest, "{r}");
+    assert_eq!(svc.jobs().unfinished(), 1, "the refused job was not made");
+
+    // B is not held back by A's share.
+    let r = http_call(&b, "start_render", start.clone()).await;
+    assert_ne!(r["isError"], true, "{r}");
+    assert_eq!(structured(&r)["ok"], true, "{r}");
+    let b1 = structured(&r)["job_id"].as_str().unwrap().to_string();
+    assert_eq!(svc.jobs().charged_bytes(), 2 * largest);
+
+    // Neither sees the other's job, and B's refusal comes from its own
+    // share too.
+    for (who, job) in [(&a, &b1), (&b, &a1)] {
+        for tool in ["render_status", "render_result", "cancel_render"] {
+            let r = http_call(who, tool, json!({ "job_id": job })).await;
+            assert_eq!(r["isError"], true, "{tool}: {r}");
+            assert_eq!(error_code(&r), "unknown_job", "{tool}: {r}");
+        }
+    }
+    let r = http_call(&b, "start_render", start.clone()).await;
+    assert_eq!(
+        structured(&r)["error"]["input"]["code"],
+        "results_per_principal_bytes",
+        "{r}"
+    );
+    for (who, job) in [(&a, &a1), (&b, &b1)] {
+        let r = http_call(who, "render_status", json!({ "job_id": job })).await;
+        assert_ne!(state(&r), "cancelled", "{r}");
+    }
+
+    // Cancelling A's job frees A's share; B's job is untouched.
+    let r = http_call(&a, "cancel_render", json!({ "job_id": a1 })).await;
+    assert_eq!(state(&r), "cancelled", "{r}");
+    let r = http_call(&a, "start_render", start.clone()).await;
+    assert_eq!(structured(&r)["ok"], true, "{r}");
+    let a2 = structured(&r)["job_id"].as_str().unwrap().to_string();
+    let r = http_call(&b, "render_status", json!({ "job_id": b1 })).await;
+    assert_ne!(state(&r), "cancelled", "{r}");
+
+    for (who, job) in [(&a, &a2), (&b, &b1)] {
+        http_call(who, "cancel_render", json!({ "job_id": job })).await;
+    }
+    wait_for(
+        "the workers are gone",
+        Duration::from_secs(10),
+        async || processes_with(&tag) == 0,
+    )
+    .await;
+    a.cancel().await.ok();
+    b.cancel().await.ok();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn over_http_job_tools_are_absent_without_async_jobs() {
     let svc = service(limits(), JobsConfig::default(), &tag());
@@ -1392,6 +1490,100 @@ async fn over_http_job_tools_are_absent_without_async_jobs() {
             .is_err()
     );
     a.cancel().await.ok();
+}
+
+/// A Tasks-capable rmcp client over HTTP, as Claude Code connects.
+async fn http_tasks_client(srv: &Http, token: &str) -> Client {
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(srv.base.clone()).auth_header(token),
+    );
+    // The Tasks extension needs the 2026-07-28 lifecycle (no `initialize`;
+    // the capabilities travel in every request's `_meta`), which is how
+    // Claude Code connects. rmcp's default `serve` starts a legacy session.
+    ClientConfig::new(
+        ClientCapabilities::builder().enable_tasks().build(),
+        Implementation::from_build_env(),
+    )
+    .serve_with_lifecycle(
+        transport,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    )
+    .await
+    .expect("discover")
+}
+
+/// The Tasks capability of an rmcp client reaches the server over HTTP: a
+/// slow call becomes a task, found by a later request, and a plain client
+/// gets the result.
+#[tokio::test(flavor = "multi_thread")]
+async fn over_http_an_rmcp_tasks_client_gets_a_task() {
+    let svc = service(relaxed(), tasks_on(), &tag());
+    let srv = serve_http(svc).await;
+    let client = http_tasks_client(&srv, TOKEN_A).await;
+    let response = client
+        .call_tool_once(params(
+            "render_postscript",
+            json!({ "source": SLOW_RED, "width": 20, "height": 10 }),
+        ))
+        .await
+        .unwrap();
+    let CallToolResponse::Task(created) = response else {
+        panic!("expected a task, got {response:?}")
+    };
+    let task = poll_task(&client, &created.task.task_id).await;
+    assert_eq!(task.status(), TaskStatus::Completed);
+    client.cancel().await.ok();
+}
+
+/// Over HTTP a call dropped before the task threshold ends with the
+/// request, as over stdio: the worker is killed and no job is made. The
+/// threshold is far above the program's start-up, so the call is always
+/// still waiting when it is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn over_http_a_call_dropped_before_the_threshold_kills_its_worker() {
+    let tag = tag();
+    let limits = LimitsConfig {
+        max_steps: 0,
+        ..relaxed()
+    };
+    let svc = service(limits, tasks_after(LONG_THRESHOLD_MS), &tag);
+    let srv = serve_http(svc.clone()).await;
+    let client = http_tasks_client(&srv, TOKEN_A).await;
+    // (That this client's capability reaches the server over HTTP, so the
+    // call is task-eligible, is the next test.)
+    let handle = client
+        .peer()
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params(
+                "render_postscript",
+                json!({ "source": FOREVER, "width": 20, "height": 20 }),
+            ))),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .expect("send");
+    wait_for("the worker starts", Duration::from_secs(10), async || {
+        processes_with(&tag) == 1
+    })
+    .await;
+    assert_eq!(svc.counters.executed.load(Ordering::SeqCst), 1);
+    handle.cancel(Some("test".into())).await.expect("cancel");
+    wait_for("the worker is gone", Duration::from_secs(10), async || {
+        processes_with(&tag) == 0
+    })
+    .await;
+    assert_eq!(svc.counters.jobs_started.load(Ordering::SeqCst), 0);
+    assert_eq!(svc.jobs().unfinished(), 0);
+    assert_eq!(svc.jobs().charged_bytes(), 0);
+    // The server is fine, and the same client still works.
+    let r = client
+        .call_tool(params("render_postscript", json!({ "source": QUICK_BLUE })))
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    client.cancel().await.ok();
 }
 
 /// A 2026-07-28 request (no session; client capabilities in `_meta`), as

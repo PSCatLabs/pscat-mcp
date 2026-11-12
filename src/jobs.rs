@@ -23,7 +23,10 @@
 //!   TTL after it finished, and fetching does not remove it; when the
 //!   budget or the principal's share is short, results already fetched are
 //!   dropped first, oldest first, the requesting principal's own before
-//!   anyone else's (a share is made room for with its own only).
+//!   anyone else's (a share is made room for with its own only). A
+//!   cancelled job has no result to deliver, so it is dropped like a
+//!   fetched one: its bookkeeping charge never holds a principal at its
+//!   share or the budget full until the TTL.
 //! * **Running.** A queued job waits for a running-job permit (at most
 //!   `max_running_jobs`) and then for a render slot shared with every
 //!   synchronous call, with no queue timeout. Cancelling drops the render,
@@ -162,6 +165,15 @@ struct Job {
     fetched: bool,
 }
 
+impl Job {
+    /// Whether nothing more is owed to the owner: the job has finished and
+    /// either its result was delivered (fetched) or it has none (cancelled).
+    /// Such a job may be dropped early to make room.
+    fn evictable(&self) -> bool {
+        self.finished.is_some() && (self.fetched || matches!(self.state, State::Cancelled))
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     jobs: HashMap<String, Job>,
@@ -285,15 +297,11 @@ impl JobStore {
         let need = self.max_result_bytes;
         let budget = self.config.job_results_budget_bytes;
         let share = self.principal_share;
-        // What the requester holds, and what is already delivered (fetched)
-        // and so can make room.
+        // What the requester holds, and what is already delivered (fetched,
+        // or cancelled: nothing to deliver) and so can make room.
         let (mut mine, mut mine_fetched, mut all_fetched) = (0, 0, 0);
         for j in inner.jobs.values() {
-            let fetched = if j.fetched && j.finished.is_some() {
-                j.charge
-            } else {
-                0
-            };
+            let fetched = if j.evictable() { j.charge } else { 0 };
             all_fetched += fetched;
             if j.owner == owner {
                 mine += j.charge;
@@ -329,8 +337,8 @@ impl JobStore {
                 all_held + need,
             ));
         }
-        // Results already fetched were delivered: they make room, oldest
-        // first. Over its share, a principal gives up its own; short of
+        // Results already fetched were delivered, and a cancelled job has
+        // none: they make room, oldest first. Over its share, a principal gives up its own; short of
         // budget, its own go before anyone else's.
         while mine + need > share {
             let Some(freed) = Self::evict_fetched(&mut inner, owner, true) else {
@@ -366,14 +374,14 @@ impl JobStore {
         Ok((id, cancel))
     }
 
-    /// Drop the oldest fetched, finished job: `owner`'s own, or when
-    /// `own_only` is false anyone's, `owner`'s first. Returns the bytes it
-    /// freed.
+    /// Drop the oldest evictable job (finished, and fetched or cancelled):
+    /// `owner`'s own, or when `own_only` is false anyone's, `owner`'s first.
+    /// Returns the bytes it freed.
     fn evict_fetched(inner: &mut Inner, owner: &str, own_only: bool) -> Option<usize> {
         let id = inner
             .jobs
             .iter()
-            .filter(|(_, j)| j.fetched && j.finished.is_some() && (!own_only || j.owner == owner))
+            .filter(|(_, j)| j.evictable() && (!own_only || j.owner == owner))
             .min_by_key(|(_, j)| (j.owner != owner, j.finished))
             .map(|(id, _)| id.clone())?;
         let job = inner.jobs.remove(&id)?;
@@ -804,6 +812,64 @@ mod tests {
             .filter(|(o, id)| s.status(o, id).is_ok())
             .count();
         assert_eq!(kept, 2);
+    }
+
+    #[test]
+    fn cancelled_jobs_do_not_hold_a_principal_at_its_share() {
+        // A share of exactly one largest result: bookkeeping kept for a
+        // cancelled job until the TTL would leave no room to start another.
+        let (s, _) = shared(3, 0, Some(1));
+        let mut previous: Option<String> = None;
+        for _ in 0..4 {
+            let id = start(&s, "a");
+            // The share is full while this one is unfinished.
+            assert_eq!(
+                s.insert("a", "render_postscript").unwrap_err().code,
+                ErrorCode::ResultsBudgetExceeded
+            );
+            if let Some(old) = &previous {
+                assert!(is_gone(&s, "a", old), "dropped to make room");
+            }
+            s.finish(&id, None);
+            // Still visible as cancelled until room is needed.
+            assert_eq!(s.status("a", &id).unwrap().state, JobState::Cancelled);
+            previous = Some(id);
+        }
+        // Another principal was never in the way.
+        start(&s, "b");
+    }
+
+    #[test]
+    fn cancelled_jobs_make_room_in_the_budget_for_anyone() {
+        // Room for exactly two reservations.
+        let (s, _) = shared(2, 0, None);
+        let a = start(&s, "a");
+        start(&s, "b");
+        s.finish(&a, None);
+        // `a` was cancelled: its bookkeeping makes room for `c` at once.
+        start(&s, "c");
+        assert!(is_gone(&s, "a", &a));
+        // An unfinished or an unfetched finished job is never dropped for
+        // room.
+        let (s, _) = shared(2, 0, None);
+        let a = start(&s, "a");
+        start(&s, "b");
+        s.finish(&a, Some(Err(RenderError::new(ErrorCode::Timeout, "slow"))));
+        assert_eq!(
+            s.insert("c", "render_postscript").unwrap_err().code,
+            ErrorCode::ResultsBudgetExceeded
+        );
+        assert!(s.status("a", &a).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_job_is_visible_until_room_is_needed() {
+        let (s, _) = shared(4, 0, None);
+        let a = start(&s, "a");
+        s.finish(&a, None);
+        assert_eq!(s.status("a", &a).unwrap().state, JobState::Cancelled);
+        assert_eq!(s.result("a", &a).unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(s.principal_charged_bytes("a"), JOB_MIN_CHARGE_BYTES);
     }
 
     #[test]

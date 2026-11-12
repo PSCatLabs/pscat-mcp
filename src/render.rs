@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::backend::{BackendError, RenderBackend};
 use crate::config::{JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
 use crate::generate::{GenerateJob, PlannedPage};
-use crate::jobs::{JobStatus, JobStore};
+use crate::jobs::{JobState, JobStatus, JobStore};
 use crate::worker::{
     Artifact, InterpLimits, JobMode, LintNote, OutputFormat, PsDiagnostic, SyntaxScan,
     WorkerFailure, WorkerJob, WorkerResult,
@@ -929,10 +929,30 @@ impl RenderService {
     /// Cancel `owner`'s job `id` and wait (briefly) for it to stop; returns
     /// its status. A finished job is left as it is.
     pub async fn cancel_job(&self, owner: &str, id: &str) -> Result<JobStatus, RenderError> {
+        let before = self.jobs.status(owner, id)?;
         self.jobs.request_cancel(owner, id)?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let status = self.jobs.status(owner, id)?;
+            let status = match self.jobs.status(owner, id) {
+                Ok(status) => status,
+                // A cancelled job is dropped early when room is short, so
+                // one that stopped and was dropped between two polls is
+                // still a cancel that worked (a job already finished when
+                // asked keeps the state it had).
+                Err(e) if e.code == ErrorCode::UnknownJob => {
+                    let state = if before.state.is_finished() {
+                        before.state
+                    } else {
+                        JobState::Cancelled
+                    };
+                    return Ok(JobStatus {
+                        state,
+                        cancel_requested: false,
+                        ..before
+                    });
+                }
+                Err(e) => return Err(e),
+            };
             if status.state.is_finished() || Instant::now() >= deadline {
                 return Ok(status);
             }
