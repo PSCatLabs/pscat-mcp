@@ -353,7 +353,8 @@ async fn reports_the_page_in_points_as_drawn() {
     let r = call(&client, "render_postscript", json!({"source": "showpage"})).await;
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     assert_eq!(pt(&r), (612.0, 792.0, 612, 792));
-    assert!(text_of(&r).contains("612x792 pt = 612x792 px"));
+    assert_eq!(structured(&r)["artifacts"][0]["dpi"].as_f64(), Some(72.0));
+    assert!(text_of(&r).contains("612x792 pt at 72 dpi = 612x792 px"));
 
     let r = call(
         &client,
@@ -363,7 +364,8 @@ async fn reports_the_page_in_points_as_drawn() {
     .await;
     assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
     assert_eq!(pt(&r), (300.0, 100.0, 600, 200));
-    assert!(text_of(&r).contains("300x100 pt = 600x200 px"));
+    assert_eq!(structured(&r)["artifacts"][0]["dpi"].as_f64(), Some(144.0));
+    assert!(text_of(&r).contains("300x100 pt at 144 dpi = 600x200 px"));
 
     // A program's own page size replaces the default, and the points follow it.
     let r = call(

@@ -164,6 +164,11 @@ pub struct Artifact {
     /// Height in points of the page as drawn; see `width_pt`.
     #[serde(default)]
     pub height_pt: Option<f64>,
+    /// Resolution in dots per inch the page was rendered at, the scale the
+    /// points were computed with; `None` where no points are (a review
+    /// sheet).
+    #[serde(default)]
+    pub dpi: Option<f64>,
     /// Base64 of the artifact bytes.
     pub data_base64: String,
     /// Length of the decoded bytes.
@@ -591,6 +596,7 @@ fn sheet_result(job: &WorkerJob, sheet: crate::sheet::ComposedSheet) -> WorkerRe
             height_px: report.height_px,
             width_pt: None,
             height_pt: None,
+            dpi: None,
             byte_len: sheet.png.len(),
             data_base64: b64.encode(&sheet.png),
         }],
@@ -665,6 +671,7 @@ fn encode(
                     height_px: shot.height,
                     width_pt,
                     height_pt,
+                    dpi: Some(job.dpi),
                     byte_len: shot.png.len(),
                     data_base64: b64.encode(&shot.png),
                 });
@@ -683,6 +690,7 @@ fn encode(
                     height_px: page.height(),
                     width_pt,
                     height_pt,
+                    dpi: Some(job.dpi),
                     byte_len: png.len(),
                     data_base64: b64.encode(&png),
                 });
@@ -713,6 +721,7 @@ fn encode(
                     height_px: h,
                     width_pt,
                     height_pt,
+                    dpi: Some(job.dpi),
                     byte_len: svg.len(),
                     data_base64: b64.encode(svg.as_bytes()),
                 });
@@ -731,6 +740,7 @@ fn encode(
                 height_px: h,
                 width_pt,
                 height_pt,
+                dpi: Some(job.dpi),
                 byte_len: pdf.len(),
                 data_base64: b64.encode(&pdf),
             });
