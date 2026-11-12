@@ -223,7 +223,7 @@ Which clients send the Tasks capability (November 2026):
 | Claude Code 2.1.322 (HTTP) | **No.** It declares it on `server/discover` and `tools/list`, not on `tools/call`, so it always gets the synchronous result. | verified: the capture in `evals/server/fixtures/claude-code.json` |
 | Codex | unknown | no capture; the MCP extension matrix lists no support (docs only) |
 | Claude.ai, ChatGPT | unknown | not tested; the community-maintained extension matrix on modelcontextprotocol.io gives no confirmed support (docs only) |
-| rmcp 3.9 client | yes, when built with `ClientCapabilities::builder().enable_tasks()` | verified: `tests/jobs.rs` |
+| rmcp 3.9 client | yes over stdio, when built with `ClientCapabilities::builder().enable_tasks()`; over Streamable HTTP only when it also connects with the 2026-07-28 discover lifecycle (see the paragraph below the table) | verified: `tests/jobs.rs` |
 
 So the Tasks path is off by default and the explicit tools are the way in
 for the clients in use today.
