@@ -452,6 +452,10 @@ pub struct ArtifactSummary {
     /// Height in points of the page as drawn; see `width_pt`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height_pt: Option<f64>,
+    /// Resolution in dots per inch the page was rendered at: the scale
+    /// between the two sizes, `px = pt * dpi / 72`. Absent with the points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<f64>,
     /// Size of the artifact in bytes (before base64).
     pub bytes: usize,
     /// MIME type of the artifact.
@@ -1047,7 +1051,8 @@ impl PscatMcp {
         title = "Render PostScript",
         description = "Runs a PostScript program in the PSCat interpreter and returns the pages it \
                        produced as PNG images (default), SVG documents or a PDF document, with a \
-                       short text summary (the size of each page in points and in pixels) and \
+                       short text summary (the size of each page in points and in pixels, and \
+                       the dpi) and \
                        the program's stdout. The program runs in a sandbox: reading files is refused except for PSCat's built-in lib/ \
                        (for example `(lib/artkit.ps) run`), and nothing can be written. A \
                        PostScript error returns the error name, offending command and line \
@@ -1088,8 +1093,8 @@ impl PscatMcp {
                        letters, matrices, cases, accents); a command outside it fails with \
                        postscript_error naming it, and a bad board setting with invalid_request. \
                        The default board is 800x400 points at 144 dpi (1600x800 pixels); the \
-                       result gives the board's size in points (`width_pt`, `height_pt`) and in \
-                       pixels. SVG and PDF keep every chalk grain as a vector mark: the default board is \
+                       result gives the board's size in points (`width_pt`, `height_pt`), in pixels \
+                       and its dpi. SVG and PDF keep every chalk grain as a vector mark: the default board is \
                        about 0.3 MB as PNG, 2.6 MB as PDF and 7 to 10 MB as SVG. The same \
                        arguments give the same image. The input is LaTeX only, never PostScript.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<RenderToolOutput>(),
@@ -1169,8 +1174,9 @@ impl PscatMcp {
                        cell. A dpi item {\"dpi\": 9, \"zoom\": 4} draws that render enlarged 4x \
                        with no smoothing (whole factors 2 to 16). A program that shows several \
                        pages gives its last one. A cell whose program fails is drawn as far as \
-                       it got; structuredContent lists every cell with its size, its place on \
-                       the sheet and, for a failed cell, its error code and PSCat's report. \
+                       it got; structuredContent lists every cell with its size in pixels and in \
+                       points, its dpi, its place on the sheet and, for a failed cell, its \
+                       error code and PSCat's report. \
                        Labels are drawn in PSCat's fonts: Latin with accents, and Korean, \
                        Japanese, Chinese and Thai only where the cjk-thai font pack is \
                        installed (otherwise as ?). Programs run in the same sandbox as \
@@ -1860,6 +1866,7 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
             height_px: a.height_px,
             width_pt: a.width_pt,
             height_pt: a.height_pt,
+            dpi: a.dpi,
             bytes: a.byte_len,
             mime_type: mime.to_string(),
             returned_as,
@@ -1896,8 +1903,13 @@ fn success_text(out: &RenderOutput, renderer: &RendererIdentity) -> String {
     let dims = out
         .artifacts
         .iter()
-        .map(|a| match (a.width_pt, a.height_pt) {
-            (Some(w), Some(h)) => format!("{w}x{h} pt = {}x{} px", a.width_px, a.height_px),
+        .map(|a| match (a.width_pt, a.height_pt, a.dpi) {
+            (Some(w), Some(h), Some(dpi)) => {
+                format!(
+                    "{w}x{h} pt at {dpi} dpi = {}x{} px",
+                    a.width_px, a.height_px
+                )
+            }
             _ => format!("{}x{} px", a.width_px, a.height_px),
         })
         .collect::<Vec<_>>()
@@ -1971,9 +1983,13 @@ fn sheet_success(out: RenderOutput) -> CallToolResult {
         } else {
             String::new()
         };
+        let size = match (c.width_pt, c.height_pt) {
+            (Some(w), Some(h)) => format!("{w}x{h} pt at {} dpi = ", c.dpi),
+            _ => format!("{} dpi, ", c.dpi),
+        };
         text.push_str(&format!(
-            "\nrow {} column {}: {} dpi, {}x{} px{zoom}, at ({}, {}): ",
-            c.row, c.column, c.dpi, c.width_px, c.height_px, c.x, c.y
+            "\nrow {} column {}: {size}{}x{} px{zoom}, at ({}, {}): ",
+            c.row, c.column, c.width_px, c.height_px, c.x, c.y
         ));
         match &c.error {
             None => text.push_str("ok"),

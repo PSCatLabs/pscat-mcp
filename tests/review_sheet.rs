@@ -308,6 +308,12 @@ async fn a_two_by_two_sheet_of_real_programs() {
         ]
     );
     assert!(cells.iter().all(|c| c["ok"] == true && c["zoom"] == 1));
+    // Both dpis draw the same 100x50 pt page: 100x50 px at 72 dpi and
+    // 200x100 px at 144 dpi (#82).
+    for c in cells {
+        assert_eq!(c["width_pt"].as_f64(), Some(100.0), "{c}");
+        assert_eq!(c["height_pt"].as_f64(), Some(50.0), "{c}");
+    }
     let png = png_of(&r);
     assert_eq!(png.w, s["width_px"].as_u64().unwrap() as u32);
     assert_eq!(png.h, s["height_px"].as_u64().unwrap() as u32);
@@ -337,7 +343,7 @@ async fn a_two_by_two_sheet_of_real_programs() {
     let text = text_of(&r);
     assert!(text.contains("4 cells (0 failed)"), "{text}");
     assert!(
-        text.contains("row 1 column 1: 144 dpi, 200x100 px"),
+        text.contains("row 1 column 1: 100x50 pt at 144 dpi = 200x100 px"),
         "{text}"
     );
     client.cancel().await.ok();
@@ -514,7 +520,8 @@ async fn a_failing_cell_is_drawn_as_far_as_it_got() {
     let text = text_of(&r);
     assert!(text.contains("2 cells (1 failed)"), "{text}");
     assert!(
-        text.contains("row 1 column 0: 72 dpi, 100x100 px") && text.contains("nosuchop"),
+        text.contains("row 1 column 0: 100x100 pt at 72 dpi = 100x100 px")
+            && text.contains("nosuchop"),
         "{text}"
     );
     client.cancel().await.ok();

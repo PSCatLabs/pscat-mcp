@@ -20,11 +20,12 @@
           "ok": true,
           "artifacts.0.width_pt": 400,
           "artifacts.0.height_pt": 200,
+          "artifacts.0.dpi": 144,
           "artifacts.0.width_px": 800,
           "artifacts.0.height_px": 400
         },
         "text_contains": [
-          "400x200 pt = 800x400 px"
+          "400x200 pt at 144 dpi = 800x400 px"
         ],
         "png": {
           "width": 800,
@@ -52,6 +53,7 @@
           "artifacts.0.height_px": 800,
           "artifacts.0.width_pt": 800,
           "artifacts.0.height_pt": 400,
+          "artifacts.0.dpi": 144,
           "artifacts.0.mime_type": "image/png",
           "renderer.engine": "pscat"
         },

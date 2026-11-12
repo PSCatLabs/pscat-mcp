@@ -44,12 +44,17 @@
           "failed_cells": 0,
           "cells.0.width_px": 128,
           "cells.0.height_px": 128,
+          "cells.0.width_pt": 64,
+          "cells.0.height_pt": 64,
           "cells.0.x": 13,
           "cells.0.y": 39,
           "cells.1.width_px": 32,
           "cells.1.zoom": 1,
           "cells.2.width_px": 32,
           "cells.2.zoom": 4,
+          "cells.2.dpi": 36,
+          "cells.2.width_pt": 64,
+          "cells.2.height_pt": 64,
           "cells.2.x": 222,
           "cells.5.row": 1,
           "cells.5.column": 2,
@@ -58,7 +63,7 @@
         },
         "text_contains": [
           "6 cells (0 failed)",
-          "row 0 column 2: 36 dpi, 32x32 px, shown at 4x"
+          "row 0 column 2: 64x64 pt at 36 dpi = 32x32 px, shown at 4x"
         ],
         "png": {
           "width": 363,
