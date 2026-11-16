@@ -239,7 +239,7 @@ forged header from the second network: `curl -H 'X-Forwarded-For: <your
 address>' ...` must still be `403`. To see the address the server derived,
 run with `RUST_LOG=info,pscat_mcp::auth_none=debug` (the one place addresses
 are logged: never at INFO, and not for long, since Cloud Logging keeps it).
-If the header has fewer entries than the hop count, the source is unknown and
+Set the trusted-hop count to the value you measured and no higher: a count that is too high lets an entry the client supplied be used as its address. A header line that is not plain visible ASCII makes the source unknown. If the header has fewer entries than the hop count, the source is unknown and
 refused, never guessed from the leftmost entry.
 
 **What is logged and counted.** A request `none` admits carries

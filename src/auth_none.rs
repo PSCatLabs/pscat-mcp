@@ -240,13 +240,12 @@ pub fn client_address(parts: &http::request::Parts, trusted_hops: usize) -> Opti
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.ip())?
     } else {
-        let entries: Vec<&str> = parts
-            .headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(','))
-            .collect();
+        // A line that is not visible ASCII makes the whole header unknown:
+        // skipping it could move the counted entry onto text the client wrote.
+        let mut entries: Vec<&str> = Vec::new();
+        for line in parts.headers.get_all("x-forwarded-for") {
+            entries.extend(line.to_str().ok()?.split(','));
+        }
         let entry = entries.len().checked_sub(trusted_hops)?;
         parse_forwarded_entry(entries[entry])?
     };
@@ -533,6 +532,23 @@ mod tests {
             client_address(&peer("::ffff:198.51.100.4"), 0),
             Some("198.51.100.4".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn a_non_ascii_forwarded_for_line_makes_the_source_unknown() {
+        // The client's forged first line, then a line with a byte that is not
+        // visible ASCII to which the proxy appended the real address: the
+        // line is not skipped (which would leave the forged entry counted).
+        let mut p = parts(Some("127.0.0.1"), &["10.1.1.1"]);
+        p.headers.append(
+            "x-forwarded-for",
+            http::HeaderValue::from_bytes(b"\xff, 198.51.100.4").unwrap(),
+        );
+        for hops in 1..=3 {
+            assert_eq!(client_address(&p, hops), None, "{hops}");
+        }
+        // The peer is still used when no hop is trusted.
+        assert_eq!(client_address(&p, 0), Some("127.0.0.1".parse().unwrap()));
     }
 
     #[test]
