@@ -170,6 +170,84 @@ that runs `pscat fonts install` in a build stage and copies the
 `fonts/packs` tree into the final image, with `PSCAT_MCP_FONT_PACK_DIR` set
 to it by default.
 
+## No authentication for staging
+
+**Staging only.** `PSCAT_MCP_AUTH=none` (or `bearer,none`) lets a request with
+no credential render as the principal `anonymous`. Anyone who has the URL
+can then spend the service's render CPU time and quota, within the resource
+limits and the guard rails below, and the service is billed for it. It is
+never on by default and logs a warning at startup. Do not enable it on a
+production service.
+
+**Why.** ChatGPT's custom MCP connector can't send a fixed `Authorization`
+header: it offers only OAuth or "No authentication". Until OAuth is in
+(issue #119), `none` is the stopgap for trying ChatGPT against a staging
+service. Claude, scripts and CI keep their bearer tokens beside it
+(`bearer,none`): a request with a valid token is the token's principal and
+is never counted against the anonymous limits, and a request with a wrong
+token is `401`, never anonymous.
+
+**A staging setup.**
+
+| Setting | Value |
+|---|---|
+| `PSCAT_MCP_AUTH` | `bearer,none` (or `none` with no token at all) |
+| `PSCAT_MCP_AUTH_NONE_UNTIL` | a near time, such as a week ahead (`2026-12-01T00:00:00Z`). Startup refuses a past time, and a running instance answers `403` after it |
+| `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` | see "The client address" below: `1` on the `run.app` URL (to be checked), `2` behind an external Application Load Balancer |
+| `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
+| `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
+| `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
+
+Cloud Run itself must let the caller in: ChatGPT can't send a Google ID
+token, so the service needs `--allow-unauthenticated` (the public
+`allUsers` invoker) at the Cloud Run level, with `PSCAT_MCP_ALLOWED_HOSTS`
+set to the service's host as in "Required configuration". The other
+resource limits (`PSCAT_MCP_MAX_*`, `PSCAT_MCP_MAX_CONCURRENT_RENDERS`,
+`PSCAT_MCP_QUEUE_TIMEOUT_MS`) apply unchanged.
+
+**Connecting ChatGPT.** In ChatGPT, add a custom MCP connector (developer
+mode), give it the service URL ending in `/mcp`, and choose "No
+authentication". Nothing else is needed on the ChatGPT side. This has not
+been run against a real ChatGPT or Cloud Run service from this repository.
+
+**The client address.** The limit and the allowlist need the caller's
+address. A client can put anything in `X-Forwarded-For`, and each proxy only
+appends to it, so the server reads it only as far as you tell it to:
+`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=N` takes the N-th entry from the right, and
+the entries to its left (which the client controls) are never used. With the
+default of `0`, the address is the TCP peer, which on Cloud Run is Google's
+front end: every caller would then share one rate-limit bucket and the
+allowlist would match the front end, so neither check would mean anything.
+Set it on Cloud Run.
+
+* Behind an external Application Load Balancer, Google documents the
+  header as `X-Forwarded-For: [SUPPLIED_VALUE,] CLIENT_IP, LOAD_BALANCER_IP`,
+  where `SUPPLIED_VALUE` is whatever the client sent. The client is the
+  second entry from the right: **`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=2`**.
+* On the service's own `*.run.app` URL, Cloud Run's request-header contract
+  does not say what `X-Forwarded-For` holds. The expected form is the
+  client's own (possibly forged) entries followed by the address Google's
+  front end saw, so the client is the last entry:
+  **`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=1`**. This has not been verified here.
+
+**Check the hop count on staging before trusting it.** A value that is too
+high for the real chain lets a client's own entry stand for its address; a
+value that is too low names Google's address. To check, set the allowlist to
+your own address and the hop count, then call the service from that address
+(`200`) and from another network (`403 source_not_allowed`), and add a
+forged header from the second network: `curl -H 'X-Forwarded-For: <your
+address>' ...` must still be `403`. To see the address the server derived,
+run with `RUST_LOG=info,pscat_mcp::auth_none=debug` (the one place addresses
+are logged: never at INFO, and not for long, since Cloud Logging keeps it).
+If the header has fewer entries than the hop count, the source is unknown and
+refused, never guessed from the leftmost entry.
+
+**What is logged and counted.** A request `none` admits carries
+`auth_method` `none`, so it is counted apart from `bearer` in log-based
+metrics. A refused one logs only its `reason` (`source_not_allowed`,
+`rate_limited`, `unauthenticated_access_expired`). No client address and no
+per-client label is ever emitted at INFO, as the next section promises.
+
 ## Sandbox
 
 Use the **first-generation execution environment** (gVisor) for public
@@ -182,7 +260,7 @@ else isolates its system calls.
 
 Logs are JSON on stderr: one line per request with `request_id`, method,
 path, status, latency and, once an auth method has accepted the request,
-`auth_method` (`bearer`). A refused request also logs a warning with
+`auth_method` (`bearer`, or `none` in the staging mode above). A refused request also logs a warning with
 `reason` and `rejected_by`, and the startup lines name the enabled
 `auth_methods`. There is one line per render with source byte count,
 steps, elapsed ms, pages and failure flag. PostScript source and tokens are

@@ -39,6 +39,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
 use crate::auth::{AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial, NoAuth};
+use crate::auth_none::NoneGuard;
 use crate::capture::{Capture, capture_layer};
 use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
 use crate::mcp::PscatMcp;
@@ -116,17 +117,22 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
         bind = %http.bind,
         "serving /mcp WITHOUT authentication (loopback development mode)"
     );
-    Ok(Arc::new(NoAuth))
+    Ok(Arc::new(NoAuth::default()))
 }
 
 /// Choose the authenticator for `http` and `auth`.
 ///
 /// * `PSCAT_MCP_AUTH` / `--auth` unset: exactly [`authenticator`].
 /// * Set: an [`AuthChain`] of the listed methods, in order. An empty or
-///   unknown list is refused; so are `oauth` and `none` until they are
-///   implemented (issues #119 and #120). `bearer` needs at least one token.
-///   `--allow-unauthenticated` is still refused on a non-loopback bind, and
-///   is otherwise ignored (with a warning): the list says what is accepted.
+///   unknown list is refused; so is `oauth` until it is implemented (issue
+///   #119). `bearer` needs at least one token. `none` is the explicit
+///   no-auth mode (issue #120, [`crate::auth_none`]): it is refused together
+///   with async jobs (every anonymous caller is one principal, so one could
+///   read or cancel another's jobs; Tasks need async jobs, so are covered),
+///   and with an expired `PSCAT_MCP_AUTH_NONE_UNTIL`; it may run off
+///   loopback, and a loud warning is logged. `--allow-unauthenticated` is
+///   still refused on a non-loopback bind, and is otherwise ignored (with a
+///   warning): the list says what is accepted.
 pub fn authenticator_with(
     http: &HttpConfig,
     auth: &AuthConfig,
@@ -135,19 +141,31 @@ pub fn authenticator_with(
         .methods()
         .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?
     else {
+        warn_unused_none_settings(auth);
         return authenticator(http);
     };
     for kind in &kinds {
         let issue = match kind {
-            AuthMethodKind::Bearer => continue,
+            AuthMethodKind::Bearer | AuthMethodKind::None => continue,
             AuthMethodKind::Oauth => "#119",
-            AuthMethodKind::None => "#120",
         };
         anyhow::bail!(
             "refusing to start: auth method `{}` (PSCAT_MCP_AUTH / --auth) is not implemented yet \
-             (PSCatLabs/pscat-mcp{issue}); only `bearer` is available",
+             (PSCatLabs/pscat-mcp{issue}); only `bearer` and `none` are available",
             kind.as_str()
         );
+    }
+    if kinds.contains(&AuthMethodKind::None) {
+        if http.async_jobs {
+            anyhow::bail!(
+                "refusing to start: auth method `none` (PSCAT_MCP_AUTH / --auth) cannot be \
+                 combined with async jobs (PSCAT_MCP_ASYNC_JOBS, which MCP Tasks also need): \
+                 every unauthenticated caller is the same principal, so one could poll, fetch or \
+                 cancel another's jobs. Turn async jobs off, or remove `none`"
+            );
+        }
+    } else {
+        warn_unused_none_settings(auth);
     }
     if http.allow_unauthenticated {
         if !is_loopback(http.bind) {
@@ -173,9 +191,18 @@ pub fn authenticator_with(
                 }
                 methods.push(Box::new(BearerTokenAuth::new(tokens.iter())));
             }
-            AuthMethodKind::Oauth | AuthMethodKind::None => {
-                unreachable!("refused above")
+            AuthMethodKind::None => {
+                let guard = NoneGuard::new(&auth.none)
+                    .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+                tracing::warn!(
+                    guard = %guard.summary(),
+                    "auth method `none` is ENABLED: /mcp accepts requests with NO credentials \
+                     from anyone who can reach this server, who can then spend its render CPU \
+                     time and quota. For staging only; never leave it on in production"
+                );
+                methods.push(Box::new(NoAuth::guarded(guard)));
             }
+            AuthMethodKind::Oauth => unreachable!("refused above"),
         }
     }
     if !kinds.contains(&AuthMethodKind::Bearer) && !tokens.is_empty() {
@@ -189,6 +216,16 @@ pub fn authenticator_with(
         "auth methods enabled (PSCAT_MCP_AUTH)"
     );
     Ok(Arc::new(chain))
+}
+
+/// Warn when `--auth-none-*` settings are given but `none` is not enabled.
+fn warn_unused_none_settings(auth: &AuthConfig) {
+    if auth.none.is_customised() {
+        tracing::warn!(
+            "PSCAT_MCP_AUTH_NONE_* settings are given but `none` is not in PSCAT_MCP_AUTH; \
+             they are ignored"
+        );
+    }
 }
 
 /// rmcp Streamable HTTP settings for `http`: stateless, JSON responses, no
@@ -507,14 +544,18 @@ async fn require_auth(
     }
 }
 
-/// The answer to a denied request: the error's status (`401` today), a JSON
-/// body with the error's code and message, and the merged challenge.
+/// The answer to a denied request: the error's status (`401`, `403` or
+/// `429`), a JSON body with the error's code and message, a `Retry-After`
+/// when the error has one, and the merged challenge.
 fn denied(denial: &Denial) -> Response {
     let body = serde_json::json!({
         "error": denial.error.code(),
         "message": denial.error.to_string(),
     });
     let mut resp = (denial.error.status(), axum::Json(body)).into_response();
+    if let Some(v) = denial.error.retry_after().map(HeaderValue::from) {
+        resp.headers_mut().insert(header::RETRY_AFTER, v);
+    }
     if let Some(v) = denial
         .challenge
         .as_deref()
@@ -616,9 +657,13 @@ pub async fn serve_with_capture(
     let mut server = tokio::spawn({
         let stop = stop_accepting.clone();
         async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(stop.cancelled_owned())
-                .await
+            // Connection info gives `none`'s guard rails the TCP peer address.
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
         }
     });
 

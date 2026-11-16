@@ -827,7 +827,8 @@ pub enum AuthMethodKind {
     Bearer,
     /// OAuth 2.1 access tokens (issue #119; not implemented yet).
     Oauth,
-    /// No authentication, with guard rails (issue #120; not implemented yet).
+    /// No authentication, with guard rails (issue #120; see
+    /// `crate::auth_none`). Never on by default.
     None,
 }
 
@@ -851,16 +852,21 @@ impl AuthMethodKind {
 
 /// Which authentication methods `serve-http` accepts. Kept apart from
 /// [`HttpConfig`] so that each method's own settings (an OAuth issuer, the
-/// no-auth mode's allowlist) can join it.
+/// no-auth mode's allowlist) can join it, each in its own flattened struct.
 #[derive(Debug, Clone, Default, Args)]
 pub struct AuthConfig {
     /// Authentication methods accepted on `/mcp`, comma separated, tried in
     /// turn: a request passes if any accepts it. `bearer` (static tokens),
-    /// `oauth`, `none`; `oauth` and `none` are not implemented yet and refuse
-    /// to start. Unset: bearer tokens, or `--allow-unauthenticated` on a
+    /// `oauth` (not implemented yet; refuses to start), `none` (no
+    /// authentication, for staging, with its own `--auth-none-*` guard
+    /// rails). Unset: bearer tokens, or `--allow-unauthenticated` on a
     /// loopback address, as before.
     #[arg(long = "auth", env = "PSCAT_MCP_AUTH", value_name = "METHODS")]
     pub auth: Option<String>,
+
+    /// Settings of the `none` method.
+    #[command(flatten)]
+    pub none: crate::auth_none::NoneAuthConfig,
 }
 
 impl AuthConfig {
@@ -1297,6 +1303,7 @@ mod tests {
     fn auth_methods_parse() {
         let cfg = |s: Option<&str>| AuthConfig {
             auth: s.map(str::to_string),
+            ..AuthConfig::default()
         };
         assert_eq!(cfg(None).methods(), Ok(None));
         assert_eq!(
