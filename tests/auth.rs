@@ -437,6 +437,9 @@ fn startup_refuses_a_bad_auth_list() {
         (" ", true, "lists no auth method"),
         ("bearer,bearer", true, "listed twice"),
         ("bearer", false, "no bearer tokens are configured"),
+        // A literal empty value is refused, not taken as unset (no token:
+        // a fallback to the default would fail on another message).
+        ("", false, "lists no auth method"),
     ] {
         let mut cmd = server_command("127.0.0.1");
         cmd.env("PSCAT_MCP_AUTH", list);
@@ -457,6 +460,12 @@ fn startup_refuses_a_bad_auth_list() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not implemented yet"));
+    let out = server_command("127.0.0.1")
+        .args(["--auth", ""])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("lists no auth method"));
     // The loopback rule for --allow-unauthenticated still holds.
     let out = server_command("0.0.0.0")
         .arg("--allow-unauthenticated")
