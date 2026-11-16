@@ -424,7 +424,9 @@ target/release/pscat-mcp-server serve-http            # 127.0.0.1:8080, endpoint
   `Authorization: Bearer <token>`. Clients should send
   `Accept: application/json, text/event-stream`; `application/json` alone,
   `*/*` or no `Accept` also work (see Limitations).
-* `GET /healthz`: unauthenticated liveness check, `{"status":"ok"}`.
+* `GET /healthz` and `GET /health`: unauthenticated liveness check,
+  `{"status":"ok"}`. Both paths serve the same handler; `/health` is the one
+  to use from outside Cloud Run (see `docs/CLOUD_RUN.md`).
 
 Client configuration for a remote server:
 

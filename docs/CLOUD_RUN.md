@@ -33,7 +33,16 @@ This document lists what that deployment must get right for this image.
   builds for the host architecture.
 * The container listens on `0.0.0.0:$PORT` (Cloud Run sets `PORT`), runs as
   uid 65532, and needs no writable filesystem or volumes.
-* Startup and liveness probe: `GET /healthz` (unauthenticated, does no work).
+* Health paths: `GET /healthz` and `GET /health` are the same handler
+  (unauthenticated, does no work, `{"status":"ok"}`). Use `/healthz` for the
+  in-container startup and liveness probes. Use `/health` for anything
+  outside Cloud Run, such as a Cloud Monitoring uptime check, an e2e
+  pipeline or `curl`: Google's front end reserves URL paths that end in `z`
+  and returns 404 for `/healthz` from outside the service, so the request
+  never reaches the container. The in-container probes do reach `/healthz`.
+  Check from outside with
+  `curl -s -o /dev/null -w '%{http_code}' https://<service>.run.app/health`,
+  which prints `200` with no token.
 
 ## Required configuration
 
