@@ -76,6 +76,7 @@ fn http_config() -> HttpConfig {
 fn auth_config(list: &str) -> AuthConfig {
     AuthConfig {
         auth: Some(list.into()),
+        ..AuthConfig::default()
     }
 }
 
@@ -407,21 +408,14 @@ fn server_command(bind: &str) -> std::process::Command {
 }
 
 /// Refused at startup, through the real binary: an empty, unknown or
-/// repeated list, the methods not implemented yet, and `bearer` without a
-/// token. None of them binds a port.
+/// repeated list, `none` (not implemented yet), `oauth` without its
+/// settings, and `bearer` without a token. None of them binds a port.
 #[test]
 fn startup_refuses_a_bad_auth_list() {
     for (list, tokens, expect) in [
-        (
-            "oauth",
-            true,
-            "`oauth` (PSCAT_MCP_AUTH / --auth) is not implemented yet",
-        ),
-        (
-            "bearer,oauth",
-            true,
-            "`oauth` (PSCAT_MCP_AUTH / --auth) is not implemented yet",
-        ),
+        // `oauth` needs its own settings (tests/oauth.rs covers them).
+        ("oauth", true, "needs PSCAT_MCP_OAUTH_ISSUER"),
+        ("bearer,oauth", true, "needs PSCAT_MCP_OAUTH_ISSUER"),
         (
             "none",
             true,
@@ -459,7 +453,7 @@ fn startup_refuses_a_bad_auth_list() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not implemented yet"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("needs PSCAT_MCP_OAUTH_ISSUER"));
     let out = server_command("127.0.0.1")
         .args(["--auth", ""])
         .output()

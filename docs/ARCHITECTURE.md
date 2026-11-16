@@ -404,7 +404,8 @@ every job). If tokens are ever reloaded at run time, the owner has to become
 stable per token, for example an HMAC of the token under a key generated at
 process start. Under `--allow-unauthenticated` (loopback only) every caller
 is `anonymous`, one shared owner. Other auth methods give ids prefixed
-with their name (`oauth:<subject>`), so ids never collide across methods
+with their name (`oauth:` and 128 bits of a SHA-256 over issuer and
+subject, pseudonymous), so ids never collide across methods
 (see [Security boundaries](#security-boundaries)). A lookup by any other owner is the same
 `unknown_job` (Tasks: rmcp's `invalid_params` "unknown task") as an unknown
 id. Ids are UUID v4.
@@ -669,7 +670,10 @@ Known gaps:
   tokens in constant time. Several methods can run side by side (see
   [Auth methods](#auth-methods)). Unauthenticated mode exists for local development
   and the server refuses to start with it on a non-loopback address.
-  `/healthz` and its alias `/health` are unauthenticated and do no work.
+  `/healthz` and its alias `/health` are unauthenticated and do no work,
+  as are, with `oauth` enabled, the Protected Resource Metadata paths
+  (`/.well-known/oauth-protected-resource` and the same with the resource
+  URL's path appended), which return a fixed document from configuration.
 * **DNS rebinding / browsers**: rmcp's `Host` allow-list (loopback by
   default; set `PSCAT_MCP_ALLOWED_HOSTS` for a deployment) and `Origin`
   validation.
@@ -714,7 +718,7 @@ every method's challenges by scheme (`auth::Challenges`), so `bearer` and
 The rules for a method:
 
 * Principal ids are disjoint across methods. `bearer` keeps its bare
-  `token#N`, other methods prefix their name (`oauth:<subject>`), and only
+  `token#N`, other methods prefix their name (`oauth:<hash>`), and only
   the fallback uses `anonymous`. Job ownership and the per-principal
   budgets compare only the id.
 * A method never logs or echoes a credential, and it reads only the
@@ -726,30 +730,83 @@ Any single method is also an `Authenticator`, a chain of one. The request
 span records `auth_method`, the name of the method that accepted the
 request, and startup logs `auth_methods`.
 
-Until they are implemented, `oauth` (#119) and `none` (#120) refuse to
-start, as do an empty, unknown or repeated list.
+Until it is implemented, `none` (#120) refuses to start, as do an empty,
+unknown or repeated list.
 
-### Adding OAuth later
+### OAuth resource server
 
-The MCP authorization spec makes the server an OAuth 2.1 *resource
-server*. To add it:
+`oauth` (`src/oauth.rs`, issue #119) makes the server an OAuth 2.1
+*resource server* per the MCP authorization spec. It never sees a password
+and runs no login page; an external authorization server signs users in
+and issues JWT access tokens, and the method only validates them.
 
-1. Implement `AuthMethod` (named `oauth`) to validate access tokens (JWT
-   signature and `aud`/`iss`/`exp`, or token introspection) issued by an
-   external authorization server (e.g. Google Identity Platform, Auth0).
-   Without a bearer token it answers `NotApplicable`. A token it rejects
-   is `Rejected`, and `bearer` rejects that same token too, which is
-   harmless: either method may accept it.
-2. Serve `/.well-known/oauth-protected-resource` (RFC 9728) naming that
-   authorization server, and add `resource_metadata="…"` (and
-   `error="invalid_token"` for its own rejection) to its `Bearer`
-   challenge from `AuthMethod::challenges`.
-3. A user who signs in but is not allowed gets an `AuthError` variant whose
-   `status()` is `403`.
-4. Add its settings to `config::AuthConfig` and build it in
-   `http::authenticator_with`.
+```
+client ──401 + resource_metadata──► GET /.well-known/oauth-protected-resource/mcp
+   │                                 (resource, authorization_servers, scopes)
+   ├── discovery, registration, authorization code + PKCE ──► authorization server
+   └── POST /mcp, Authorization: Bearer <JWT> ──► oauth: header and signature
+                                                  (JWKS, cached), iss, aud,
+                                                  exp/nbf, scopes, allowlist
+```
 
-No user database or proprietary OAuth flow is needed in this repository.
+* **What the server checks.** The token is at most 8 KiB, a JWS with an
+  asymmetric `alg` (RS256/384/512, PS256/384/512, ES256, ES384, EdDSA; `none`
+  and `HS*` are refused before a key is looked at, so a public key can never
+  serve as an HMAC secret), a `kid` naming a key of the issuer's JWKS whose
+  type, curve and own `alg` fit, and no `crit`. Header `jwk`/`jku`/`x5u`
+  are ignored. Then `iss` equals the configured issuer byte for byte, `aud`
+  contains the configured resource URL (RFC 8707), `exp` is present and
+  `exp`/`nbf` hold with a leeway, `sub` is present, every configured scope is
+  granted, and the user is on the allowlist (`sub:` entries, or `email:`
+  entries when `email_verified` is `true`). Signatures are verified with
+  `ring` over the received bytes; JOSE parsing is ours (about 150 lines,
+  `serde_json` on the bounded token), which avoids a second crypto backend.
+* **Answers.** Bad token: `401` `invalid_token`. Missing scope: `403`
+  `insufficient_scope` with `scope`. Not allowlisted: `403` `not_allowed`,
+  deliberately without an `error` parameter, since `insufficient_scope`
+  would make a client retry consent. `AuthError::status` carries the `403`,
+  which the chain ranks above any `401`.
+* **JWKS.** Fetched lazily (never at startup, so an issuer outage cannot
+  crash-loop the service) from `PSCAT_MCP_OAUTH_JWKS_URL` or the issuer's
+  metadata (RFC 8414 with path insertion, then OpenID Connect, as the MCP spec
+  orders them; the metadata's `issuer` must match). One fetch at a time,
+  its attempt time stamped before it starts, at most one per refetch
+  interval, so unknown `kid`s cannot make the server hammer the issuer. The
+  whole key lookup, waiting for another request's fetch included, is bounded
+  by the JWKS timeout, and a fetch is capped at 256 KiB, `https` only
+  (`http` only to a loopback host, for tests), and follows no redirects.
+  Keys stay in use when a refresh fails. A request without a JWT never waits.
+  The HTTP client is `hyper-util` with `hyper-rustls` on `ring` and the
+  compiled-in Mozilla roots (`webpki-roots`), so the image needs no CA bundle
+  and no OpenSSL.
+* **Metadata.** `AuthMethod::resource_metadata` gives the RFC 9728 document
+  and its paths; the router serves them outside the authenticated `/mcp`
+  like `/health`. The resource URL, and so the `resource_metadata` URL in
+  the challenge, comes from `PSCAT_MCP_OAUTH_RESOURCE`, never from `Host`.
+* **Privacy.** The principal is `oauth:` plus a hash, rejections log a fixed
+  `reason`, and no subject, email or token is logged.
+
+**The identity provider is deliberately undecided.** The method is
+provider-agnostic: any standards-based issuer works, given its issuer URL
+(and OpenID Connect or RFC 8414 discovery, or an explicit JWKS URL). The
+tests use a local mock authorization server. A provider for MCP clients
+such as ChatGPT and claude.ai must support:
+
+* **client registration** the connector can use: Dynamic Client
+  Registration (RFC 7591, which ChatGPT uses), Client ID Metadata Documents,
+  or a fixed client whose ID (and secret) is entered in the connector;
+* **authorization code with PKCE** (`S256`), with
+  `code_challenge_methods_supported` in its metadata;
+* **JWT access tokens with a settable audience**: the `resource` parameter
+  (RFC 8707) or an API/audience setting, so `aud` is this server's resource
+  URL. Opaque access tokens (which need introspection) are not supported;
+* optionally `email` and `email_verified` in the access token, for
+  allowlisting by email.
+
+Candidates named in #119 include hosted providers that document MCP (Auth0,
+WorkOS, Stytch), Google Identity Platform (DCR support to be checked), and a
+small self-hosted authorization server in front of GitHub or Google sign-in.
+The choice stays with the owner; recording it here is part of that decision.
 
 ## Extension points
 

@@ -52,6 +52,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # PSCat's raster type, for the review sheet's cells and canvas (only in
 # src/pscat_extras.rs). The same version as PSCat's own, so one copy is built.
 tiny-skia = { version = "0.12", default-features = false }
+# OAuth resource server (src/oauth.rs, issue #119): JWKS and discovery
+# fetches over HTTPS, and JWS signature checks. One crypto backend (ring) for
+# both; no OpenSSL or aws-lc. Roots are compiled in (webpki-roots), so the
+# image's CA bundle does not matter.
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12", "webpki-roots"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper = { version = "1", features = ["client", "http1"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

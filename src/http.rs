@@ -1,10 +1,15 @@
-//! HTTP transport: `/mcp` (Streamable HTTP, authenticated) and the health
-//! paths `/healthz` and `/health`.
+//! HTTP transport: `/mcp` (Streamable HTTP, authenticated), the health
+//! paths `/healthz` and `/health`, and with `oauth` enabled the Protected
+//! Resource Metadata.
 //!
 //! * `GET /healthz` and `GET /health` — the same unauthenticated liveness
 //!   handler; does no rendering. `/health` exists because Cloud Run's front
 //!   end reserves paths ending in `z` and answers 404 for `/healthz` from
 //!   outside the service; `/healthz` stays for the in-container probes.
+//! * `GET /.well-known/oauth-protected-resource` and the same with the
+//!   resource URL's path appended (`…/mcp`), only with `oauth` enabled:
+//!   the RFC 9728 document naming the resource, the authorization server and
+//!   the scopes; unauthenticated, as the MCP authorization spec requires.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
 //!   responses, behind the [`Authenticator`] (every enabled auth method,
 //!   checked before rmcp sees the request, so an unauthenticated request
@@ -42,6 +47,7 @@ use crate::auth::{AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial,
 use crate::capture::{Capture, capture_layer};
 use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
 use crate::mcp::PscatMcp;
+use crate::oauth::OauthAuth;
 use crate::render::RenderService;
 
 /// Slack added to the body limit for the JSON-RPC envelope and arguments.
@@ -123,8 +129,9 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
 ///
 /// * `PSCAT_MCP_AUTH` / `--auth` unset: exactly [`authenticator`].
 /// * Set: an [`AuthChain`] of the listed methods, in order. An empty or
-///   unknown list is refused; so are `oauth` and `none` until they are
-///   implemented (issues #119 and #120). `bearer` needs at least one token.
+///   unknown list is refused; so is `none` until it is implemented (issue
+///   #120). `bearer` needs at least one token; `oauth` needs its issuer,
+///   resource and allowlist ([`OauthAuth::from_config`]).
 ///   `--allow-unauthenticated` is still refused on a non-loopback bind, and
 ///   is otherwise ignored (with a warning): the list says what is accepted.
 pub fn authenticator_with(
@@ -139,13 +146,12 @@ pub fn authenticator_with(
     };
     for kind in &kinds {
         let issue = match kind {
-            AuthMethodKind::Bearer => continue,
-            AuthMethodKind::Oauth => "#119",
+            AuthMethodKind::Bearer | AuthMethodKind::Oauth => continue,
             AuthMethodKind::None => "#120",
         };
         anyhow::bail!(
             "refusing to start: auth method `{}` (PSCAT_MCP_AUTH / --auth) is not implemented yet \
-             (PSCatLabs/pscat-mcp{issue}); only `bearer` is available",
+             (PSCatLabs/pscat-mcp{issue}); `bearer` and `oauth` are available",
             kind.as_str()
         );
     }
@@ -173,10 +179,19 @@ pub fn authenticator_with(
                 }
                 methods.push(Box::new(BearerTokenAuth::new(tokens.iter())));
             }
-            AuthMethodKind::Oauth | AuthMethodKind::None => {
-                unreachable!("refused above")
+            AuthMethodKind::Oauth => {
+                let oauth = OauthAuth::from_config(&auth.oauth)
+                    .map_err(|e| anyhow::anyhow!("refusing to start: {e:#}"))?;
+                methods.push(Box::new(oauth));
             }
+            AuthMethodKind::None => unreachable!("refused above"),
         }
+    }
+    if !kinds.contains(&AuthMethodKind::Oauth) && auth.oauth.is_configured() {
+        tracing::warn!(
+            "PSCAT_MCP_OAUTH_* settings are given but `oauth` is not in PSCAT_MCP_AUTH; they are \
+             ignored"
+        );
     }
     if !kinds.contains(&AuthMethodKind::Bearer) && !tokens.is_empty() {
         tracing::warn!(
@@ -254,6 +269,7 @@ pub fn router_with_capture(
     mcp_config: StreamableHttpServerConfig,
     capture: Option<Arc<Capture>>,
 ) -> Router {
+    let auth_metadata = auth.published_metadata();
     let limits = service.limits();
     let body_limit = mcp_body_limit(limits.max_text_bytes());
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
@@ -272,35 +288,42 @@ pub fn router_with_capture(
         .layer(middleware::from_fn(accept_json))
         .service(mcp);
 
-    Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/health", get(healthz))
-        .route_service("/mcp", mcp)
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|req: &Request| {
-                            let request_id = req
-                                .headers()
-                                .get("x-request-id")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            // `auth_method` is recorded by `require_auth`
-                            // once a method accepts the request.
-                            tracing::info_span!(
-                                "http",
-                                method = %req.method(),
-                                path = %req.uri().path(),
-                                request_id = %request_id,
-                                auth_method = tracing::field::Empty,
-                            )
-                        })
-                        .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-                )
-                .layer(PropagateRequestIdLayer::x_request_id()),
-        )
+        .route("/health", get(healthz));
+    // RFC 9728 Protected Resource Metadata, unauthenticated like the health
+    // paths; only when an enabled method (`oauth`) publishes one.
+    if let Some(meta) = auth_metadata {
+        let doc = Arc::new(meta.document);
+        for path in &meta.paths {
+            app = app.route(path, get(resource_metadata).with_state(doc.clone()));
+        }
+    }
+    app.route_service("/mcp", mcp).layer(
+        ServiceBuilder::new()
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|req: &Request| {
+                        let request_id = req
+                            .headers()
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        // `auth_method` is recorded by `require_auth`
+                        // once a method accepts the request.
+                        tracing::info_span!(
+                            "http",
+                            method = %req.method(),
+                            path = %req.uri().path(),
+                            request_id = %request_id,
+                            auth_method = tracing::field::Empty,
+                        )
+                    })
+                    .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+            )
+            .layer(PropagateRequestIdLayer::x_request_id()),
+    )
 }
 
 /// Which of `application/json` and `text/event-stream` a request's `Accept`
@@ -463,6 +486,22 @@ async fn drain(mut body: Body, mut seen: u64) {
 
 async fn healthz() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// The Protected Resource Metadata document (RFC 9728). Public and static,
+/// so any origin may read it (browser-based MCP clients fetch it too).
+async fn resource_metadata(State(doc): State<Arc<serde_json::Value>>) -> Response {
+    let mut resp = axum::Json(doc.as_ref().clone()).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    resp
 }
 
 /// Authenticate from the headers alone, by every enabled method in turn. An

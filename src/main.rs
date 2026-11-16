@@ -32,8 +32,9 @@ enum Command {
     ServeHttp {
         #[command(flatten)]
         http: HttpConfig,
+        /// Boxed: the OAuth settings make it large.
         #[command(flatten)]
-        auth: AuthConfig,
+        auth: Box<AuthConfig>,
         #[command(flatten)]
         limits: LimitsConfig,
         #[command(flatten)]

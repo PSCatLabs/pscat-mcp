@@ -51,7 +51,49 @@ This document lists what that deployment must get right for this image.
 | `PSCAT_MCP_AUTH_TOKEN_FILE=/secrets/tokens` with a Secret Manager volume | the server refuses to start without a token; a file keeps it out of `env` listings |
 | `PSCAT_MCP_ALLOWED_HOSTS=<service>.run.app,<custom domain>` | the default allows only loopback hosts, so every `/mcp` request would get 403 (the server logs a warning at startup). `*` is acceptable only when a load balancer already validates `Host` |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS=<the service's --cpu>` (for example `2` with `--cpu=2`) | the default is min(CPUs the process sees, 4), and on the first-generation environment (gVisor) that count can exceed what the service is granted: `--cpu=2` was observed to get 4 slots. Set it explicitly; see "Sizing" |
-| Cloud Run ingress / IAM | the bearer token is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth |
+| Cloud Run ingress / IAM | the bearer token (or OAuth, see below) is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth |
+
+## OAuth (ChatGPT and claude.ai connectors)
+
+Optional: `PSCAT_MCP_AUTH=oauth` or `bearer,oauth` makes `/mcp` accept JWT
+access tokens from an external authorization server (see the README's
+"Authentication" section and docs/ARCHITECTURE.md, "OAuth resource
+server"). The identity provider is not chosen yet, so nothing here names
+one. Everything the deployment wires:
+
+| Setting | Kind | Value |
+|---|---|---|
+| `PSCAT_MCP_AUTH` | env | `bearer,oauth` (bearer for Claude Code, scripts and CI; OAuth for ChatGPT and claude.ai), or `oauth` |
+| `PSCAT_MCP_OAUTH_ISSUER` | env, not secret | the provider's issuer URL exactly as it appears in tokens' `iss` (mind a trailing `/`) |
+| `PSCAT_MCP_OAUTH_RESOURCE` | env, not secret | the public URL clients connect to, e.g. `https://<custom domain>/mcp`; tokens' `aud` must contain it. Use the custom domain the connectors are given, not the `run.app` URL, unless that is what users type |
+| `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | Secret Manager volume (personal data, not a credential) | allowlist, one `sub:<subject>` or `email:<address>` per line; or `PSCAT_MCP_OAUTH_ALLOWED_USERS` (comma list, env). Required |
+| `PSCAT_MCP_OAUTH_SCOPES` | env, optional | scopes every token must carry, comma list |
+| `PSCAT_MCP_OAUTH_JWKS_URL` | env, optional | only if discovery (RFC 8414 / OpenID Connect) does not work for the provider |
+| `PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS`, `PSCAT_MCP_OAUTH_JWKS_TTL_SECS`, `PSCAT_MCP_OAUTH_JWKS_REFETCH_SECS`, `PSCAT_MCP_OAUTH_LEEWAY_SECS` | env, optional | defaults 5000, 600, 30, 60 |
+
+* **No secret is needed by the server for OAuth**: it only verifies
+  signatures with the provider's public keys. Client IDs and secrets, if
+  the provider has no Dynamic Client Registration, belong to the connector
+  configuration in ChatGPT or claude.ai, not to this service.
+* **New unauthenticated paths**, served only with `oauth` enabled:
+  `GET /.well-known/oauth-protected-resource` and
+  `GET /.well-known/oauth-protected-resource/<resource path>` (for
+  `.../mcp`: `/.well-known/oauth-protected-resource/mcp`). They return a
+  fixed JSON document from the settings above (CORS `*`), do no work, and
+  must reach the container: don't put them behind IAM or an ingress rule
+  that needs auth. `/health` and `/healthz` stay as before.
+* **Outbound HTTPS to the provider** is required: the server fetches the
+  provider's metadata and JWKS (cached, at most one fetch per
+  `PSCAT_MCP_OAUTH_JWKS_REFETCH_SECS`). With VPC egress set to all traffic
+  and no Cloud NAT, every JWT fails with `401` (`oauth: token rejected`,
+  `reason=jwks_unavailable`). Roots are compiled into the binary, so the
+  image's CA bundle does not matter. Static bearer tokens never need the
+  provider.
+* **Startup does not contact the provider**: an outage cannot crash-loop the
+  service; it only makes JWTs with keys not yet fetched fail.
+* **What is not done yet**: no ChatGPT or claude.ai connector has signed in
+  against a deployment. That acceptance check needs a chosen identity
+  provider and a staging deployment.
 
 ## Sizing
 
@@ -182,9 +224,12 @@ else isolates its system calls.
 
 Logs are JSON on stderr: one line per request with `request_id`, method,
 path, status, latency and, once an auth method has accepted the request,
-`auth_method` (`bearer`). A refused request also logs a warning with
-`reason` and `rejected_by`, and the startup lines name the enabled
-`auth_methods`. There is one line per render with source byte count,
+`auth_method` (`bearer` or `oauth`). A refused request also logs a warning
+with `reason` and `rejected_by`, and the startup lines name the enabled
+`auth_methods`. With `oauth`, a refused token also logs `oauth: token
+rejected` with a fixed `reason` (such as `expired`, `wrong_audience`,
+`not_allowed`, `jwks_unavailable`), and a failed JWKS fetch logs a warning;
+no subject, email or token is ever logged, and the principal is a hash. There is one line per render with source byte count,
 steps, elapsed ms, pages and failure flag. PostScript source and tokens are
 never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
 which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality

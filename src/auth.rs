@@ -43,9 +43,13 @@
 //! * [`NoAuth`] (`none`): accepts everything; constructed only for loopback
 //!   development (`--allow-unauthenticated`, see `http::authenticator`).
 //!
-//! `oauth` (an OAuth 2.1 resource server, issue #119) and the explicit
-//! `none` mode with guard rails (issue #120) plug in as further
-//! [`AuthMethod`]s; until then the configuration refuses to start with them.
+//! * [`crate::oauth::OauthAuth`] (`oauth`): an OAuth 2.1 resource server
+//!   validating JWT access tokens from an external authorization server
+//!   (issue #119); see [`crate::oauth`].
+//!
+//! The explicit `none` mode with guard rails (issue #120) plugs in as a
+//! further [`AuthMethod`]; until then the configuration refuses to start
+//! with it.
 //!
 //! # Rules for a method
 //!
@@ -61,21 +65,19 @@
 //! * [`AuthMethod::check`] returns a boxed future so a method can do I/O
 //!   (an OAuth method refreshing its cached JWKS); keep it bounded in time.
 //!
-//! # Adding OAuth (issue #119)
+//! # OAuth (issue #119)
 //!
-//! An `oauth` method validates the access token from
-//! `Authorization: Bearer …` (as a JWT against the authorization server's
-//! cached JWKS: issuer, audience = this server's canonical URI per RFC 8707,
-//! expiry, scope), answers [`Outcome::NotApplicable`] without a bearer
-//! token, and contributes
-//! `Challenge::new("Bearer").param("resource_metadata", "https://host/.well-known/oauth-protected-resource")`
-//! (plus `error="invalid_token"` when it rejected the token) from
-//! [`AuthMethod::challenges`]. Both `bearer` and `oauth` use the `Bearer`
-//! scheme, so the merged header is one challenge:
-//! `Bearer realm="pscat-mcp", resource_metadata="…"`. A user who signs in
-//! but is not allowed gets a new [`AuthError`] variant whose
-//! [`AuthError::status`] is `403`. The Protected Resource Metadata route
-//! (RFC 9728) is served by the HTTP layer, outside the authenticated `/mcp`.
+//! The `oauth` method validates the access token from
+//! `Authorization: Bearer …` as a JWT (see [`crate::oauth`]), answers
+//! [`Outcome::NotApplicable`] without an `Authorization` header, and
+//! contributes `Bearer realm="pscat-mcp", resource_metadata="…"` (plus
+//! `error="…"` naming its own rejection) from [`AuthMethod::challenges`].
+//! Both `bearer` and `oauth` use the `Bearer` scheme, so the merged header is
+//! one challenge. A user who signs in but is not allowed gets
+//! [`AuthError::NotAllowed`] (`403`), which outranks any `401`. The
+//! Protected Resource Metadata (RFC 9728) a method publishes
+//! ([`AuthMethod::resource_metadata`]) is served by the HTTP layer, outside
+//! the authenticated `/mcp`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -126,6 +128,12 @@ pub enum AuthError {
     /// A bearer token was presented but is not accepted.
     #[error("invalid bearer token")]
     InvalidToken,
+    /// A valid token whose user is not on the allowlist (`oauth`): `403`.
+    #[error("the signed-in user is not allowed to use this server")]
+    NotAllowed,
+    /// A valid token without every required scope (`oauth`): `403`.
+    #[error("the access token lacks a required scope")]
+    InsufficientScope,
 }
 
 impl AuthError {
@@ -135,17 +143,20 @@ impl AuthError {
             AuthError::Missing => "missing_credentials",
             AuthError::Malformed => "malformed_credentials",
             AuthError::InvalidToken => "invalid_token",
+            AuthError::NotAllowed => "not_allowed",
+            AuthError::InsufficientScope => "insufficient_scope",
         }
     }
 
-    /// The HTTP status of the answer: `401` for every error today. A method
-    /// that authenticates the caller but refuses them (an OAuth user not on
-    /// the allowlist) adds a variant answered with `403`.
+    /// The HTTP status of the answer: `401` when the caller is not
+    /// authenticated, `403` when they are but are refused (an OAuth user not
+    /// on the allowlist, or without a required scope).
     pub fn status(&self) -> StatusCode {
         match self {
             AuthError::Missing | AuthError::Malformed | AuthError::InvalidToken => {
                 StatusCode::UNAUTHORIZED
             }
+            AuthError::NotAllowed | AuthError::InsufficientScope => StatusCode::FORBIDDEN,
         }
     }
 }
@@ -253,6 +264,16 @@ impl Challenges {
     }
 }
 
+/// A Protected Resource Metadata document (RFC 9728) a method publishes, and
+/// the paths the HTTP layer serves it at, unauthenticated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceMetadata {
+    /// Absolute paths, e.g. `/.well-known/oauth-protected-resource/mcp`.
+    pub paths: Vec<String>,
+    /// The JSON document.
+    pub document: serde_json::Value,
+}
+
 /// One way of authenticating a request. See the module docs for the rules a
 /// method follows.
 pub trait AuthMethod: Send + Sync + 'static {
@@ -276,6 +297,12 @@ pub trait AuthMethod: Send + Sync + 'static {
     /// non-fallback method answered [`Outcome::NotApplicable`].
     fn is_fallback(&self) -> bool {
         false
+    }
+
+    /// The Protected Resource Metadata this method publishes, if any
+    /// (`oauth`).
+    fn resource_metadata(&self) -> Option<ResourceMetadata> {
+        None
     }
 
     /// Short description for startup logs (no secrets).
@@ -310,6 +337,12 @@ pub trait Authenticator: Send + Sync + 'static {
 
     /// Short description for startup logs (no secrets).
     fn describe(&self) -> String;
+
+    /// The Protected Resource Metadata to serve: the first enabled method's
+    /// that publishes one.
+    fn published_metadata(&self) -> Option<ResourceMetadata> {
+        None
+    }
 }
 
 /// Try `methods` in order; see the module docs.
@@ -405,6 +438,10 @@ impl Authenticator for AuthChain {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    fn published_metadata(&self) -> Option<ResourceMetadata> {
+        self.methods.iter().find_map(|m| m.resource_metadata())
+    }
 }
 
 impl<M: AuthMethod> Authenticator for M {
@@ -421,6 +458,10 @@ impl<M: AuthMethod> Authenticator for M {
 
     fn describe(&self) -> String {
         self.summary()
+    }
+
+    fn published_metadata(&self) -> Option<ResourceMetadata> {
+        AuthMethod::resource_metadata(self)
     }
 }
 
@@ -948,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn every_error_is_a_401_today() {
+    fn error_statuses() {
         for e in [
             AuthError::Missing,
             AuthError::Malformed,
@@ -956,5 +997,29 @@ mod tests {
         ] {
             assert_eq!(e.status(), StatusCode::UNAUTHORIZED);
         }
+        for e in [AuthError::NotAllowed, AuthError::InsufficientScope] {
+            assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    /// A 403 rejection outranks a 401 from an earlier method.
+    #[test]
+    fn a_403_outranks_a_401() {
+        struct Refuses;
+        impl AuthMethod for Refuses {
+            fn name(&self) -> &'static str {
+                "refuses"
+            }
+            fn check<'a>(&'a self, _: &'a http::request::Parts) -> AuthFuture<'a, Outcome> {
+                Box::pin(std::future::ready(Outcome::Rejected(AuthError::NotAllowed)))
+            }
+            fn summary(&self) -> String {
+                "refuses".into()
+            }
+        }
+        let c = chain(vec![Box::new(auth()), Box::new(Refuses)]);
+        let d = block_on(c.admit(&parts(Some("Bearer nope")))).unwrap_err();
+        assert_eq!(d.error, AuthError::NotAllowed);
+        assert_eq!(d.rejected_by, ["bearer", "refuses"]);
     }
 }

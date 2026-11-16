@@ -825,7 +825,8 @@ impl HttpConfig {
 pub enum AuthMethodKind {
     /// Static bearer tokens (`PSCAT_MCP_AUTH_TOKENS`, `PSCAT_MCP_AUTH_TOKEN_FILE`).
     Bearer,
-    /// OAuth 2.1 access tokens (issue #119; not implemented yet).
+    /// OAuth 2.1 access tokens from an external authorization server
+    /// (`PSCAT_MCP_OAUTH_*`, see [`crate::oauth`]).
     Oauth,
     /// No authentication, with guard rails (issue #120; not implemented yet).
     None,
@@ -856,11 +857,15 @@ impl AuthMethodKind {
 pub struct AuthConfig {
     /// Authentication methods accepted on `/mcp`, comma separated, tried in
     /// turn: a request passes if any accepts it. `bearer` (static tokens),
-    /// `oauth`, `none`; `oauth` and `none` are not implemented yet and refuse
-    /// to start. Unset: bearer tokens, or `--allow-unauthenticated` on a
-    /// loopback address, as before.
+    /// `oauth` (JWT access tokens, `PSCAT_MCP_OAUTH_*`), `none`; `none` is
+    /// not implemented yet and refuses to start. Unset: bearer tokens, or
+    /// `--allow-unauthenticated` on a loopback address, as before.
     #[arg(long = "auth", env = "PSCAT_MCP_AUTH", value_name = "METHODS")]
     pub auth: Option<String>,
+
+    /// Settings of the `oauth` method.
+    #[command(flatten)]
+    pub oauth: crate::oauth::OauthConfig,
 }
 
 impl AuthConfig {
@@ -1297,6 +1302,7 @@ mod tests {
     fn auth_methods_parse() {
         let cfg = |s: Option<&str>| AuthConfig {
             auth: s.map(str::to_string),
+            ..AuthConfig::default()
         };
         assert_eq!(cfg(None).methods(), Ok(None));
         assert_eq!(
