@@ -109,6 +109,32 @@ pub enum ErrorCode {
     ResultsBudgetExceeded,
 }
 
+impl ErrorCode {
+    /// The wire name, as `structuredContent.error.code` carries it. The log
+    /// fields `code` use the same strings, so a log line and a response
+    /// match.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::InvalidRequest => "invalid_request",
+            ErrorCode::SourceTooLarge => "source_too_large",
+            ErrorCode::UnsupportedFormat => "unsupported_format",
+            ErrorCode::InvalidDimensions => "invalid_dimensions",
+            ErrorCode::TooManyPixels => "too_many_pixels",
+            ErrorCode::PostscriptError => "postscript_error",
+            ErrorCode::LimitExceeded => "limit_exceeded",
+            ErrorCode::Timeout => "timeout",
+            ErrorCode::TooManyPages => "too_many_pages",
+            ErrorCode::OutputTooLarge => "output_too_large",
+            ErrorCode::ServerBusy => "server_busy",
+            ErrorCode::Cancelled => "cancelled",
+            ErrorCode::WorkerFailed => "worker_failed",
+            ErrorCode::UnknownJob => "unknown_job",
+            ErrorCode::JobNotFinished => "job_not_finished",
+            ErrorCode::ResultsBudgetExceeded => "results_budget_exceeded",
+        }
+    }
+}
+
 /// A structured failure. `message` is written for the person or agent that
 /// made the request.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -1071,7 +1097,7 @@ impl RenderService {
     ) -> Result<ValidatedRequest, RenderError> {
         checked.inspect_err(|e| {
             self.counters.rejected.fetch_add(1, Ordering::Relaxed);
-            tracing::info!(code = ?e.code, "request rejected before execution");
+            tracing::info!(code = e.code.as_str(), "request rejected before execution");
         })
     }
 
@@ -1084,12 +1110,20 @@ impl RenderService {
 
     /// A render slot, waiting at most the queue timeout.
     async fn slot(&self) -> Result<OwnedSemaphorePermit, RenderError> {
+        let waited = Instant::now();
         tokio::time::timeout(
             self.limits.queue_timeout(),
             self.slots.clone().acquire_owned(),
         )
         .await
         .map_err(|_| {
+            // The signal that the service needs more capacity. Only fixed
+            // fields: the wire code and the time waited.
+            tracing::warn!(
+                code = ErrorCode::ServerBusy.as_str(),
+                queue_wait_ms = waited.elapsed().as_millis() as u64,
+                "request refused: no render slot became free in time"
+            );
             RenderError::new(
                 ErrorCode::ServerBusy,
                 "all render slots are busy; try again shortly",
@@ -1122,19 +1156,36 @@ impl RenderService {
         drop(permit);
         match outcome {
             Ok(r) => {
+                // `code` and `limit` are the wire's `error.code` and
+                // `error.postscript.limit`, picked from a fixed vocabulary:
+                // nothing the program wrote (an error's name or command, a
+                // message) reaches the log.
+                let (code, limit) = match r.failure.as_ref() {
+                    Some(f) => {
+                        let (c, l) = failure_log_fields(f, r.ps_error.as_ref());
+                        (Some(c.as_str()), l)
+                    }
+                    None => (None, None),
+                };
                 tracing::info!(
                     source_bytes = source_len,
                     steps = r.steps_used,
                     elapsed_ms = r.elapsed_ms,
                     pages = r.page_count,
                     failed = r.failure.is_some(),
+                    code,
+                    limit,
                     "render finished"
                 );
                 Ok(r)
             }
             Err(BackendError::Timeout) => {
                 self.counters.timed_out.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(source_bytes = source_len, "render killed at the deadline");
+                tracing::warn!(
+                    source_bytes = source_len,
+                    code = ErrorCode::Timeout.as_str(),
+                    "render killed at the deadline"
+                );
                 Err(RenderError::new(
                     ErrorCode::Timeout,
                     format!(
@@ -1144,7 +1195,11 @@ impl RenderService {
                 ))
             }
             Err(e) => {
-                tracing::error!(error = %e, "render worker failed");
+                tracing::error!(
+                    error = %e,
+                    code = ErrorCode::WorkerFailed.as_str(),
+                    "render worker failed"
+                );
                 Err(RenderError::new(ErrorCode::WorkerFailed, e.to_string()))
             }
         }
@@ -1194,6 +1249,31 @@ impl Drop for FinishOnDrop {
 
 fn shutting_down() -> RenderError {
     RenderError::new(ErrorCode::ServerBusy, "the server is shutting down")
+}
+
+/// The error code and, for a limit hit, the limit (`steps`, `time`,
+/// `memory`) that [`failure_to_error`] gives a failure, for the log. The
+/// limit is one of a fixed set (`other` for a name outside it), never the
+/// worker's own string.
+fn failure_log_fields(
+    failure: &WorkerFailure,
+    ps_error: Option<&PsDiagnostic>,
+) -> (ErrorCode, Option<&'static str>) {
+    match failure {
+        WorkerFailure::PostScript => match ps_error.and_then(|d| d.limit.as_deref()) {
+            Some("steps") => (ErrorCode::LimitExceeded, Some("steps")),
+            Some("time") => (ErrorCode::LimitExceeded, Some("time")),
+            Some("memory") => (ErrorCode::LimitExceeded, Some("memory")),
+            Some(_) => (ErrorCode::LimitExceeded, Some("other")),
+            None => (ErrorCode::PostscriptError, None),
+        },
+        WorkerFailure::Generate(f) => (f.code.into(), None),
+        WorkerFailure::TooManyPages { .. } => (ErrorCode::TooManyPages, None),
+        WorkerFailure::OutputTooLarge { .. } => (ErrorCode::OutputTooLarge, None),
+        WorkerFailure::Encode { .. } | WorkerFailure::BadJob { .. } => {
+            (ErrorCode::WorkerFailed, None)
+        }
+    }
 }
 
 /// The error for a worker failure; `format` is the requested format, which
@@ -1294,6 +1374,111 @@ mod tests {
         RenderRequest {
             source: src.into(),
             ..RenderRequest::default()
+        }
+    }
+
+    #[test]
+    fn error_code_as_str_is_the_wire_name() {
+        for code in [
+            ErrorCode::InvalidRequest,
+            ErrorCode::SourceTooLarge,
+            ErrorCode::UnsupportedFormat,
+            ErrorCode::InvalidDimensions,
+            ErrorCode::TooManyPixels,
+            ErrorCode::PostscriptError,
+            ErrorCode::LimitExceeded,
+            ErrorCode::Timeout,
+            ErrorCode::TooManyPages,
+            ErrorCode::OutputTooLarge,
+            ErrorCode::ServerBusy,
+            ErrorCode::Cancelled,
+            ErrorCode::WorkerFailed,
+            ErrorCode::UnknownJob,
+            ErrorCode::JobNotFinished,
+            ErrorCode::ResultsBudgetExceeded,
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).unwrap(),
+                serde_json::Value::String(code.as_str().into())
+            );
+        }
+    }
+
+    #[test]
+    fn failure_log_fields_agree_with_the_wire_error() {
+        use crate::generate::{GenerateErrorCode, GenerateFailure};
+        let ps = |name: &str, limit: Option<&str>| PsDiagnostic {
+            name: name.into(),
+            limit: limit.map(Into::into),
+            report: "a program-controlled report".into(),
+        };
+        let cases: Vec<(WorkerFailure, Option<PsDiagnostic>, Option<&str>)> = vec![
+            (WorkerFailure::PostScript, Some(ps("undefined", None)), None),
+            (WorkerFailure::PostScript, None, None),
+            (
+                WorkerFailure::PostScript,
+                Some(ps("limitexceeded", Some("memory"))),
+                Some("memory"),
+            ),
+            (
+                WorkerFailure::PostScript,
+                Some(ps("limitexceeded", Some("steps"))),
+                Some("steps"),
+            ),
+            (
+                WorkerFailure::PostScript,
+                Some(ps("limitexceeded", Some("time"))),
+                Some("time"),
+            ),
+            (
+                WorkerFailure::PostScript,
+                Some(ps("limitexceeded", Some("a program-controlled name"))),
+                Some("other"),
+            ),
+            (WorkerFailure::TooManyPages { pages: 3, max: 2 }, None, None),
+            (
+                WorkerFailure::OutputTooLarge { bytes: 3, max: 2 },
+                None,
+                None,
+            ),
+            (
+                WorkerFailure::Encode {
+                    message: "x".into(),
+                },
+                None,
+                None,
+            ),
+            (
+                WorkerFailure::BadJob {
+                    message: "x".into(),
+                },
+                None,
+                None,
+            ),
+            (
+                WorkerFailure::Generate(GenerateFailure {
+                    code: GenerateErrorCode::InvalidRequest,
+                    detail: "config".into(),
+                    token: Some("a token".into()),
+                    message: "m".into(),
+                }),
+                None,
+                None,
+            ),
+        ];
+        for (failure, ps_error, limit) in cases {
+            let (code, got_limit) = failure_log_fields(&failure, ps_error.as_ref());
+            assert_eq!(got_limit, limit, "{failure:?}");
+            let mut result = WorkerResult::fail(failure.clone());
+            result.ps_error = ps_error;
+            let err = failure_to_error(failure, result, OutputFormat::Png, None);
+            assert_eq!(code, err.code);
+            // The limit the log names is the one the wire names (or the
+            // fixed `other` for a name outside the set).
+            if code == ErrorCode::LimitExceeded {
+                let wire = err.postscript.as_ref().and_then(|d| d.limit.as_deref());
+                assert!(got_limit == wire || got_limit == Some("other"), "{wire:?}");
+            }
         }
     }
 
