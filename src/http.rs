@@ -138,10 +138,20 @@ pub fn authenticator_with(
     http: &HttpConfig,
     auth: &AuthConfig,
 ) -> anyhow::Result<Arc<dyn Authenticator>> {
-    let Some(kinds) = auth
+    let kinds = auth
         .methods()
-        .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?
-    else {
+        .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+    if auth.oauth.is_configured()
+        && !kinds
+            .as_ref()
+            .is_some_and(|k| k.contains(&AuthMethodKind::Oauth))
+    {
+        tracing::warn!(
+            "PSCAT_MCP_OAUTH_* settings are given but `oauth` is not in PSCAT_MCP_AUTH; they are \
+             ignored"
+        );
+    }
+    let Some(kinds) = kinds else {
         return authenticator(http);
     };
     for kind in &kinds {
@@ -186,12 +196,6 @@ pub fn authenticator_with(
             }
             AuthMethodKind::None => unreachable!("refused above"),
         }
-    }
-    if !kinds.contains(&AuthMethodKind::Oauth) && auth.oauth.is_configured() {
-        tracing::warn!(
-            "PSCAT_MCP_OAUTH_* settings are given but `oauth` is not in PSCAT_MCP_AUTH; they are \
-             ignored"
-        );
     }
     if !kinds.contains(&AuthMethodKind::Bearer) && !tokens.is_empty() {
         tracing::warn!(
@@ -288,42 +292,49 @@ pub fn router_with_capture(
         .layer(middleware::from_fn(accept_json))
         .service(mcp);
 
-    let mut app = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
-        .route("/health", get(healthz));
-    // RFC 9728 Protected Resource Metadata, unauthenticated like the health
-    // paths; only when an enabled method (`oauth`) publishes one.
-    if let Some(meta) = auth_metadata {
+        .route("/health", get(healthz))
+        .merge(metadata_routes(auth_metadata))
+        .route_service("/mcp", mcp)
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(|req: &Request| {
+                            let request_id = req
+                                .headers()
+                                .get("x-request-id")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            // `auth_method` is recorded by `require_auth`
+                            // once a method accepts the request.
+                            tracing::info_span!(
+                                "http",
+                                method = %req.method(),
+                                path = %req.uri().path(),
+                                request_id = %request_id,
+                                auth_method = tracing::field::Empty,
+                            )
+                        })
+                        .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+                )
+                .layer(PropagateRequestIdLayer::x_request_id()),
+        )
+}
+
+/// RFC 9728 Protected Resource Metadata routes, unauthenticated like the
+/// health paths; empty unless an enabled method (`oauth`) publishes one.
+fn metadata_routes(meta: Option<crate::auth::ResourceMetadata>) -> Router {
+    let mut app = Router::new();
+    if let Some(meta) = meta {
         let doc = Arc::new(meta.document);
         for path in &meta.paths {
             app = app.route(path, get(resource_metadata).with_state(doc.clone()));
         }
     }
-    app.route_service("/mcp", mcp).layer(
-        ServiceBuilder::new()
-            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(|req: &Request| {
-                        let request_id = req
-                            .headers()
-                            .get("x-request-id")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
-                        // `auth_method` is recorded by `require_auth`
-                        // once a method accepts the request.
-                        tracing::info_span!(
-                            "http",
-                            method = %req.method(),
-                            path = %req.uri().path(),
-                            request_id = %request_id,
-                            auth_method = tracing::field::Empty,
-                        )
-                    })
-                    .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-            )
-            .layer(PropagateRequestIdLayer::x_request_id()),
-    )
+    app
 }
 
 /// Which of `application/json` and `text/event-stream` a request's `Accept`

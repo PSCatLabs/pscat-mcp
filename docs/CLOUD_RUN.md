@@ -48,7 +48,7 @@ This document lists what that deployment must get right for this image.
 
 | Setting | Why |
 |---|---|
-| `PSCAT_MCP_AUTH_TOKEN_FILE=/secrets/tokens` with a Secret Manager volume | the server refuses to start without a token; a file keeps it out of `env` listings |
+| `PSCAT_MCP_AUTH_TOKEN_FILE=/secrets/tokens` with a Secret Manager volume | required when `PSCAT_MCP_AUTH` is unset or lists `bearer`: the server then refuses to start without a token; a file keeps it out of `env` listings. An `oauth`-only deployment needs no token (see "OAuth" below) |
 | `PSCAT_MCP_ALLOWED_HOSTS=<service>.run.app,<custom domain>` | the default allows only loopback hosts, so every `/mcp` request would get 403 (the server logs a warning at startup). `*` is acceptable only when a load balancer already validates `Host` |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS=<the service's --cpu>` (for example `2` with `--cpu=2`) | the default is min(CPUs the process sees, 4), and on the first-generation environment (gVisor) that count can exceed what the service is granted: `--cpu=2` was observed to get 4 slots. Set it explicitly; see "Sizing" |
 | Cloud Run ingress / IAM | the bearer token (or OAuth, see below) is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth |

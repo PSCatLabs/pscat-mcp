@@ -862,12 +862,24 @@ impl OauthAuth {
 
     /// The key named `kid`, fetching the JWKS when the cache is stale or does
     /// not know `kid`, at most once per refetch interval. Bounded by the
-    /// timeout as a whole, waiting for another fetch included.
+    /// timeout as a whole, waiting for another fetch included; a request
+    /// holding a stale but known key never waits for another's refresh.
     async fn key(&self, kid: &str) -> Result<Arc<Jwk>, Reject> {
-        if let (Some(k), true) = self.cached(kid) {
-            return Ok(k);
+        let (found, fresh) = self.cached(kid);
+        if let (Some(k), true) = (&found, fresh) {
+            return Ok(k.clone());
         }
-        match tokio::time::timeout(self.timeout, self.key_slow(kid)).await {
+        let lookup = async {
+            let refresh = match (&found, self.refresh.try_lock()) {
+                (_, Ok(guard)) => guard,
+                // A key already held, only past its TTL: never wait for
+                // another request's refresh.
+                (Some(k), Err(_)) => return Ok(k.clone()),
+                (None, Err(_)) => self.refresh.lock().await,
+            };
+            self.refresh_for(refresh, kid).await
+        };
+        match tokio::time::timeout(self.timeout, lookup).await {
             Ok(r) => r,
             Err(_) => {
                 // Still usable if an older fetch knew it.
@@ -876,8 +888,13 @@ impl OauthAuth {
         }
     }
 
-    async fn key_slow(&self, kid: &str) -> Result<Arc<Jwk>, Reject> {
-        let mut refresh = self.refresh.lock().await;
+    /// With the refresh lock held: fetch the JWKS if allowed, then look up
+    /// `kid`.
+    async fn refresh_for(
+        &self,
+        mut refresh: tokio::sync::MutexGuard<'_, Refresh>,
+        kid: &str,
+    ) -> Result<Arc<Jwk>, Reject> {
         // Someone else may have fetched while this one waited.
         let (found, fresh) = self.cached(kid);
         if let (Some(k), true) = (&found, fresh) {

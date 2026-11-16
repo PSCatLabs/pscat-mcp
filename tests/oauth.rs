@@ -904,6 +904,87 @@ async fn a_hung_issuer_does_not_hang_requests() {
     assert_eq!(executed(&svc), 0);
 }
 
+/// Requests without a JWT never wait for a hung issuer, even when `oauth`
+/// is consulted first (`oauth,bearer`) or alone, while a JWT request is
+/// waiting on the issuer.
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_without_a_jwt_never_wait_through_oauth() {
+    let m = mock_as().await;
+    m.hang.store(true, Ordering::SeqCst);
+    let mut cfg = oauth_config(&m);
+    cfg.jwks_timeout_ms = 3000;
+    let first = Arc::new(serve(service(), authn("oauth,bearer", cfg.clone())).await);
+    let alone = serve(service(), authn("oauth", cfg)).await;
+    // A JWT request holds the (hung) fetch.
+    let waiting = {
+        let srv = first.clone();
+        let t = sign(Signer::Es256, "ec-1", &claims(&m.base, ALICE));
+        tokio::spawn(async move { post(&srv.url, &t, &initialize()).await.status })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for (what, url, auth, status) in [
+        (
+            "static token, oauth first",
+            &first.url,
+            Some(STATIC_TOKEN),
+            200,
+        ),
+        ("no header, oauth first", &first.url, None, 401),
+        ("garbage, oauth first", &first.url, Some("not-a-jwt"), 401),
+        ("no header, oauth alone", &alone.url, None, 401),
+        ("garbage, oauth alone", &alone.url, Some("x.y.z"), 401),
+    ] {
+        let t0 = Instant::now();
+        let header = auth.map(|a| format!("Bearer {a}"));
+        let seen = post_auth(url, header.as_deref(), &initialize()).await;
+        assert_eq!(seen.status, status, "{what}: {seen:?}");
+        assert!(
+            t0.elapsed() < Duration::from_millis(1000),
+            "{what} waited {:?}",
+            t0.elapsed()
+        );
+    }
+    assert_eq!(waiting.await.unwrap(), 401);
+}
+
+/// A known key past its TTL stays usable while the issuer hangs: one
+/// request waits for the refresh (and then uses the stale key), the others
+/// do not wait at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_key_is_used_without_waiting() {
+    let m = mock_as().await;
+    let mut cfg = oauth_config(&m);
+    cfg.jwks_timeout_ms = 1500;
+    cfg.jwks_ttl_secs = 0;
+    cfg.jwks_refetch_secs = 0;
+    let srv = Arc::new(serve(service(), authn("oauth", cfg)).await);
+    let t = sign(Signer::Es256, "ec-1", &claims(&m.base, ALICE));
+    assert_eq!(post(&srv.url, &t, &initialize()).await.status, 200);
+    m.hang.store(true, Ordering::SeqCst);
+    let refresher = {
+        let srv = srv.clone();
+        let t = t.clone();
+        tokio::spawn(async move {
+            let t0 = Instant::now();
+            (post(&srv.url, &t, &initialize()).await.status, t0.elapsed())
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let t0 = Instant::now();
+    assert_eq!(post(&srv.url, &t, &initialize()).await.status, 200);
+    assert!(
+        t0.elapsed() < Duration::from_millis(1000),
+        "waited {:?}",
+        t0.elapsed()
+    );
+    let (status, took) = refresher.await.unwrap();
+    assert_eq!(status, 200, "the refresher falls back to the stale key");
+    assert!(
+        took < Duration::from_millis(1500) + Duration::from_secs(3),
+        "{took:?}"
+    );
+}
+
 /// Unknown `kid`s cannot make the server hammer the issuer; a rotated-in key
 /// is picked up by the next allowed refetch.
 #[tokio::test(flavor = "multi_thread")]
