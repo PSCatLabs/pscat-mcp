@@ -156,6 +156,27 @@ impl Server {
     async fn post(&self, headers: &[(&str, &str)]) -> Seen {
         post(&self.url, headers).await
     }
+
+    /// The `reason` of every rejection logged so far, once at least `n`
+    /// are in. The server logs a rejection before it answers, but the
+    /// reader task may not have collected the line when the answer arrives,
+    /// so wait (bounded) for it.
+    async fn rejection_reasons(&self, n: usize) -> Vec<String> {
+        let mut reasons = Vec::new();
+        for _ in 0..100 {
+            reasons = self
+                .lines()
+                .iter()
+                .filter(|v| v["message"] == "rejected unauthenticated request")
+                .filter_map(|v| v["reason"].as_str().map(str::to_string))
+                .collect();
+            if reasons.len() >= n {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        reasons
+    }
 }
 
 /// Run the binary expecting a refusal; returns its stderr.
@@ -437,12 +458,12 @@ async fn the_cidr_allowlist_answers_403() {
     .await;
     assert_eq!(inside.post(&[]).await.status, 200);
     // The rejection logs a reason and no address.
-    let lines = outside.lines();
-    let rejected = lines
-        .iter()
+    assert_eq!(outside.rejection_reasons(1).await, ["source_not_allowed"]);
+    let rejected = outside
+        .lines()
+        .into_iter()
         .find(|v| v["message"] == "rejected unauthenticated request")
         .unwrap();
-    assert_eq!(rejected["reason"], "source_not_allowed");
     assert!(!rejected.to_string().contains("127.0.0.1"), "{rejected}");
     // With a bearer method beside it, a valid token needs no allowlisted
     // address; an anonymous request outside it is still 403.
@@ -489,12 +510,7 @@ async fn the_rate_limit_answers_429_with_retry_after() {
             let wait: u64 = seen.retry_after.as_deref().unwrap().parse().unwrap();
             assert!((1..=3600).contains(&wait), "{seen:?}");
         }
-        let lines = srv.lines();
-        let reasons: Vec<&str> = lines
-            .iter()
-            .filter(|v| v["message"] == "rejected unauthenticated request")
-            .filter_map(|v| v["reason"].as_str())
-            .collect();
+        let reasons = srv.rejection_reasons(4).await;
         assert_eq!(reasons, ["rate_limited"; 4]);
     }
 }
@@ -619,14 +635,31 @@ async fn a_forged_x_forwarded_for_changes_nothing() {
         let seen = proxied.post(&[("X-Forwarded-For", &h)]).await;
         assert_eq!(seen.status, 429, "{forged}: {seen:?}");
     }
-    // ...and naming the victim spends nothing of the victim's.
-    for _ in 0..3 {
-        let h = xff("198.51.100.4", "198.51.100.9");
-        let seen = proxied.post(&[("X-Forwarded-For", &h)]).await;
-        assert!(seen.status == 200 || seen.status == 429);
+    // ...and naming a victim spends nothing of the victim's: the attacker
+    // (real address .9) uses up its own budget while forging .20 on the left.
+    let attack = xff("198.51.100.20", "198.51.100.9");
+    for _ in 0..2 {
+        assert_eq!(
+            proxied.post(&[("X-Forwarded-For", &attack)]).await.status,
+            200
+        );
     }
-    let h = xff("198.51.100.9", "198.51.100.10");
-    assert_eq!(proxied.post(&[("X-Forwarded-For", &h)]).await.status, 200);
+    assert_eq!(
+        proxied.post(&[("X-Forwarded-For", &attack)]).await.status,
+        429
+    );
+    // The victim (real address .20) still has its whole budget.
+    let victim = xff("1.2.3.4", "198.51.100.20");
+    for _ in 0..2 {
+        assert_eq!(
+            proxied.post(&[("X-Forwarded-For", &victim)]).await.status,
+            200
+        );
+    }
+    assert_eq!(
+        proxied.post(&[("X-Forwarded-For", &victim)]).await.status,
+        429
+    );
 }
 
 /// Startup refuses what cannot work, with a message that names the setting.
