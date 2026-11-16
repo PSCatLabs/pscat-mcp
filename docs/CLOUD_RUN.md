@@ -181,7 +181,10 @@ else isolates its system calls.
 ## Logging and metrics
 
 Logs are JSON on stderr: one line per request with `request_id`, method,
-path, status and latency, and one line per render with source byte count,
+path, status, latency and, once an auth method has accepted the request,
+`auth_method` (`bearer`). A refused request also logs a warning with
+`reason` and `rejected_by`, and the startup lines name the enabled
+`auth_methods`. There is one line per render with source byte count,
 steps, elapsed ms, pages and failure flag. PostScript source and tokens are
 never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
 which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality

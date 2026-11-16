@@ -6,14 +6,16 @@
 //!   end reserves paths ending in `z` and answers 404 for `/healthz` from
 //!   outside the service; `/healthz` stays for the in-container probes.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
-//!   responses, behind the [`Authenticator`] (checked before rmcp sees the
-//!   request, so an unauthenticated request never reaches a tool), a
+//!   responses, behind the [`Authenticator`] (every enabled auth method,
+//!   checked before rmcp sees the request, so an unauthenticated request
+//!   never reaches a tool), a
 //!   request-body limit, and a small `Accept` fix-up for `POST` (see
 //!   [`accept_json`]).
 //!
 //! Every response carries an `x-request-id` (generated when the client sent
 //! none), and each request is traced in a span with method, path and
-//! request id. Query strings are never logged. (Capture mode, opt-in and
+//! request id, plus `auth_method` once an auth method has accepted it.
+//! Query strings and credentials are never logged. (Capture mode, opt-in and
 //! loopback-only, is the one exception for request bodies: see `capture.rs`.)
 
 use std::net::IpAddr;
@@ -36,9 +38,9 @@ use tower::ServiceBuilder;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
-use crate::auth::{AuthError, Authenticator, BearerTokenAuth, NoAuth};
+use crate::auth::{AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial, NoAuth};
 use crate::capture::{Capture, capture_layer};
-use crate::config::HttpConfig;
+use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
 use crate::mcp::PscatMcp;
 use crate::render::RenderService;
 
@@ -115,6 +117,78 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
         "serving /mcp WITHOUT authentication (loopback development mode)"
     );
     Ok(Arc::new(NoAuth))
+}
+
+/// Choose the authenticator for `http` and `auth`.
+///
+/// * `PSCAT_MCP_AUTH` / `--auth` unset: exactly [`authenticator`].
+/// * Set: an [`AuthChain`] of the listed methods, in order. An empty or
+///   unknown list is refused; so are `oauth` and `none` until they are
+///   implemented (issues #119 and #120). `bearer` needs at least one token.
+///   `--allow-unauthenticated` is still refused on a non-loopback bind, and
+///   is otherwise ignored (with a warning): the list says what is accepted.
+pub fn authenticator_with(
+    http: &HttpConfig,
+    auth: &AuthConfig,
+) -> anyhow::Result<Arc<dyn Authenticator>> {
+    let Some(kinds) = auth
+        .methods()
+        .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?
+    else {
+        return authenticator(http);
+    };
+    for kind in &kinds {
+        let issue = match kind {
+            AuthMethodKind::Bearer => continue,
+            AuthMethodKind::Oauth => "#119",
+            AuthMethodKind::None => "#120",
+        };
+        anyhow::bail!(
+            "refusing to start: auth method `{}` (PSCAT_MCP_AUTH / --auth) is not implemented yet \
+             (PSCatLabs/pscat-mcp{issue}); only `bearer` is available",
+            kind.as_str()
+        );
+    }
+    if http.allow_unauthenticated {
+        if !is_loopback(http.bind) {
+            anyhow::bail!(
+                "refusing to start: --allow-unauthenticated is only permitted on a loopback bind \
+                 address, but the server would listen on {}",
+                http.bind
+            );
+        }
+        tracing::warn!("PSCAT_MCP_AUTH is set; --allow-unauthenticated is ignored");
+    }
+    let tokens = http.load_tokens().context("reading the auth token file")?;
+    let mut methods: Vec<Box<dyn AuthMethod>> = Vec::with_capacity(kinds.len());
+    for kind in &kinds {
+        match kind {
+            AuthMethodKind::Bearer => {
+                if tokens.is_empty() {
+                    anyhow::bail!(
+                        "refusing to start: auth method `bearer` is enabled (PSCAT_MCP_AUTH / \
+                         --auth) but no bearer tokens are configured: set PSCAT_MCP_AUTH_TOKENS \
+                         or PSCAT_MCP_AUTH_TOKEN_FILE (or --auth-tokens / --auth-token-file)"
+                    );
+                }
+                methods.push(Box::new(BearerTokenAuth::new(tokens.iter())));
+            }
+            AuthMethodKind::Oauth | AuthMethodKind::None => {
+                unreachable!("refused above")
+            }
+        }
+    }
+    if !kinds.contains(&AuthMethodKind::Bearer) && !tokens.is_empty() {
+        tracing::warn!(
+            "bearer tokens are configured but `bearer` is not in PSCAT_MCP_AUTH; they are ignored"
+        );
+    }
+    let chain = AuthChain::new(methods);
+    tracing::info!(
+        auth_methods = %chain.methods().join(","),
+        "auth methods enabled (PSCAT_MCP_AUTH)"
+    );
+    Ok(Arc::new(chain))
 }
 
 /// rmcp Streamable HTTP settings for `http`: stateless, JSON responses, no
@@ -213,11 +287,14 @@ pub fn router_with_capture(
                                 .get("x-request-id")
                                 .and_then(|v| v.to_str().ok())
                                 .unwrap_or("");
+                            // `auth_method` is recorded by `require_auth`
+                            // once a method accepts the request.
                             tracing::info_span!(
                                 "http",
                                 method = %req.method(),
                                 path = %req.uri().path(),
                                 request_id = %request_id,
+                                auth_method = tracing::field::Empty,
                             )
                         })
                         .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
@@ -388,25 +465,35 @@ async fn healthz() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
 }
 
-/// Authenticate from the headers alone. An accepted request goes on with its
-/// body untouched. A rejected one never reaches the body limit, rmcp or a
-/// render; unless it declares more than [`DRAIN_MAX_BYTES`], its body is read
-/// and discarded first (at most [`DRAIN_MAX_TIME`]) so that a client still
-/// uploading gets the `401` rather than a connection reset (issue #30).
+/// Authenticate from the headers alone, by every enabled method in turn. An
+/// accepted request goes on with its body untouched, and the request span
+/// records `auth_method`. A rejected one never reaches the body limit, rmcp
+/// or a render; unless it declares more than [`DRAIN_MAX_BYTES`], its body is
+/// read and discarded first (at most [`DRAIN_MAX_TIME`]) so that a client
+/// still uploading gets the `401` rather than a connection reset (issue #30).
 async fn require_auth(
     State(auth): State<Arc<dyn Authenticator>>,
     req: Request,
     next: Next,
 ) -> Response {
     let (mut parts, body) = req.into_parts();
-    match auth.authenticate(&parts) {
+    match auth.admit(&parts).await {
         Ok(principal) => {
-            tracing::debug!(principal = %principal.id, "authenticated");
+            tracing::Span::current().record("auth_method", principal.method);
+            tracing::debug!(
+                principal = %principal.id,
+                auth_method = principal.method,
+                "authenticated"
+            );
             parts.extensions.insert(principal);
             next.run(Request::from_parts(parts, body)).await
         }
-        Err(err) => {
-            tracing::warn!(reason = err.code(), "rejected unauthenticated request");
+        Err(denial) => {
+            tracing::warn!(
+                reason = denial.error.code(),
+                rejected_by = %denial.rejected_by.join(","),
+                "rejected unauthenticated request"
+            );
             let declared = parts
                 .headers
                 .get(header::CONTENT_LENGTH)
@@ -415,18 +502,24 @@ async fn require_auth(
             if declared.is_none_or(|n| n <= DRAIN_MAX_BYTES) {
                 drain(body, 0).await;
             }
-            unauthorized(auth.as_ref(), &err)
+            denied(&denial)
         }
     }
 }
 
-fn unauthorized(auth: &dyn Authenticator, err: &AuthError) -> Response {
+/// The answer to a denied request: the error's status (`401` today), a JSON
+/// body with the error's code and message, and the merged challenge.
+fn denied(denial: &Denial) -> Response {
     let body = serde_json::json!({
-        "error": err.code(),
-        "message": err.to_string(),
+        "error": denial.error.code(),
+        "message": denial.error.to_string(),
     });
-    let mut resp = (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
-    if let Ok(v) = HeaderValue::from_str(&auth.challenge(err)) {
+    let mut resp = (denial.error.status(), axum::Json(body)).into_response();
+    if let Some(v) = denial
+        .challenge
+        .as_deref()
+        .and_then(|c| HeaderValue::from_str(c).ok())
+    {
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
     }
     resp
@@ -469,19 +562,21 @@ async fn shutdown_signal() {
 /// turn every running render into an error. Whatever is still running when
 /// the grace period ends is cancelled and the function returns.
 pub async fn serve(config: HttpConfig, service: Arc<RenderService>) -> anyhow::Result<()> {
-    serve_with_capture(config, service, None).await
+    serve_with_capture(config, &AuthConfig::default(), service, None).await
 }
 
-/// [`serve`] with capture mode on when `capture` is set.
+/// [`serve`] with the auth methods of `auth_config` (see
+/// [`authenticator_with`]) and capture mode on when `capture` is set.
 pub async fn serve_with_capture(
     config: HttpConfig,
+    auth_config: &AuthConfig,
     service: Arc<RenderService>,
     capture: Option<Arc<Capture>>,
 ) -> anyhow::Result<()> {
     if capture.is_some() {
         check_capture_bind(&config)?;
     }
-    let auth = authenticator(&config)?;
+    let auth = authenticator_with(&config, auth_config)?;
     let mcp_ct = CancellationToken::new();
     let jobs_service = service.clone();
     let app = router_with_capture(
@@ -498,6 +593,7 @@ pub async fn serve_with_capture(
     tracing::info!(
         %addr,
         auth = %auth.describe(),
+        auth_methods = %auth.methods().join(","),
         async_jobs = jobs_service.jobs().enabled(),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
