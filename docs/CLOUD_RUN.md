@@ -193,7 +193,7 @@ token is `401`, never anonymous.
 |---|---|
 | `PSCAT_MCP_AUTH` | `bearer,none` (or `none` with no token at all) |
 | `PSCAT_MCP_AUTH_NONE_UNTIL` | a near time, such as a week ahead (`2026-12-01T00:00:00Z`). Startup refuses a past time, and a running instance answers `403` after it |
-| `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` | see "The client address" below: `1` on the `run.app` URL (to be checked), `2` behind an external Application Load Balancer |
+| `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` | see "The client address" below: `1` on the `run.app` URL (measured, see below), `2` behind an external Application Load Balancer |
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
 | `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
@@ -224,11 +224,14 @@ Set it on Cloud Run.
   header as `X-Forwarded-For: [SUPPLIED_VALUE,] CLIENT_IP, LOAD_BALANCER_IP`,
   where `SUPPLIED_VALUE` is whatever the client sent. The client is the
   second entry from the right: **`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=2`**.
-* On the service's own `*.run.app` URL, Cloud Run's request-header contract
-  does not say what `X-Forwarded-For` holds. The expected form is the
-  client's own (possibly forged) entries followed by the address Google's
-  front end saw, so the client is the last entry:
-  **`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=1`**. This has not been verified here.
+  This is taken from Google's documented header format and was not measured.
+* On the service's own `*.run.app` URL, measured on Cloud Run gen1
+  (us-central1) on 2026-11-16 with no load balancer: the client is the last
+  entry, **`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS=1`**. At 1, a forged entry
+  neither let a caller in nor shut one out. At 2, a caller not on the
+  allowlist got `200` by sending a forged `X-Forwarded-For` naming an allowed
+  address, so 2 is spoofable on a direct URL: the extra hop reads an entry the
+  client wrote.
 
 **Check the hop count on staging before trusting it.** A value that is too
 high for the real chain lets a client's own entry stand for its address; a
