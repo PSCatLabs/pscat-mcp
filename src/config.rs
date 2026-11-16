@@ -820,6 +820,88 @@ impl HttpConfig {
     }
 }
 
+/// One way of authenticating `/mcp` requests, as named in `PSCAT_MCP_AUTH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethodKind {
+    /// Static bearer tokens (`PSCAT_MCP_AUTH_TOKENS`, `PSCAT_MCP_AUTH_TOKEN_FILE`).
+    Bearer,
+    /// OAuth 2.1 access tokens (issue #119; not implemented yet).
+    Oauth,
+    /// No authentication, with guard rails (issue #120; not implemented yet).
+    None,
+}
+
+impl AuthMethodKind {
+    /// Every method, in the order the docs list them.
+    pub const ALL: [AuthMethodKind; 3] = [
+        AuthMethodKind::Bearer,
+        AuthMethodKind::Oauth,
+        AuthMethodKind::None,
+    ];
+
+    /// The name used in `PSCAT_MCP_AUTH` and in logs (`auth_method`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMethodKind::Bearer => "bearer",
+            AuthMethodKind::Oauth => "oauth",
+            AuthMethodKind::None => "none",
+        }
+    }
+}
+
+/// Which authentication methods `serve-http` accepts. Kept apart from
+/// [`HttpConfig`] so that each method's own settings (an OAuth issuer, the
+/// no-auth mode's allowlist) can join it.
+#[derive(Debug, Clone, Default, Args)]
+pub struct AuthConfig {
+    /// Authentication methods accepted on `/mcp`, comma separated, tried in
+    /// turn: a request passes if any accepts it. `bearer` (static tokens),
+    /// `oauth`, `none`; `oauth` and `none` are not implemented yet and refuse
+    /// to start. Unset: bearer tokens, or `--allow-unauthenticated` on a
+    /// loopback address, as before.
+    #[arg(long = "auth", env = "PSCAT_MCP_AUTH", value_name = "METHODS")]
+    pub auth: Option<String>,
+}
+
+impl AuthConfig {
+    /// The configured methods in order, or `None` when `PSCAT_MCP_AUTH` /
+    /// `--auth` is unset. An empty list, an unknown name or a name listed
+    /// twice is an error. Names are matched case-insensitively; empty items
+    /// (`bearer,`) are skipped.
+    pub fn methods(&self) -> Result<Option<Vec<AuthMethodKind>>, String> {
+        let Some(list) = &self.auth else {
+            return Ok(None);
+        };
+        let known = AuthMethodKind::ALL.map(AuthMethodKind::as_str).join(", ");
+        let mut methods = Vec::new();
+        for item in list.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+            let Some(kind) = AuthMethodKind::ALL
+                .into_iter()
+                .find(|k| k.as_str().eq_ignore_ascii_case(item))
+            else {
+                return Err(format!(
+                    "unknown auth method {item:?} in PSCAT_MCP_AUTH / --auth; the methods are: \
+                     {known}"
+                ));
+            };
+            if methods.contains(&kind) {
+                return Err(format!(
+                    "auth method `{}` is listed twice in PSCAT_MCP_AUTH / --auth",
+                    kind.as_str()
+                ));
+            }
+            methods.push(kind);
+        }
+        if methods.is_empty() {
+            return Err(format!(
+                "PSCAT_MCP_AUTH / --auth lists no auth method; name at least one of {known}, \
+                 or unset it to use bearer tokens"
+            ));
+        }
+        Ok(Some(methods))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1209,5 +1291,38 @@ mod tests {
         // `file!()` is relative to the workspace, which is the test's cwd.
         let err = file.font_pack_dir().unwrap_err();
         assert!(err.contains("is not a directory"), "{err}");
+    }
+
+    #[test]
+    fn auth_methods_parse() {
+        let cfg = |s: Option<&str>| AuthConfig {
+            auth: s.map(str::to_string),
+        };
+        assert_eq!(cfg(None).methods(), Ok(None));
+        assert_eq!(
+            cfg(Some("bearer")).methods(),
+            Ok(Some(vec![AuthMethodKind::Bearer]))
+        );
+        assert_eq!(
+            cfg(Some(" Bearer , oauth,,none ,")).methods(),
+            Ok(Some(vec![
+                AuthMethodKind::Bearer,
+                AuthMethodKind::Oauth,
+                AuthMethodKind::None
+            ]))
+        );
+        assert_eq!(
+            cfg(Some("oauth,bearer")).methods(),
+            Ok(Some(vec![AuthMethodKind::Oauth, AuthMethodKind::Bearer]))
+        );
+        for empty in ["", " ", ",", " , ,"] {
+            let err = cfg(Some(empty)).methods().unwrap_err();
+            assert!(err.contains("lists no auth method"), "{empty:?}: {err}");
+        }
+        let err = cfg(Some("bearer,basic")).methods().unwrap_err();
+        assert!(err.contains("unknown auth method \"basic\""), "{err}");
+        assert!(err.contains("bearer, oauth, none"), "{err}");
+        let err = cfg(Some("bearer,BEARER")).methods().unwrap_err();
+        assert!(err.contains("listed twice"), "{err}");
     }
 }
