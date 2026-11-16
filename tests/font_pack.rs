@@ -269,6 +269,59 @@ async fn programs_cannot_read_the_pack_directory() {
     assert_eq!(r.program_output.trim(), "library loaded");
 }
 
+/// `filename status` (PSCat #1148) answers inside the read roots, which for
+/// this server are only the compiled-in `lib/`: the planted `lib/` does not
+/// shadow it, and every name outside is `false`, never an error, so `status`
+/// cannot tell a program what exists there.
+#[tokio::test]
+async fn status_sees_only_the_compiled_in_library() {
+    let pack = Scratch::with_pack("status");
+    let outside = Scratch::new("status-outside");
+    std::fs::write(outside.path().join("secret.txt"), "TOP-SECRET").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), pack.path().join("escape")).unwrap();
+    std::fs::create_dir_all(pack.path().join("lib")).unwrap();
+    let planted = "(PLANTED-LIBRARY) = quit\n";
+    std::fs::write(pack.path().join("lib/artkit.ps"), planted).unwrap();
+    let root = pack.path().display().to_string();
+    let status = |p: &str| {
+        format!(
+            "({p}) status {{ (found) = 4 array astore {{ = }} forall }} {{ (missing) = }} ifelse"
+        )
+    };
+
+    // Inside: the compiled-in copy, with no times, never the planted file.
+    let r = run(Some(pack.path()), &status("lib/artkit.ps")).await;
+    assert_eq!(error_name(&r), "", "{r:?}");
+    let lines: Vec<&str> = r.program_output.lines().collect();
+    assert_eq!(lines.first(), Some(&"found"), "{r:?}");
+    let fields: Vec<i64> = lines[1..].iter().map(|l| l.parse().unwrap()).collect();
+    assert_eq!(fields.len(), 4, "{r:?}");
+    assert!(
+        fields[1] > 10 * planted.len() as i64,
+        "the planted lib/artkit.ps answered: {fields:?}"
+    );
+    assert_eq!(&fields[2..], &[0, 0], "the embedded copy has no times");
+
+    // Outside: the pack directory by every route, a symlink out, `..`, a
+    // file that exists outside, and one that does not exist at all.
+    for name in [
+        format!("{root}/fonts/packs/cjk-thai/install.json"),
+        format!("{root}/lib/artkit.ps"),
+        format!("{root}/escape/secret.txt"),
+        format!("{root}/../{}/escape/secret.txt", pack.unique()),
+        format!("{}/secret.txt", outside.path().display()),
+        "fonts/packs/cjk-thai/install.json".to_string(),
+        "install.json".to_string(),
+        "../secret.txt".to_string(),
+        "lib/no-such-library.ps".to_string(),
+    ] {
+        let r = run(Some(pack.path()), &status(&name)).await;
+        assert_eq!(error_name(&r), "", "{name}: {r:?}");
+        assert_eq!(r.program_output.trim(), "missing", "{name}: {r:?}");
+    }
+}
+
 /// A fake worker reports its environment: with the pack directory set it
 /// gets `PSCAT_HOME` and nothing else; without, nothing of PSCat's but the
 /// checkout switch it always had. The server's own variables never pass.

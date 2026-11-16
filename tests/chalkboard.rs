@@ -406,6 +406,53 @@ async fn an_unsupported_command_is_a_postscript_error_naming_it() {
     client.cancel().await.ok();
 }
 
+/// A stray `$` is an unclosed math delimiter, as in LaTeX (PSCat #718); it
+/// used to be dropped without a word.
+#[tokio::test]
+async fn a_stray_dollar_is_an_unclosed_delimiter() {
+    let client = start(&[]).await;
+    for latex in ["x = 5$", "a $ b"] {
+        let r = call(&client, json!({"latex": latex})).await;
+        let s = assert_fails(&r, "postscript_error");
+        assert_eq!(
+            s["error"]["input"]["code"], "unclosed_math_delimiter",
+            "{latex}: {s}"
+        );
+        assert_eq!(s["error"]["input"]["token"], "$", "{latex}: {s}");
+    }
+    // A pair is still a formula.
+    let r = call(
+        &client,
+        json!({"latex": "$x = 5$", "width": 300, "height": 150, "dpi": 72}),
+    )
+    .await;
+    assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+    client.cancel().await.ok();
+}
+
+/// The board's check pass prints a `CKPROBLEM` line per TeX problem
+/// (PSCat #1167). They are internal: neither a failed board nor a good one
+/// shows them, in the text or in `structuredContent`.
+#[tokio::test]
+async fn the_check_pass_lines_never_reach_the_client() {
+    let client = start(&[]).await;
+    let r = call(&client, json!({"latex": r"\nosuchcommand{x} + \aleph + 1"})).await;
+    let s = assert_fails(&r, "postscript_error");
+    assert_eq!(s["error"]["input"]["code"], "unsupported_command", "{s}");
+    assert!(!s.to_string().contains("CKPROBLEM"), "{s}");
+    assert!(!text_of(&r).contains("CKPROBLEM"), "{}", text_of(&r));
+
+    let r = call(
+        &client,
+        json!({"latex": r"\frac{1}{2}", "width": 300, "height": 150, "dpi": 72}),
+    )
+    .await;
+    assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+    assert!(!structured(&r).to_string().contains("CKPROBLEM"));
+    assert!(!text_of(&r).contains("CKPROBLEM"));
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn a_bad_board_config_is_invalid_request() {
     let client = start(&[]).await;

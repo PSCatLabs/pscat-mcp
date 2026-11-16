@@ -30,9 +30,9 @@ it; it depends on PSCat's Rust library at a release tag:
 
 | | |
 |---|---|
-| Crate | `pscat` 0.7.0-rc.4 (`default-features = false`) |
-| Source | `https://github.com/PSCatLabs/pscat`, tag `v0.7.0-rc.4` |
-| Commit | `df39114f1223cf475c0c2350c47d7475274c72ee` (recorded in `Cargo.lock`) |
+| Crate | `pscat` 0.7.0-rc.5 (`default-features = false`) |
+| Source | `https://github.com/PSCatLabs/pscat`, tag `v0.7.0-rc.5` |
+| Commit | `cbbf8fed3002c4f865fab0992559c1db38bb7c7c` (recorded in `Cargo.lock`) |
 
 It is a git dependency because crates.io only has 0.6.3, which lacks the
 `Interp::set_limits` and `Interp::set_read_roots` APIs this server relies on.
@@ -630,6 +630,13 @@ control is enforced by PSCat and which by the server.
   only `structuredContent`, so it sees neither form.
 * **macOS has no address-space cap** on the worker; memory there is bounded
   by PSCat's allocator limit and the deadline.
+* **The memory limit is lower than PSCat's.** `PSCAT_MCP_MAX_MEMORY_BYTES`
+  defaults to 512 MiB, half the 1024 MiB of PSCat's own MCP preset, and
+  since PSCat 0.7.0-rc.5 `clip`, `shfill`, Type 1 fonts and the PDF writer
+  (to the limit plus 16 MiB) are held to it too. So a heavy clip (tens of
+  thousands of curves at a high dpi) or a large PDF can fail here with
+  `limit_exceeded` (`limit: memory`) where the plugin draws it; raising the
+  limit needs a larger instance (see `docs/CLOUD_RUN.md`).
 * **Worker network namespace.** The worker shares the host's or container's
   network namespace. PSCat cannot use it, but for public deployment add a
   kernel sandbox (gVisor, which Cloud Run provides, or seccomp).
