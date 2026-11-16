@@ -165,3 +165,12 @@ steps, elapsed ms, pages and failure flag. PostScript source and tokens are
 never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
 which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality
 stays low.
+
+The default log filter is `info,rmcp::service=warn`. rmcp logs a line at INFO
+on every session, "Service initialized as server", with a Debug dump of the
+client's `initialize` parameters (`clientInfo.name`, `version`, capabilities):
+client-chosen free text, which the logging contract above does not cover, so
+the default holds `rmcp::service` to WARN. `RUST_LOG` replaces the default
+completely; a value such as `RUST_LOG=info` or `rmcp=info` brings the line back
+and with it those client-supplied strings, so leave it unset in a deployment
+unless debugging.
