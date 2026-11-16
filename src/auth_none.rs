@@ -166,16 +166,23 @@ impl Cidr {
         let net: IpAddr = addr
             .parse()
             .map_err(|_| format!("{text:?} is not an IP address or CIDR"))?;
+        // An IPv4-mapped IPv6 network (`::ffff:a.b.c.d/N`, N >= 96) is the
+        // IPv4 network with a prefix 96 shorter.
+        let mapped = net.is_ipv6() && net.to_canonical().is_ipv4();
         let net = net.to_canonical();
-        let max = if net.is_ipv4() { 32 } else { 128 };
+        let (max, skip) = match (net.is_ipv4(), mapped) {
+            (false, _) => (128, 0),
+            (true, true) => (128, 96),
+            (true, false) => (32, 0),
+        };
         let prefix = match prefix {
             None => max,
             Some(p) => p
                 .parse::<u8>()
                 .ok()
-                .filter(|p| *p <= max)
-                .ok_or_else(|| format!("{text:?} has a prefix length outside 0..={max}"))?,
-        };
+                .filter(|p| *p <= max && *p >= skip)
+                .ok_or_else(|| format!("{text:?} has a prefix length outside {skip}..={max}"))?,
+        } - skip;
         Ok(Cidr {
             net: mask(net, prefix),
             prefix,
@@ -451,9 +458,10 @@ mod tests {
         }
         let mut parts = b.body(()).unwrap().into_parts().0;
         if let Some(p) = peer {
-            parts.extensions.insert(ConnectInfo(
-                format!("{p}:5555").parse::<SocketAddr>().unwrap(),
-            ));
+            parts.extensions.insert(ConnectInfo(SocketAddr::new(
+                p.parse::<IpAddr>().unwrap(),
+                5555,
+            )));
         }
         parts
     }

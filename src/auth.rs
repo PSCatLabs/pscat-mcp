@@ -942,7 +942,7 @@ mod tests {
         // Whatever the order, a fallback only admits a request that no
         // other method found a credential in.
         for fallback_first in [true, false] {
-            let fallback: Box<dyn AuthMethod> = Box::new(NoAuth);
+            let fallback: Box<dyn AuthMethod> = Box::new(NoAuth::default());
             let c = if fallback_first {
                 chain(vec![fallback, Box::new(auth())])
             } else {

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pscat_mcp::auth::{AuthChain, Authenticator, BearerTokenAuth, NoAuth};
+use pscat_mcp::auth::{AuthChain, BearerTokenAuth, NoAuth};
 use pscat_mcp::auth_none::{NoneAuthConfig, NoneGuard};
 use pscat_mcp::backend::SubprocessBackend;
 use pscat_mcp::config::{AuthConfig, HttpConfig, LimitsConfig};
@@ -205,7 +205,7 @@ async fn none_alone_admits_an_anonymous_request() {
         .body(
             json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": { "name": "eval_postscript", "arguments": { "source": "1 2 add ==" } }
+                "params": { "name": "render_postscript", "arguments": { "source": "0 0 moveto 10 10 lineto stroke", "width": 20, "height": 10 } }
             })
             .to_string(),
         )
@@ -394,16 +394,22 @@ async fn only_an_explicit_none_may_run_off_loopback() {
         none.describe()
     );
     // Unset, with the flag: refused off loopback, as before.
-    let e = authenticator_with(&off(true), &AuthConfig::default()).unwrap_err();
+    let e = authenticator_with(&off(true), &AuthConfig::default())
+        .err()
+        .unwrap();
     assert!(e.to_string().contains("loopback"), "{e}");
     // Unset, without it: refused for want of tokens.
-    let e = authenticator_with(&off(false), &AuthConfig::default()).unwrap_err();
+    let e = authenticator_with(&off(false), &AuthConfig::default())
+        .err()
+        .unwrap();
     assert!(e.to_string().contains("no auth tokens"), "{e}");
     // The flag does not make `none` more permissive.
-    let e = authenticator_with(&off(true), &list("none")).unwrap_err();
+    let e = authenticator_with(&off(true), &list("none")).err().unwrap();
     assert!(e.to_string().contains("loopback"), "{e}");
     // A list without `none` and without tokens: refused.
-    let e = authenticator_with(&off(false), &list("bearer")).unwrap_err();
+    let e = authenticator_with(&off(false), &list("bearer"))
+        .err()
+        .unwrap();
     assert!(e.to_string().contains("no bearer tokens"), "{e}");
 }
 
