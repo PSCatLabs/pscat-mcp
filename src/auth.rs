@@ -40,23 +40,23 @@
 //! * [`BearerTokenAuth`] (`bearer`): static bearer tokens from
 //!   configuration, stored only as SHA-256 digests and compared in constant
 //!   time.
-//! * [`NoAuth`] (`none`): accepts everything; constructed only for loopback
-//!   development (`--allow-unauthenticated`, see `http::authenticator`).
+//! * [`NoAuth`] (`none`): accepts a request that carries no credential, as
+//!   the principal `anonymous`. Plain, it is the loopback development mode
+//!   (`--allow-unauthenticated`, see `http::authenticator`). Guarded (see
+//!   [`crate::auth_none`]: an expiry, a source allowlist and a per-client
+//!   rate limit), it is the explicit `none` of `PSCAT_MCP_AUTH`, for
+//!   staging, and may run off loopback.
 //!
 //! * [`crate::oauth::OauthAuth`] (`oauth`): an OAuth 2.1 resource server
 //!   validating JWT access tokens from an external authorization server
 //!   (issue #119); see [`crate::oauth`].
-//!
-//! The explicit `none` mode with guard rails (issue #120) plugs in as a
-//! further [`AuthMethod`]; until then the configuration refuses to start
-//! with it.
 //!
 //! # Rules for a method
 //!
 //! * **Principal ids are disjoint across methods.** Job ownership and the
 //!   per-principal budgets compare only [`Principal::id`]. `bearer` keeps its
 //!   bare `token#N` ids (the token's position in the configured list); every
-//!   other method prefixes its ids with its name (`oauth:<subject>`), and
+//!   other method prefixes its ids with its name (`oauth:<hash>`), and
 //!   only the fallback uses `anonymous`.
 //! * **Never log or echo a credential**, in a [`Principal`], an
 //!   [`AuthError`] message, a challenge or [`AuthMethod::summary`].
@@ -82,6 +82,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::auth_none::NoneGuard;
 use http::StatusCode;
 use sha2::{Digest, Sha256};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
@@ -134,6 +135,21 @@ pub enum AuthError {
     /// A valid token without every required scope (`oauth`): `403`.
     #[error("the access token lacks a required scope")]
     InsufficientScope,
+    /// The no-auth mode refuses this source address (outside the allowlist,
+    /// or not determinable). `403`.
+    #[error("requests from this source are not allowed")]
+    SourceNotAllowed,
+    /// The no-auth mode's per-client rate limit is used up. `429`, with a
+    /// `Retry-After` of `retry_after_secs`.
+    #[error("rate limit exceeded; retry in {retry_after_secs} s")]
+    RateLimited {
+        /// Whole seconds until the client's window ends, at least 1.
+        retry_after_secs: u64,
+    },
+    /// The no-auth mode has passed its expiry (`PSCAT_MCP_AUTH_NONE_UNTIL`).
+    /// `403`.
+    #[error("unauthenticated access has expired; present a credential")]
+    AccessExpired,
 }
 
 impl AuthError {
@@ -145,18 +161,34 @@ impl AuthError {
             AuthError::InvalidToken => "invalid_token",
             AuthError::NotAllowed => "not_allowed",
             AuthError::InsufficientScope => "insufficient_scope",
+            AuthError::SourceNotAllowed => "source_not_allowed",
+            AuthError::RateLimited { .. } => "rate_limited",
+            AuthError::AccessExpired => "unauthenticated_access_expired",
         }
     }
 
-    /// The HTTP status of the answer: `401` when the caller is not
-    /// authenticated, `403` when they are but are refused (an OAuth user not
-    /// on the allowlist, or without a required scope).
+    /// The HTTP status of the answer: `401` for a missing or bad credential,
+    /// `403` for a caller the method refuses (an OAuth user not on the
+    /// allowlist or without a required scope; the no-auth mode's source
+    /// allowlist and expiry), `429` for a rate limit.
     pub fn status(&self) -> StatusCode {
         match self {
             AuthError::Missing | AuthError::Malformed | AuthError::InvalidToken => {
                 StatusCode::UNAUTHORIZED
             }
-            AuthError::NotAllowed | AuthError::InsufficientScope => StatusCode::FORBIDDEN,
+            AuthError::NotAllowed
+            | AuthError::InsufficientScope
+            | AuthError::SourceNotAllowed
+            | AuthError::AccessExpired => StatusCode::FORBIDDEN,
+            AuthError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+        }
+    }
+
+    /// The `Retry-After` of the answer, in seconds, when it has one.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            AuthError::RateLimited { retry_after_secs } => Some(*retry_after_secs),
+            _ => None,
         }
     }
 }
@@ -465,16 +497,31 @@ impl<M: AuthMethod> Authenticator for M {
     }
 }
 
-/// Accepts every request. Only for loopback development.
+/// Accepts a request that carries no credential, as `anonymous`.
+///
+/// [`NoAuth::default`] accepts everything (loopback development only);
+/// [`NoAuth::guarded`] checks the guard rails of [`crate::auth_none`] first.
+/// Either way it is a fallback: it is consulted only when no other method
+/// found a credential, so a bad token is never let in as anonymous.
 #[derive(Debug, Default)]
-pub struct NoAuth;
+pub struct NoAuth {
+    guard: Option<NoneGuard>,
+}
 
 impl NoAuth {
     /// The method name, logged as `auth_method`.
     pub const NAME: &'static str = "none";
 
-    /// Always the anonymous principal.
-    pub fn authenticate(&self, _parts: &http::request::Parts) -> Result<Principal, AuthError> {
+    /// The explicit no-auth mode, behind `guard`.
+    pub fn guarded(guard: NoneGuard) -> Self {
+        NoAuth { guard: Some(guard) }
+    }
+
+    /// The anonymous principal, unless the guard rails refuse the request.
+    pub fn authenticate(&self, parts: &http::request::Parts) -> Result<Principal, AuthError> {
+        if let Some(guard) = &self.guard {
+            guard.check(parts)?;
+        }
         Ok(Principal::anonymous())
     }
 }
@@ -497,7 +544,10 @@ impl AuthMethod for NoAuth {
     }
 
     fn summary(&self) -> String {
-        "none (unauthenticated, loopback only)".into()
+        match &self.guard {
+            Some(guard) => guard.summary(),
+            None => "none (unauthenticated, loopback only)".into(),
+        }
     }
 }
 
@@ -726,7 +776,7 @@ mod tests {
     #[test]
     fn no_auth_is_anonymous() {
         assert_eq!(
-            NoAuth.authenticate(&parts(None)).unwrap(),
+            NoAuth::default().authenticate(&parts(None)).unwrap(),
             Principal::anonymous()
         );
     }
@@ -932,7 +982,7 @@ mod tests {
         // Whatever the order, a fallback only admits a request that no
         // other method found a credential in.
         for fallback_first in [true, false] {
-            let fallback: Box<dyn AuthMethod> = Box::new(NoAuth);
+            let fallback: Box<dyn AuthMethod> = Box::new(NoAuth::default());
             let c = if fallback_first {
                 chain(vec![fallback, Box::new(auth())])
             } else {

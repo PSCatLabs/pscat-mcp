@@ -668,8 +668,11 @@ Known gaps:
   The `bearer` method checks
   `Authorization: Bearer <token>` against SHA-256 digests of configured
   tokens in constant time. Several methods can run side by side (see
-  [Auth methods](#auth-methods)). Unauthenticated mode exists for local development
-  and the server refuses to start with it on a non-loopback address.
+  [Auth methods](#auth-methods)). `--allow-unauthenticated` exists for local
+  development and the server refuses to start with it on a non-loopback
+  address. The explicit `none` method, for staging, is the only way to run
+  without a token off loopback, behind guard rails (see
+  [No-auth mode](#no-auth-mode-none)).
   `/healthz` and its alias `/health` are unauthenticated and do no work,
   as are, with `oauth` enabled, the Protected Resource Metadata paths
   (`/.well-known/oauth-protected-resource` and the same with the resource
@@ -730,8 +733,53 @@ Any single method is also an `Authenticator`, a chain of one. The request
 span records `auth_method`, the name of the method that accepted the
 request, and startup logs `auth_methods`.
 
-Until it is implemented, `none` (#120) refuses to start, as do an empty,
-unknown or repeated list.
+An empty, unknown or repeated list is refused at startup.
+
+#### No-auth mode (`none`)
+
+`none` is `auth::NoAuth`, the fallback method named `none` with the
+principal `anonymous`. Plain (`NoAuth::default()`), it admits everything:
+the loopback `--allow-unauthenticated` mode. With `PSCAT_MCP_AUTH=…,none` it
+is built as `NoAuth::guarded(NoneGuard)`; `auth_none` holds the guard rails
+and their settings (`NoneAuthConfig`, flattened into `config::AuthConfig`),
+and `http::authenticator_with` builds it. Nothing about it is on by default.
+
+`NoneGuard::check` runs for each request that reaches the fallback, which is
+one that no other method found a credential in, in this order:
+
+1. **Expiry** (`PSCAT_MCP_AUTH_NONE_UNTIL`): `AuthError::AccessExpired`
+   (`403`). Startup refuses a time that has passed; the time is also checked
+   per request, because an instance can outlive it. The clock is injectable
+   (`NoneGuard::with_clock`).
+2. **Source allowlist** (`PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS`):
+   `AuthError::SourceNotAllowed` (`403`), also for an address that cannot be
+   determined (fail closed). A refused source creates no limiter state.
+3. **Rate limit**: a fixed window per client address (IPv6 per `/64`, an
+   IPv4-mapped address as IPv4), `AuthError::RateLimited` (`429`), whose
+   `retry_after` the HTTP layer sends as `Retry-After`. The table holds at
+   most 100,000 clients; when it is full of live windows a new client is
+   limited until one expires. It lives in the process: with several
+   instances the limit is per instance.
+
+The statuses come from `AuthError::status()`, so a `none` that rejects while
+alone in the list never sends a bare `401` without a challenge.
+
+**Client address.** `http::serve_with_capture` serves with
+`into_make_service_with_connect_info`, so the guard reads the TCP peer from
+the request extensions. `X-Forwarded-For` is read only when
+`PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` is N > 0, and then only the N-th entry from
+the right of all the header lines taken as one list: each trusted proxy
+appends the address it saw, so entries to the left are the client's and are
+never used. Fewer than N entries, or an entry that is not an address
+(a port or brackets are tolerated), is an unknown source.
+
+**Async jobs.** All anonymous callers are one principal, so `none` and async
+jobs (which MCP Tasks need) are refused together at startup.
+
+**Logs.** A request `none` admits carries `auth_method=none`. A rejection logs
+its `reason` only. The client address is logged at DEBUG at most (so that an
+operator can check the hop count on staging), never at INFO, and nothing
+else is counted: there is no per-client label.
 
 ### OAuth resource server
 

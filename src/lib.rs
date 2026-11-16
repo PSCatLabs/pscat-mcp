@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 pub mod auth;
+pub mod auth_none;
 pub mod backend;
 pub mod build_info;
 pub mod capture;

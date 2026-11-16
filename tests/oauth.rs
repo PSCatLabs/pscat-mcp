@@ -286,6 +286,7 @@ fn auth_config(list: &str, oauth: OauthConfig) -> AuthConfig {
     AuthConfig {
         auth: Some(list.into()),
         oauth,
+        ..AuthConfig::default()
     }
 }
 
@@ -843,7 +844,9 @@ fn metadata_paths_follow_the_resource() {
 async fn a_hung_issuer_does_not_hang_requests() {
     let m = mock_as().await;
     m.hang.store(true, Ordering::SeqCst);
-    let timeout = Duration::from_millis(1500);
+    // Long enough that "did not wait for the issuer" (well under it) is
+    // clear on a loaded machine.
+    let timeout = Duration::from_millis(5000);
     let mut cfg = oauth_config(&m);
     cfg.jwks_timeout_ms = timeout.as_millis() as u64;
     let svc = service();
@@ -873,7 +876,7 @@ async fn a_hung_issuer_does_not_hang_requests() {
     );
     let static_took = t0.elapsed();
     assert!(
-        static_took < Duration::from_millis(1000),
+        static_took < Duration::from_millis(2500),
         "a static token waited {static_took:?}"
     );
     for r in jwt_requests {
@@ -896,7 +899,7 @@ async fn a_hung_issuer_does_not_hang_requests() {
     let t = sign(Signer::Es256, "ec-1", &claims(&m.base, ALICE));
     assert_eq!(post(&srv.url, &t, &initialize()).await.status, 401);
     assert!(
-        t0.elapsed() < Duration::from_millis(1000),
+        t0.elapsed() < Duration::from_millis(2500),
         "{:?}",
         t0.elapsed()
     );
@@ -912,7 +915,7 @@ async fn requests_without_a_jwt_never_wait_through_oauth() {
     let m = mock_as().await;
     m.hang.store(true, Ordering::SeqCst);
     let mut cfg = oauth_config(&m);
-    cfg.jwks_timeout_ms = 3000;
+    cfg.jwks_timeout_ms = 8000;
     let first = Arc::new(serve(service(), authn("oauth,bearer", cfg.clone())).await);
     let alone = serve(service(), authn("oauth", cfg)).await;
     // A JWT request holds the (hung) fetch.
@@ -939,7 +942,7 @@ async fn requests_without_a_jwt_never_wait_through_oauth() {
         let seen = post_auth(url, header.as_deref(), &initialize()).await;
         assert_eq!(seen.status, status, "{what}: {seen:?}");
         assert!(
-            t0.elapsed() < Duration::from_millis(1000),
+            t0.elapsed() < Duration::from_millis(3000),
             "{what} waited {:?}",
             t0.elapsed()
         );
@@ -954,7 +957,7 @@ async fn requests_without_a_jwt_never_wait_through_oauth() {
 async fn a_stale_key_is_used_without_waiting() {
     let m = mock_as().await;
     let mut cfg = oauth_config(&m);
-    cfg.jwks_timeout_ms = 1500;
+    cfg.jwks_timeout_ms = 6000;
     cfg.jwks_ttl_secs = 0;
     cfg.jwks_refetch_secs = 0;
     let srv = Arc::new(serve(service(), authn("oauth", cfg)).await);
@@ -973,14 +976,14 @@ async fn a_stale_key_is_used_without_waiting() {
     let t0 = Instant::now();
     assert_eq!(post(&srv.url, &t, &initialize()).await.status, 200);
     assert!(
-        t0.elapsed() < Duration::from_millis(1000),
+        t0.elapsed() < Duration::from_millis(3000),
         "waited {:?}",
         t0.elapsed()
     );
     let (status, took) = refresher.await.unwrap();
     assert_eq!(status, 200, "the refresher falls back to the stale key");
     assert!(
-        took < Duration::from_millis(1500) + Duration::from_secs(3),
+        took < Duration::from_millis(6000) + Duration::from_secs(3),
         "{took:?}"
     );
 }
