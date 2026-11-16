@@ -50,6 +50,7 @@ This document lists what that deployment must get right for this image.
 |---|---|
 | `PSCAT_MCP_AUTH_TOKEN_FILE=/secrets/tokens` with a Secret Manager volume | the server refuses to start without a token; a file keeps it out of `env` listings |
 | `PSCAT_MCP_ALLOWED_HOSTS=<service>.run.app,<custom domain>` | the default allows only loopback hosts, so every `/mcp` request would get 403 (the server logs a warning at startup). `*` is acceptable only when a load balancer already validates `Host` |
+| `PSCAT_MCP_MAX_CONCURRENT_RENDERS=<the service's --cpu>` (for example `2` with `--cpu=2`) | the default is min(CPUs the process sees, 4), and on the first-generation environment (gVisor) that count can exceed what the service is granted: `--cpu=2` was observed to get 4 slots. Set it explicitly; see "Sizing" |
 | Cloud Run ingress / IAM | the bearer token is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth |
 
 ## Sizing
@@ -61,7 +62,10 @@ This document lists what that deployment must get right for this image.
   checks are cheap, and extra renders queue for up to
   `PSCAT_MCP_QUEUE_TIMEOUT_MS`, then get `server_busy`.
 * **Memory.** About `max_concurrent_renders × (max_memory + 300 MiB)` plus
-  50 MiB for the server. With the defaults and 2 renders: 2 GiB. Lower
+  50 MiB for the server. With the defaults and 2 renders: about 1.6 GiB, so
+  2 GiB (`--memory=2Gi`). With 4 renders: about 3.2 GiB, more than that
+  instance has, so a burst of heavy renders could get it killed for running
+  out of memory. Lower
   `PSCAT_MCP_MAX_MEMORY_BYTES` for smaller instances. A `review_sheet` is one
   render slot and fits the same figure at the default sheet size: while a
   cell runs, its worker holds the cell's interpreter (as a render does: its
@@ -78,7 +82,15 @@ This document lists what that deployment must get right for this image.
   `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (128 MiB by default): job results
   waiting to be fetched live in the server process, not in a worker.
 * **CPU.** One vCPU per concurrent render. Rendering is CPU-bound and
-  single-threaded.
+  single-threaded. **Set `PSCAT_MCP_MAX_CONCURRENT_RENDERS` explicitly, equal
+  to the service's `--cpu`.** Unset, it defaults to min(CPUs the process
+  sees, 4). On the first-generation environment (gVisor, recommended below)
+  the process can see more CPUs than the service is granted: a staging
+  service with `--cpu=2 --memory=2Gi` reported `max_concurrent_renders: 4`
+  in `get_renderer_info`. That gives 4 slots on 2 vCPUs and, by the formula
+  above, needs about 4 × (512 MiB + 300 MiB) + 50 MiB = 3.2 GiB. Check
+  `get_renderer_info` after a deploy. The server does not read the cgroup
+  CPU quota.
 * **Request timeout.** The Cloud Run request timeout must be more than
   max(`PSCAT_MCP_RENDER_TIMEOUT_MS`, `PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) +
   `PSCAT_MCP_QUEUE_TIMEOUT_MS` (30 s by default: the sheet deadline

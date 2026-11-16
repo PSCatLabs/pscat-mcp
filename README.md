@@ -523,7 +523,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_MAX_PAGES` | 10 | pages per render |
 | `PSCAT_MCP_MAX_OUTPUT_BYTES` | 8388608 | inline output per render (PNG, PDF, and SVG as well) |
 | `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES` | 40960 (40 KiB, or the output limit if that is smaller) | SVG per render returned as text resources, all pages together; a larger SVG is returned as blob resources (base64), held to `PSCAT_MCP_MAX_OUTPUT_BYTES`. 0 returns every SVG as a blob. May not exceed `PSCAT_MCP_MAX_OUTPUT_BYTES` (the server refuses to start). The old name `PSCAT_MCP_MAX_SVG_BYTES` (`--max-svg-bytes`) is a deprecated alias: it works and logs a warning at startup, and setting both names refuses to start |
-| `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once |
+| `PSCAT_MCP_MAX_CONCURRENT_RENDERS` | min(CPUs, 4) | renders at once. On Cloud Run's first-generation environment (gVisor) the CPU count can exceed the service's `--cpu`, so set it explicitly, equal to `--cpu` (see [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md)) |
 | `PSCAT_MCP_QUEUE_TIMEOUT_MS` | 10000 | wait for a slot before `server_busy` |
 | `PSCAT_MCP_ASYNC_JOBS` | `false` | `serve-http` only: serve async jobs (`start_render` and companions). In memory: one always-on instance only (see [Long renders](#long-renders-async-jobs)); always on over stdio |
 | `PSCAT_MCP_TASKS` | `false` | also serve the MCP Tasks extension on top of the jobs (needs async jobs) |
