@@ -665,7 +665,7 @@ Known gaps:
   `Authorization: Bearer <token>` against SHA-256 digests of configured
   tokens in constant time. Unauthenticated mode exists for local development
   and the server refuses to start with it on a non-loopback address.
-  `/healthz` is unauthenticated and does no work.
+  `/healthz` and its alias `/health` are unauthenticated and do no work.
 * **DNS rebinding / browsers**: rmcp's `Host` allow-list (loopback by
   default; set `PSCAT_MCP_ALLOWED_HOSTS` for a deployment) and `Origin`
   validation.

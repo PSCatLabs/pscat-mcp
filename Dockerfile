@@ -17,9 +17,11 @@
 # builds that and publishes ghcr.io/pscatlabs/pscat-mcp. Locally, use
 # `docker buildx build --platform linux/amd64 .`.
 #
-# Health: GET /healthz (unauthenticated) returns 200 when the server is up.
-# There is no Docker HEALTHCHECK because the image has no shell or curl;
-# Cloud Run / Kubernetes should probe /healthz over HTTP instead.
+# Health: GET /healthz and GET /health (unauthenticated, same handler) return
+# 200 when the server is up. There is no Docker HEALTHCHECK because the image
+# has no shell or curl; Cloud Run / Kubernetes should probe /healthz over HTTP
+# instead. Use /health from outside Cloud Run, whose front end reserves paths
+# ending in z.
 
 ARG RUST_IMAGE=rust:1.96-slim-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot

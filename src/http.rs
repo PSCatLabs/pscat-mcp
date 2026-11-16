@@ -1,6 +1,10 @@
-//! HTTP transport: `/mcp` (Streamable HTTP, authenticated) and `/healthz`.
+//! HTTP transport: `/mcp` (Streamable HTTP, authenticated) and the health
+//! paths `/healthz` and `/health`.
 //!
-//! * `GET /healthz` — unauthenticated liveness probe; does no rendering.
+//! * `GET /healthz` and `GET /health` — the same unauthenticated liveness
+//!   handler; does no rendering. `/health` exists because Cloud Run's front
+//!   end reserves paths ending in `z` and answers 404 for `/healthz` from
+//!   outside the service; `/healthz` stays for the in-container probes.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
 //!   responses, behind the [`Authenticator`] (checked before rmcp sees the
 //!   request, so an unauthenticated request never reaches a tool), a
@@ -155,7 +159,7 @@ pub fn mcp_server_config(http: &HttpConfig, ct: CancellationToken) -> Streamable
     }
 }
 
-/// The application router: `/healthz` and authenticated `/mcp` over
+/// The application router: `/healthz`, `/health` and authenticated `/mcp` over
 /// `service`. Testable without binding a port. The request-body limit is
 /// derived from the service's input limits and also applied to rmcp's
 /// own limit (overriding `mcp_config.max_request_body_bytes`).
@@ -196,6 +200,7 @@ pub fn router_with_capture(
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/health", get(healthz))
         .route_service("/mcp", mcp)
         .layer(
             ServiceBuilder::new()
@@ -496,7 +501,7 @@ pub async fn serve_with_capture(
         async_jobs = jobs_service.jobs().enabled(),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
-        "listening; MCP endpoint at /mcp, health at /healthz"
+        "listening; MCP endpoint at /mcp, health at /healthz and /health"
     );
     if !is_loopback(config.bind)
         && !config.allowed_hosts.iter().any(|h| h.trim() == "*")
