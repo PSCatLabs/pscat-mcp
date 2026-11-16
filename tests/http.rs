@@ -284,6 +284,38 @@ async fn unauthenticated_requests_never_execute() {
     assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
 }
 
+/// `/health` is an alias of `/healthz` (Cloud Run's front end 404s paths
+/// ending in `z` from outside): same unauthenticated 200 and body, and
+/// `/mcp` still needs a token.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_alias_matches_healthz_without_a_token() {
+    let srv = start(real_service(LimitsConfig::default())).await;
+    let healthz = reqwest::get(format!("{}/healthz", srv.base)).await.unwrap();
+    assert_eq!(healthz.status(), 200);
+    let healthz_body = healthz.text().await.unwrap();
+
+    let resp = reqwest::get(format!("{}/health", srv.base)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.headers().contains_key("x-request-id"));
+    assert_eq!(resp.text().await.unwrap(), healthz_body);
+    assert_eq!(
+        serde_json::from_str::<Value>(&healthz_body).unwrap(),
+        json!({ "status": "ok" })
+    );
+
+    // Authentication on /mcp is unchanged.
+    let resp = reqwest::Client::new()
+        .post(srv.mcp())
+        .header("Content-Type", "application/json")
+        .header("Accept", ACCEPT)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rmcp_client_with_token_renders_png() {
     let srv = start(real_service(LimitsConfig::default())).await;

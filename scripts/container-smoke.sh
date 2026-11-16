@@ -5,7 +5,7 @@
 # capabilities, no-new-privileges, 1 GiB / 1 CPU / 64 PIDs), and drives it
 # over Streamable HTTP with curl:
 #
-#   * /healthz answers 200
+#   * /healthz and /health answer 200
 #   * POST /mcp without a token is refused with 401
 #   * MCP initialize (protocol 2025-06-18) + notifications/initialized
 #   * tools/call render_postscript -> PNG, decoded and checked (signature, 200x100)
@@ -258,6 +258,7 @@ else
 fi
 
 healthz() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/healthz" || true; }
+health() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$BASE/health" || true; }
 
 ready=0
 for _ in $(seq 1 60); do
@@ -269,6 +270,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 if [[ $ready == 1 ]]; then pass "/healthz returns 200"; else fail "/healthz never returned 200"; exit 1; fi
+if [[ "$(health)" == 200 ]]; then pass "/health returns 200"; else fail "/health did not return 200"; fi
 
 # ---------------------------------------------------------------------------
 # MCP over Streamable HTTP
