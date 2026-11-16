@@ -504,6 +504,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PORT` / `PSCAT_MCP_BIND` | `8080` / `127.0.0.1` | listen address (the image sets `0.0.0.0`) |
 | `PSCAT_MCP_AUTH_TOKENS` / `PSCAT_MCP_AUTH_TOKEN_FILE` | — | accepted bearer tokens (comma list / one per line) |
 | `PSCAT_MCP_ALLOW_UNAUTHENTICATED` | `false` | no auth; **refused unless bound to loopback** |
+| `PSCAT_MCP_AUTH` | unset | `--auth`: the auth methods accepted on `/mcp`, a comma list tried in turn (a request passes if any accepts it). Today only `bearer` (the tokens above); `oauth` and `none` are planned and refuse to start for now, as do an empty, unknown or repeated list. Unset: bearer tokens, or `PSCAT_MCP_ALLOW_UNAUTHENTICATED` on loopback, as before. When set, `PSCAT_MCP_ALLOW_UNAUTHENTICATED` is ignored (and still refused off loopback). See [Authentication](#authentication) |
 | `PSCAT_MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | `Host` allow-list (DNS-rebinding protection); set to your public hostname, or `*` behind a proxy that checks it |
 | `PSCAT_MCP_ALLOWED_ORIGINS` | empty (reject any `Origin`) | browser origins allowed |
 | `PSCAT_MCP_MAX_SOURCE_BYTES` | 262144 | largest program |
@@ -552,9 +553,32 @@ Tokens are stored as SHA-256 digests, compared in constant time, and never
 logged. Mount tokens as a file (`PSCAT_MCP_AUTH_TOKEN_FILE`) rather than
 passing them on the command line.
 
-OAuth (the MCP authorization spec) can replace the bearer check by
-implementing the `auth::Authenticator` trait and serving protected-resource
-metadata; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#adding-oauth-later).
+**Several methods side by side.** `PSCAT_MCP_AUTH` (`--auth`) lists the
+auth methods `/mcp` accepts, such as `bearer` or, once implemented,
+`bearer,oauth`. Each method is tried in turn and a request passes if any of
+them accepts it. A method that finds no credential of its kind passes the
+request on to the next one. The planned no-auth mode (`none`) is consulted
+only when no other method found a credential, so a wrong token is never
+let in as anonymous. A refused request gets `401` with a JSON body
+(`error`, `message`) and a `WWW-Authenticate` header that names every
+accepted scheme, for bearer tokens `Bearer realm="pscat-mcp"`. Startup
+refuses an empty or unknown list. Until they are implemented, it also
+refuses `oauth` (OAuth 2.1, issue #119) and `none` (issue #120). With
+`PSCAT_MCP_AUTH` unset, the server behaves as described above.
+
+**Log fields.** The startup lines carry `auth_methods`, the enabled methods
+(for example `bearer`). Each `/mcp` request's span carries `auth_method`, the
+method that accepted it (`bearer`, or `none` under
+`--allow-unauthenticated`), so the request's response line can be counted
+per method. A refused request logs `rejected unauthenticated request` with
+`reason` (`missing_credentials`, `malformed_credentials` or
+`invalid_token`) and `rejected_by`, the methods that rejected a credential
+(empty when none was presented). Credentials are never logged.
+
+OAuth (the MCP authorization spec) plugs in as another method, an
+`auth::AuthMethod`, beside the bearer tokens. The server will also serve
+protected-resource metadata. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#adding-oauth-later).
 
 ## Security model
 
@@ -727,6 +751,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
+| `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth`, `none`, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |

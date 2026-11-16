@@ -11,7 +11,7 @@ boundaries are, and where to extend it.
  MCP client
     │  Streamable HTTP (/mcp)            stdio
     ▼                                      ▼
- http.rs ── auth.rs (bearer) ──┐        mcp::serve_stdio
+ http.rs ── auth.rs (methods) ─┐        mcp::serve_stdio
     request id, tracing,       │           │
     body limit, Host/Origin    ▼           ▼
                          mcp.rs  (rmcp #[tool] handlers: translate args/results only;
@@ -403,7 +403,9 @@ because the list never changes while the process runs (and a restart loses
 every job). If tokens are ever reloaded at run time, the owner has to become
 stable per token, for example an HMAC of the token under a key generated at
 process start. Under `--allow-unauthenticated` (loopback only) every caller
-is `anonymous`, one shared owner. A lookup by any other owner is the same
+is `anonymous`, one shared owner. Other auth methods give ids prefixed
+with their name (`oauth:<subject>`), so ids never collide across methods
+(see [Security boundaries](#security-boundaries)). A lookup by any other owner is the same
 `unknown_job` (Tasks: rmcp's `invalid_params` "unknown task") as an unknown
 id. Ids are UUID v4.
 
@@ -661,9 +663,11 @@ Known gaps:
 ## Security boundaries
 
 * **Authentication** (`auth.rs`): every `/mcp` request passes an
-  `Authenticator` before rmcp sees it. The provided one checks
+  `Authenticator` before rmcp sees it, which reads only the request head.
+  The `bearer` method checks
   `Authorization: Bearer <token>` against SHA-256 digests of configured
-  tokens in constant time. Unauthenticated mode exists for local development
+  tokens in constant time. Several methods can run side by side (see
+  [Auth methods](#auth-methods)). Unauthenticated mode exists for local development
   and the server refuses to start with it on a non-loopback address.
   `/healthz` and its alias `/health` are unauthenticated and do no work.
 * **DNS rebinding / browsers**: rmcp's `Host` allow-list (loopback by
@@ -681,19 +685,69 @@ Known gaps:
   any request and nothing is stored between requests, except async jobs
   when `--async-jobs` turns them on (see [Async jobs](#async-jobs)).
 
+### Auth methods
+
+`PSCAT_MCP_AUTH` (`--auth`) lists the enabled methods in order, for example
+`bearer` or `bearer,oauth`. With it unset, the server behaves as before:
+bearer tokens, or `--allow-unauthenticated` on loopback. Each method
+implements `auth::AuthMethod` and answers one of three outcomes for a
+request:
+
+| Outcome | Meaning |
+|---|---|
+| `Accepted(Principal)` | a valid credential of this kind; the principal's id is the job owner |
+| `Rejected(AuthError)` | a credential this method handles, not valid (or not allowed) |
+| `NotApplicable` | no credential of this kind (for `bearer`: no `Authorization` header) |
+
+`auth::AuthChain` tries the methods in order, and the first that accepts
+admits the request. A *fallback* method (`AuthMethod::is_fallback`, meant
+for the no-auth mode) runs only when every other method answered
+`NotApplicable`. A token that was presented and rejected therefore stays
+rejected, and a valid token is never downgraded to the anonymous owner,
+whatever the order of the list. When nothing accepts, the reported error
+is the most severe rejection (a `403` over a `401`, then the first in
+order), or `missing_credentials`. The `WWW-Authenticate` header merges
+every method's challenges by scheme (`auth::Challenges`), so `bearer` and
+`oauth`, which both use the `Bearer` scheme, give one challenge:
+`Bearer realm="pscat-mcp", resource_metadata="…"`.
+
+The rules for a method:
+
+* Principal ids are disjoint across methods. `bearer` keeps its bare
+  `token#N`, other methods prefix their name (`oauth:<subject>`), and only
+  the fallback uses `anonymous`. Job ownership and the per-principal
+  budgets compare only the id.
+* A method never logs or echoes a credential, and it reads only the
+  request head, never the body.
+* `AuthMethod::check` returns a boxed future, so a method may do bounded
+  I/O, such as refreshing a cached JWKS.
+
+Any single method is also an `Authenticator`, a chain of one. The request
+span records `auth_method`, the name of the method that accepted the
+request, and startup logs `auth_methods`.
+
+Until they are implemented, `oauth` (#119) and `none` (#120) refuse to
+start, as do an empty, unknown or repeated list.
+
 ### Adding OAuth later
 
 The MCP authorization spec makes the server an OAuth 2.1 *resource
 server*. To add it:
 
-1. Implement `Authenticator` to validate access tokens (JWT signature and
-   `aud`/`iss`/`exp`, or token introspection) issued by an external
-   authorization server (e.g. Google Identity Platform, Auth0).
+1. Implement `AuthMethod` (named `oauth`) to validate access tokens (JWT
+   signature and `aud`/`iss`/`exp`, or token introspection) issued by an
+   external authorization server (e.g. Google Identity Platform, Auth0).
+   Without a bearer token it answers `NotApplicable`. A token it rejects
+   is `Rejected`, and `bearer` rejects that same token too, which is
+   harmless: either method may accept it.
 2. Serve `/.well-known/oauth-protected-resource` (RFC 9728) naming that
-   authorization server, and return `WWW-Authenticate: Bearer
-   resource_metadata="…"` on 401 so clients can discover it.
-3. Pass the authenticated principal to handlers through request extensions
-   if per-user quotas are needed.
+   authorization server, and add `resource_metadata="…"` (and
+   `error="invalid_token"` for its own rejection) to its `Bearer`
+   challenge from `AuthMethod::challenges`.
+3. A user who signs in but is not allowed gets an `AuthError` variant whose
+   `status()` is `403`.
+4. Add its settings to `config::AuthConfig` and build it in
+   `http::authenticator_with`.
 
 No user database or proprietary OAuth flow is needed in this repository.
 
@@ -711,4 +765,4 @@ No user database or proprietary OAuth flow is needed in this repository.
   returning a link. A storage provider (e.g. GCS with signed URLs) would sit
   between `RenderService` and `mcp.rs`, returning MCP `resource_link`
   content only for objects it actually stored.
-* **Authentication**: implement `auth::Authenticator`.
+* **Authentication**: implement `auth::AuthMethod` and list it in `PSCAT_MCP_AUTH` (see [Auth methods](#auth-methods)).

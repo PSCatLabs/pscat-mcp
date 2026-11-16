@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use pscat_mcp::capture::CaptureConfig;
-use pscat_mcp::config::{HttpConfig, JobsConfig, LimitsConfig, WorkerConfig};
+use pscat_mcp::config::{AuthConfig, HttpConfig, JobsConfig, LimitsConfig, WorkerConfig};
 use pscat_mcp::telemetry::{self, LogFormat};
 
 // PSCat's memory limit needs its counting allocator. Each render runs in its
@@ -32,6 +32,8 @@ enum Command {
     ServeHttp {
         #[command(flatten)]
         http: HttpConfig,
+        #[command(flatten)]
+        auth: AuthConfig,
         #[command(flatten)]
         limits: LimitsConfig,
         #[command(flatten)]
@@ -75,6 +77,7 @@ fn main() -> std::process::ExitCode {
         }
         Command::ServeHttp {
             http,
+            auth,
             limits,
             worker,
             jobs,
@@ -101,7 +104,7 @@ fn main() -> std::process::ExitCode {
                 }
                 None => None,
             };
-            pscat_mcp::http::serve_with_capture(http, service, capture).await
+            pscat_mcp::http::serve_with_capture(http, &auth, service, capture).await
         }),
         Command::ServeStdio {
             limits,
