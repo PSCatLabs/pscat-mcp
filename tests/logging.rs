@@ -10,6 +10,7 @@
 //! want of the line.
 
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -91,9 +92,16 @@ struct Server {
     child: tokio::process::Child,
     base: String,
     logs: tokio::task::JoinHandle<String>,
+    /// The stderr lines read so far, for a test that waits for one.
+    seen: Arc<Mutex<String>>,
 }
 
 async fn start_http(rust_log: Option<&str>) -> Server {
+    start_http_with(rust_log, &[]).await
+}
+
+/// `serve-http` on a free port with extra environment variables.
+async fn start_http_with(rust_log: Option<&str>, env: &[(&str, &str)]) -> Server {
     let mut cmd = tokio::process::Command::new(SERVER);
     cmd.args(["serve-http", "--bind", "127.0.0.1", "--port", "0"])
         .env("PSCAT_MCP_AUTH_TOKENS", TOKEN)
@@ -101,6 +109,9 @@ async fn start_http(rust_log: Option<&str>) -> Server {
         .env_remove("RUST_LOG")
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(v) = rust_log {
         cmd.env("RUST_LOG", v);
     }
@@ -118,10 +129,15 @@ async fn start_http(rust_log: Option<&str>) -> Server {
         }
     }
     assert!(!addr.is_empty(), "serve-http did not report an address");
+    let seen = Arc::new(Mutex::new(collected.clone()));
+    let shared = Arc::clone(&seen);
     let logs = tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             collected.push_str(&line);
             collected.push('\n');
+            let mut s = shared.lock().unwrap();
+            s.push_str(&line);
+            s.push('\n');
         }
         collected
     });
@@ -129,6 +145,7 @@ async fn start_http(rust_log: Option<&str>) -> Server {
         child,
         base: format!("http://{addr}/mcp"),
         logs,
+        seen,
     }
 }
 
@@ -197,4 +214,208 @@ async fn http_rust_log_overrides_the_default() {
     let err = http_stderr(Some("info,rmcp=info")).await;
     assert!(err.contains(LINE), "the line is not emitted at all: {err}");
     assert!(err.contains("peer_info"), "{err}");
+}
+
+// ------------------------------------------------- error codes in the logs
+//
+// pscat-cloud's monitoring counts failed renders by `code` (and `limit`) and
+// the queue timeouts by `code=server_busy`. The values are the wire codes,
+// from a fixed vocabulary: nothing the program wrote reaches a log line.
+
+/// Strings a program puts in its source, its names and its error command, and
+/// that must never appear in a log line.
+const SOURCE_MARKER: &str = "src-marker-5b1e";
+const NAME_MARKER: &str = "name-marker-77aa";
+const COMMAND_MARKER: &str = "cmd-marker-c0de";
+
+fn render_call(id: u64, source: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+        "name": "render_postscript",
+        "arguments": {"source": source, "width": 20, "height": 20},
+    }})
+}
+
+/// The JSON log lines of `logs` (others are skipped).
+fn json_lines(logs: &str) -> Vec<Value> {
+    logs.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
+/// Every line whose message is `message`. A line is one flat JSON object:
+/// `timestamp`, `level`, `message`, its fields, `target` and `span`.
+fn lines_with(logs: &str, message: &str) -> Vec<Value> {
+    json_lines(logs)
+        .into_iter()
+        .filter(|l| l["message"] == message)
+        .collect()
+}
+
+/// Call `render_postscript` and return the wire error code, if the call
+/// failed.
+async fn render_code(http: &reqwest::Client, base: &str, id: u64, source: &str) -> Option<String> {
+    let (status, body) = post(http, base, &render_call(id, source), Some("2025-06-18")).await;
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body)
+        .or_else(|_| {
+            // An SSE body: the last `data:` event.
+            let data = body
+                .lines()
+                .rev()
+                .find_map(|l| l.strip_prefix("data:"))
+                .unwrap_or("{}");
+            serde_json::from_str(data.trim())
+        })
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {body}"));
+    v["result"]["structuredContent"]["error"]["code"]
+        .as_str()
+        .map(str::to_string)
+}
+
+fn no_program_text(logs: &str) {
+    for marker in [SOURCE_MARKER, NAME_MARKER, COMMAND_MARKER, TOKEN] {
+        assert!(!logs.contains(marker), "{marker} in the logs: {logs}");
+    }
+}
+
+async fn stop(mut server: Server) -> String {
+    server.child.kill().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), server.logs)
+        .await
+        .expect("stderr closed")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_render_logs_its_error_code_and_limit() {
+    let server = start_http_with(
+        None,
+        &[
+            ("PSCAT_MCP_MAX_STEPS", "1000000"),
+            ("PSCAT_MCP_MAX_MEMORY_BYTES", "33554432"),
+        ],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    // The marker strings are in the program: as a string, as a name the
+    // program defines, and as the command the error names.
+    let prefix = format!("({SOURCE_MARKER}) pop /{NAME_MARKER} 1 def ");
+    let programs = [
+        (
+            "limit_exceeded",
+            format!("{prefix}[ 0 1 10000000 {{ }} for ]"),
+        ),
+        ("limit_exceeded", format!("{prefix}{{ }} loop")),
+        ("postscript_error", format!("{prefix}{COMMAND_MARKER}")),
+        ("postscript_error", format!("{prefix}nosuchop")),
+    ];
+    for (i, (want, src)) in programs.iter().enumerate() {
+        let got = render_code(&http, &server.base, i as u64 + 1, src).await;
+        assert_eq!(got.as_deref(), Some(*want), "program {i}");
+    }
+    // A render that succeeds.
+    assert_eq!(
+        render_code(&http, &server.base, 9, &format!("{prefix}showpage")).await,
+        None
+    );
+
+    let logs = stop(server).await;
+    let finished = lines_with(&logs, "render finished");
+    assert_eq!(finished.len(), 5, "{logs}");
+    let field = |i: usize, name: &str| finished[i][name].as_str().map(str::to_string);
+    let expect = [
+        (true, Some("limit_exceeded"), Some("memory")),
+        (true, Some("limit_exceeded"), Some("steps")),
+        (true, Some("postscript_error"), None),
+        (true, Some("postscript_error"), None),
+        (false, None, None),
+    ];
+    for (i, (failed, code, limit)) in expect.iter().enumerate() {
+        assert_eq!(finished[i]["failed"], *failed, "{}", finished[i]);
+        assert_eq!(field(i, "code").as_deref(), *code, "{}", finished[i]);
+        assert_eq!(field(i, "limit").as_deref(), *limit, "{}", finished[i]);
+    }
+    no_program_text(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interpreter_time_limit_logs_limit_time() {
+    let server = start_http_with(
+        None,
+        &[
+            ("PSCAT_MCP_MAX_STEPS", "0"),
+            ("PSCAT_MCP_INTERP_TIME_LIMIT_MS", "300"),
+        ],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let src = format!("({SOURCE_MARKER}) pop {{ }} loop");
+    let got = render_code(&http, &server.base, 1, &src).await;
+    assert_eq!(got.as_deref(), Some("limit_exceeded"));
+    let logs = stop(server).await;
+    let finished = lines_with(&logs, "render finished");
+    assert_eq!(finished.len(), 1, "{logs}");
+    assert_eq!(finished[0]["code"], "limit_exceeded", "{logs}");
+    assert_eq!(finished[0]["limit"], "time", "{logs}");
+    no_program_text(&logs);
+}
+
+/// The one slot is held by a program that never ends (no step or time limit,
+/// a 60 s deadline), so the second request waits out the queue timeout
+/// whatever the load; the test ends the first by killing the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queue_timeout_logs_server_busy_with_the_wait() {
+    const QUEUE_MS: u64 = 300;
+    let server = start_http_with(
+        None,
+        &[
+            ("PSCAT_MCP_MAX_CONCURRENT_RENDERS", "1"),
+            ("PSCAT_MCP_QUEUE_TIMEOUT_MS", &QUEUE_MS.to_string()),
+            ("PSCAT_MCP_RENDER_TIMEOUT_MS", "60000"),
+            ("PSCAT_MCP_INTERP_TIME_LIMIT_MS", "0"),
+            ("PSCAT_MCP_MAX_STEPS", "0"),
+        ],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let (base, h) = (server.base.clone(), http.clone());
+    let slow = tokio::spawn(async move {
+        render_code(&h, &base, 1, &format!("({SOURCE_MARKER}) pop {{ }} loop")).await
+    });
+    // The slow program holds the slot once its render has started.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !server.seen.lock().unwrap().contains("render started") {
+        assert!(std::time::Instant::now() < deadline, "no render started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let got = render_code(&http, &server.base, 2, &format!("({SOURCE_MARKER}) pop")).await;
+    assert_eq!(got.as_deref(), Some("server_busy"));
+    assert!(!slow.is_finished(), "the slow program ended by itself");
+    // Ends the slow render (the server kills its worker when the client
+    // goes) before the server is stopped.
+    slow.abort();
+
+    let logs = stop(server).await;
+    let busy: Vec<Value> = json_lines(&logs)
+        .into_iter()
+        .filter(|l| l["code"] == "server_busy")
+        .collect();
+    assert_eq!(busy.len(), 1, "{logs}");
+    let waited = busy[0]["queue_wait_ms"].as_u64().expect("queue_wait_ms");
+    // The timer never fires early; a loaded machine only makes it later.
+    assert!(
+        (QUEUE_MS..QUEUE_MS + 30_000).contains(&waited),
+        "queue_wait_ms {waited}"
+    );
+    assert_eq!(lines_with(&logs, "render started").len(), 1, "{logs}");
+    no_program_text(&logs);
 }
