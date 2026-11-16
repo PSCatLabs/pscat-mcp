@@ -190,6 +190,21 @@ never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
 which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality
 stays low.
 
+The failure and queue lines carry the wire error code (the response's
+`structuredContent.error.code`, snake_case), from a fixed vocabulary:
+
+| Line (`message`) | Fields |
+|---|---|
+| `render finished` | `failed` (bool); when `true`, also `code` (`postscript_error`, `limit_exceeded`, `too_many_pages`, `output_too_large`, `worker_failed`, or from a generator tool `invalid_request`, `too_many_pixels`, `invalid_dimensions`, `source_too_large` or `timeout`) and, for `limit_exceeded`, `limit` (`steps`, `time` or `memory`). Absent when `failed=false`. A limit hit (`limit_exceeded`, the sign that the sizing is wrong) is told from a PostScript error (`postscript_error`) by `code`. |
+| `render killed at the deadline` (WARN) | `code=timeout`: the wall-clock deadline killed the worker. |
+| `render worker failed` (ERROR) | `code=worker_failed`: the worker crashed or its output was unusable. |
+| `request refused: no render slot became free in time` (WARN) | `code=server_busy` and `queue_wait_ms`: one line per request that waited out `PSCAT_MCP_QUEUE_TIMEOUT_MS` for a render slot (the signal to add capacity). Other `server_busy` causes (async job caps, shutdown) are not logged here. |
+| `request rejected before execution` | `code`: the wire code (`invalid_request`, `source_too_large`, `too_many_pixels`, ...). |
+
+The code and limit are never taken from the program: a PostScript error's name
+or offending command, its message and any program output stay out of the
+logs.
+
 The default log filter is `info,rmcp::service=warn`. At INFO, rmcp logs a line
 per request, "Service initialized as server", with a Debug dump of the
 `initialize` parameters it holds for the peer. Over stdio those are the
