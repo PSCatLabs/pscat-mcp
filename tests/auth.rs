@@ -76,6 +76,7 @@ fn http_config() -> HttpConfig {
 fn auth_config(list: &str) -> AuthConfig {
     AuthConfig {
         auth: Some(list.into()),
+        ..AuthConfig::default()
     }
 }
 
@@ -407,8 +408,8 @@ fn server_command(bind: &str) -> std::process::Command {
 }
 
 /// Refused at startup, through the real binary: an empty, unknown or
-/// repeated list, the methods not implemented yet, and `bearer` without a
-/// token. None of them binds a port.
+/// repeated list, `oauth` (not implemented yet), and `bearer` without a
+/// token. (`none` is covered in `tests/auth_none.rs`.) None of them binds a port.
 #[test]
 fn startup_refuses_a_bad_auth_list() {
     for (list, tokens, expect) in [
@@ -421,16 +422,6 @@ fn startup_refuses_a_bad_auth_list() {
             "bearer,oauth",
             true,
             "`oauth` (PSCAT_MCP_AUTH / --auth) is not implemented yet",
-        ),
-        (
-            "none",
-            true,
-            "`none` (PSCAT_MCP_AUTH / --auth) is not implemented yet",
-        ),
-        (
-            "bearer,none",
-            true,
-            "`none` (PSCAT_MCP_AUTH / --auth) is not implemented yet",
         ),
         ("bogus", true, "unknown auth method \"bogus\""),
         (",", true, "lists no auth method"),

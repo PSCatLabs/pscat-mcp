@@ -161,7 +161,8 @@ How it behaves:
   process (and its jobs). With `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback
   only) and async jobs, every caller is `anonymous` and they all share one
   owner: any of them can see, fetch and cancel the others' jobs, and the
-  per-client cap is shared.
+  per-client cap is shared. (The explicit `none` auth mode, which can run off
+  loopback, refuses to start with async jobs for this reason.)
 * **Render slots.** A job holds one render slot while it runs, shared with
   synchronous calls. At most `PSCAT_MCP_MAX_RUNNING_JOBS` jobs run at once
   (half the slots by default, and always fewer than the slots, so a
@@ -504,7 +505,11 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PORT` / `PSCAT_MCP_BIND` | `8080` / `127.0.0.1` | listen address (the image sets `0.0.0.0`) |
 | `PSCAT_MCP_AUTH_TOKENS` / `PSCAT_MCP_AUTH_TOKEN_FILE` | — | accepted bearer tokens (comma list / one per line) |
 | `PSCAT_MCP_ALLOW_UNAUTHENTICATED` | `false` | no auth; **refused unless bound to loopback** |
-| `PSCAT_MCP_AUTH` | unset | `--auth`: the auth methods accepted on `/mcp`, a comma list tried in turn (a request passes if any accepts it). Today only `bearer` (the tokens above); `oauth` and `none` are planned and refuse to start for now, as do an empty, unknown or repeated list. Unset: bearer tokens, or `PSCAT_MCP_ALLOW_UNAUTHENTICATED` on loopback, as before. When set, `PSCAT_MCP_ALLOW_UNAUTHENTICATED` is ignored (and still refused off loopback). See [Authentication](#authentication) |
+| `PSCAT_MCP_AUTH` | unset | `--auth`: the auth methods accepted on `/mcp`, a comma list tried in turn (a request passes if any accepts it): `bearer` (the tokens above) and `none` (no authentication, **staging only**, with the guard rails below). `oauth` is planned and refuses to start for now, as do an empty, unknown or repeated list. Unset: bearer tokens, or `PSCAT_MCP_ALLOW_UNAUTHENTICATED` on loopback, as before; `none` is never on by default. When set, `PSCAT_MCP_ALLOW_UNAUTHENTICATED` is ignored (and still refused off loopback). See [Authentication](#authentication) |
+| `PSCAT_MCP_AUTH_NONE_UNTIL` | unset | with `none`: an RFC 3339 time (`2026-12-01T00:00:00Z`) after which anonymous requests get `403 unauthenticated_access_expired`; startup refuses a time that has passed |
+| `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | unset (any source) | with `none`: comma list of source CIDRs allowed to make anonymous requests (`203.0.113.0/24,2001:db8::/32`; a bare address is one host); others get `403 source_not_allowed` |
+| `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `PSCAT_MCP_AUTH_NONE_RATE_WINDOW_SECS` | 60 / 60 | with `none`: anonymous requests one client address may make per window (a fixed window; IPv6 clients per `/64`), before `429 rate_limited` with `Retry-After`. This is on top of the render concurrency cap, per server instance |
+| `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` | 0 | with `none`: trusted proxies in front of the server. 0: the client is the TCP peer, and `X-Forwarded-For` is ignored. N: the client is the N-th entry from the right of `X-Forwarded-For`; fewer entries, or one that is not an address, is an unknown source and refused. Cloud Run: see [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md) |
 | `PSCAT_MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` | `Host` allow-list (DNS-rebinding protection); set to your public hostname, or `*` behind a proxy that checks it |
 | `PSCAT_MCP_ALLOWED_ORIGINS` | empty (reject any `Origin`) | browser origins allowed |
 | `PSCAT_MCP_MAX_SOURCE_BYTES` | 262144 | largest program |
@@ -557,22 +562,72 @@ passing them on the command line.
 auth methods `/mcp` accepts, such as `bearer` or, once implemented,
 `bearer,oauth`. Each method is tried in turn and a request passes if any of
 them accepts it. A method that finds no credential of its kind passes the
-request on to the next one. The planned no-auth mode (`none`) is consulted
+request on to the next one. The no-auth mode (`none`) is consulted
 only when no other method found a credential, so a wrong token is never
 let in as anonymous. A refused request gets `401` with a JSON body
 (`error`, `message`) and a `WWW-Authenticate` header that names every
 accepted scheme, for bearer tokens `Bearer realm="pscat-mcp"`. Startup
-refuses an empty or unknown list. Until they are implemented, it also
-refuses `oauth` (OAuth 2.1, issue #119) and `none` (issue #120). With
-`PSCAT_MCP_AUTH` unset, the server behaves as described above.
+refuses an empty or unknown list. Until it is implemented, it also
+refuses `oauth` (OAuth 2.1, issue #119). With `PSCAT_MCP_AUTH` unset, the
+server behaves as described above.
+
+**No authentication, for staging (`none`).** `PSCAT_MCP_AUTH=none` (or
+`bearer,none`) lets a request that carries no credential in as the
+principal `anonymous`. It is never on by default, and the server logs a
+loud warning at startup. **It exposes render CPU time and quota to anyone
+who can reach the URL**, so use it only for a staging deployment.
+
+Why it exists: ChatGPT's custom MCP connector can't send a fixed
+`Authorization` header. It offers only OAuth or "No authentication". Until
+OAuth is in (issue #119), `none` is the stopgap for trying ChatGPT against a
+staging service. Claude, scripts and CI keep using bearer tokens beside it:
+`bearer,none` admits a valid token as the token's principal, a request with
+no `Authorization` header as anonymous, and a wrong or malformed token as
+`401`, never as anonymous.
+
+While `none` is on, every anonymous request is checked (a request with a
+bearer token never is) in this order:
+
+1. **Expiry**: with `PSCAT_MCP_AUTH_NONE_UNTIL`, startup refuses a time that
+   has passed, and a running server answers `403
+   unauthenticated_access_expired` once it does (a Cloud Run instance can
+   outlive it).
+2. **Source allowlist**: with `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS`, an address
+   outside it gets `403 source_not_allowed`.
+3. **Rate limit**: `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` requests per
+   `PSCAT_MCP_AUTH_NONE_RATE_WINDOW_SECS` per client address, then `429
+   rate_limited` with a `Retry-After`. The limit is kept per server
+   instance, so several instances multiply it. Every resource limit
+   (`PSCAT_MCP_MAX_*`, the render concurrency cap and its queue) applies
+   unchanged.
+
+The client address is **not** read blindly from `X-Forwarded-For`, which a
+client can set to anything. By default it is the TCP peer address and the
+header is ignored. Behind a proxy, set `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` to
+the number of proxies that append to the header; the address is then that
+entry counted from the right, and everything left of it, which the client
+controls, is never used. The server must then be reachable only through those
+proxies. Behind Google's front end, hops 0 would make every client one
+address (the front end's), so the limit and the allowlist would mean
+nothing: see [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#no-authentication-for-staging).
+
+Because every anonymous caller is the same principal, one could poll, fetch
+or cancel another's async job, so the server **refuses to start with `none`
+and async jobs** (`PSCAT_MCP_ASYNC_JOBS`; MCP Tasks need them too). Off
+loopback, `none` is the only way to run without a token:
+`--allow-unauthenticated` alone is still refused unless the bind address is
+loopback. Anonymous requests carry `auth_method=none` in the logs; a
+rejection logs only its `reason` (`source_not_allowed`, `rate_limited`,
+`unauthenticated_access_expired`), never a client address.
 
 **Log fields.** The startup lines carry `auth_methods`, the enabled methods
 (for example `bearer`). Each `/mcp` request's span carries `auth_method`, the
-method that accepted it (`bearer`, or `none` under
-`--allow-unauthenticated`), so the request's response line can be counted
-per method. A refused request logs `rejected unauthenticated request` with
-`reason` (`missing_credentials`, `malformed_credentials` or
-`invalid_token`) and `rejected_by`, the methods that rejected a credential
+method that accepted it (`bearer`, or `none`: under
+`--allow-unauthenticated` or the explicit `none` mode), so the request's
+response line can be counted per method. A refused request logs
+`rejected unauthenticated request` with `reason` (`missing_credentials`,
+`malformed_credentials`, `invalid_token`, or from `none`: `source_not_allowed`,
+`rate_limited`, `unauthenticated_access_expired`) and `rejected_by`, the methods that rejected a credential
 (empty when none was presented). Credentials are never logged.
 
 OAuth (the MCP authorization spec) plugs in as another method, an
@@ -758,7 +813,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
-| `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth`, `none`, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
+| `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth`, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
+| `tests/auth_none.rs` | the explicit no-auth mode and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an expired or invalid time, a bad CIDR, a zero limit, async jobs or Tasks with `none`); and, in-process with an injected clock, the refusal after the expiry of a running server |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |

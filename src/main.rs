@@ -26,6 +26,8 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once at startup; boxing the settings structs would only add noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Serve MCP over Streamable HTTP (remote use).
