@@ -674,8 +674,8 @@ Known gaps:
   (`--capture-file`), which records request bodies and tokens never, and is
   refused unless the bind address is loopback.
   The default filter holds rmcp's `rmcp::service` target to WARN, so its
-  INFO dump of the client's `initialize` parameters (client-chosen strings)
-  stays out of the logs; `RUST_LOG` replaces the default (`tests/logging.rs`).
+  INFO dump of the `initialize` parameters (over stdio, the client's own
+  strings) stays out of the logs; `RUST_LOG` replaces the default (`tests/logging.rs`).
 * **Statelessness**: Streamable HTTP runs without sessions
   (`legacy_session_mode = false`, JSON responses), so any instance can serve
   any request and nothing is stored between requests, except async jobs

@@ -166,11 +166,15 @@ never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
 which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality
 stays low.
 
-The default log filter is `info,rmcp::service=warn`. rmcp logs a line at INFO
-on every session, "Service initialized as server", with a Debug dump of the
-client's `initialize` parameters (`clientInfo.name`, `version`, capabilities):
-client-chosen free text, which the logging contract above does not cover, so
-the default holds `rmcp::service` to WARN. `RUST_LOG` replaces the default
-completely; a value such as `RUST_LOG=info` or `rmcp=info` brings the line back
-and with it those client-supplied strings, so leave it unset in a deployment
+The default log filter is `info,rmcp::service=warn`. At INFO, rmcp logs a line
+per request, "Service initialized as server", with a Debug dump of the
+`initialize` parameters it holds for the peer. Over stdio those are the
+client's own (`clientInfo.name`, `version`, capabilities): client-chosen free
+text, which the logging contract above does not cover. Over this stateless
+HTTP server rmcp 3.9 fills in defaults rather than the client's values, so the
+line is noise there, but the filter holds back the same line on both
+transports, and the same target's other INFO lines (a notification's or a
+cancellation's text, "serve finished"). `RUST_LOG` replaces the default
+completely: `RUST_LOG=info` or `rmcp=info` brings the line back, and with it
+any client-supplied strings it carries, so leave it unset in a deployment
 unless debugging.

@@ -177,9 +177,16 @@ async fn http_stderr(rust_log: Option<&str>) -> String {
         .unwrap()
 }
 
+// Over HTTP the server is stateless, and rmcp 3.9 builds the dumped
+// `peer_info` itself (the protocol version from the request, a default
+// `clientInfo`) instead of taking it from the client, so the marker is not in
+// that line. The line is still one per request, and with the override it is
+// there, so these two tests hold the same filter on the HTTP path.
+
 #[tokio::test]
-async fn http_default_filter_leaves_the_client_info_out() {
+async fn http_default_filter_leaves_the_handshake_line_out() {
     let err = http_stderr(None).await;
+    assert!(err.contains("listening"), "no server log at all: {err}");
     assert!(!err.contains(MARKER), "client string in the logs: {err}");
     assert!(!err.contains("peer_info"), "{err}");
     assert!(!err.contains(LINE), "{err}");
@@ -189,5 +196,5 @@ async fn http_default_filter_leaves_the_client_info_out() {
 async fn http_rust_log_overrides_the_default() {
     let err = http_stderr(Some("info,rmcp=info")).await;
     assert!(err.contains(LINE), "the line is not emitted at all: {err}");
-    assert!(err.contains(MARKER), "{err}");
+    assert!(err.contains("peer_info"), "{err}");
 }
