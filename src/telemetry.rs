@@ -13,9 +13,21 @@ pub enum LogFormat {
     Pretty,
 }
 
-/// Install the global subscriber. `RUST_LOG` overrides the default `info`.
+/// The filter used when `RUST_LOG` is unset: INFO, except that rmcp's
+/// `rmcp::service` target is held to WARN. At INFO it logs "Service
+/// initialized as server" with a Debug dump of the client's `initialize`
+/// parameters (`clientInfo`, capabilities), and the text of a client's
+/// notifications and cancellations: client-chosen strings that the logging
+/// contract does not cover. Its other INFO lines (a stream ended, a task
+/// cancelled, serve finished) carry nothing the request and render lines
+/// do not.
+pub const DEFAULT_FILTER: &str = "info,rmcp::service=warn";
+
+/// Install the global subscriber. `RUST_LOG`, when set, replaces
+/// [`DEFAULT_FILTER`] completely.
 pub fn init(format: LogFormat) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let registry = tracing_subscriber::registry().with(filter);
     let result = match format {
         LogFormat::Json => registry
