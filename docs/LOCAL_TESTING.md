@@ -1028,7 +1028,8 @@ The Cloud Storage backend (`PSCAT_MCP_ARTIFACT_LINKS=gcs`) is tested in CI
 against a local fake only (`tests/artifacts_gcs.rs`). This check runs it
 once against the real APIs, on the staging Cloud Run service, with the
 grants in [`CLOUD_RUN.md`](CLOUD_RUN.md#cloud-storage-artifact-links) in
-place. **It has not been run yet**; pscat-cloud fills in the record below.
+place. **Steps 1 to 5 were run on 2026-11-17** by pscat-cloud (record below);
+step 6, the ChatGPT check, cannot be run until OAuth exists.
 
 1. Deploy the revision under test with `PSCAT_MCP_ARTIFACT_LINKS=gcs`,
    `PSCAT_MCP_ARTIFACT_BUCKET` set to the staging bucket, and no
@@ -1048,19 +1049,29 @@ place. **It has not been run yet**; pscat-cloud fills in the record below.
    `artifact links failed` with `stage` `upload` and `status` `403` or
    `404`, and no URL or token in the service's logs.
 5. Search the service's logs for the run's window for
-   `X-Goog-Signature`, `storage.googleapis.com` and the render ids: expect
-   no match.
+   `X-Goog-Signature`, `X-Goog-Credential`, the bearer token and the render
+   ids: expect no match. (At `RUST_LOG=trace` the HTTP client's connection
+   pool names `storage.googleapis.com` as a host, never with a path or
+   query; that is expected.)
 6. In ChatGPT (the owner): a PNG and a large SVG rendered with
    `delivery: "url"` are shown or downloadable through the link.
 
-Record:
+Record (steps 1 to 5: pscat-cloud, a throwaway Cloud Run first-generation
+service in `us-central1` running the runtime service account with
+`PSCAT_MCP_AUTH=bearer`, `--cpu 2`, 2 GiB, prefix `renders/`, TTL 1800; the
+service is deleted):
 
 | Item | Result |
 |---|---|
-| Date, server revision (`get_renderer_info`), PSCat version | _to fill in_ |
-| Step 2: status, content type, disposition, bytes match (PNG, SVG) | _to fill in_ |
-| Step 2: upload latency per object, from the logs or a timer | _to fill in_ |
-| Step 3: altered signature, expired URL | _to fill in_ |
-| Step 4: fallback and WARN line | _to fill in_ |
-| Step 5: log search | _to fill in_ |
-| Step 6: ChatGPT, PNG and large SVG | _to fill in (owner)_ |
+| Date, server revision, PSCat version | 2026-11-17. pscat-mcp 0.1.0-rc.1 at `81ced24` (image digest `sha256:2d8019db889ec5ce4ab02ebe0e692ad8087afe158ef5c4f04e75b5ef22ead20c`), PSCat 0.7.0-rc.5 (`cbbf8fed3002`), Cloud Run gen1 (gVisor). |
+| Step 2: status, content type, disposition, bytes match | PNG, 1 page: 200, `image/png`, `inline; filename="pscat-1.png"`, 8425 B, equal to the inline bytes. SVG, 3 pages of about 1.01 MB (3.03 MB): 200, `image/svg+xml`, `pscat-1..3.svg`, all equal to inline. PDF, 3 pages: 200, `application/pdf`, `pscat-1.pdf`, 6062 B, equal. One `resource_link` per artifact, plus `download_url` and `expires_at` in `structuredContent`. Objects at `renders/<render_id>/<n>.<ext>`. |
+| Step 2: upload latency | The server does not log upload time (`render finished` has none). Timed by the client, warm, against inline: PNG about +200 ms (about 800 against 600 ms, each with about 0.4 s of local token fetch); the 3 MB SVG set 2.2 to 2.3 s by `url` against 2.5 to 3.5 s inline, faster because the response is smaller. |
+| Step 3: altered signature, expired URL | Altered `X-Goog-Signature`: 403 `SignatureDoesNotMatch`. Query removed: 403 `AccessDenied`. With TTL 60: worked until `expires_at`, 3 s later 400 `ExpiredToken`. Signed parameters: `X-Goog-Algorithm`, `Credential`, `Date`, `Expires`, `SignedHeaders`, `Signature` (V4). |
+| Step 4: fallback and WARN line | Revision with a missing bucket: `url` gave `isError` true, `storage_unavailable` ("Cloud Storage upload failed: status 404 ..."); `both` gave the inline image and a `delivery_note`; `auto` on a small PNG stayed inline with no upload attempt. One WARN each for `url` and `both`: `artifact links failed`, `code` `storage_unavailable`, `stage` `upload`, `status` 404. No URL or token in the logs. |
+| Step 5: log search | 359 entries over 4 revisions, one at `RUST_LOG=trace` (137 entries). No match for `X-Goog-Signature`, `X-Goog-Credential`, `Bearer`, the bearer token or any render id. `storage.googleapis.com`, the IAM and the metadata hosts appear only as host names in HTTP client connection-pool TRACE lines, never with a path or query. |
+| Bucket lifecycle (delete at age 1 day) | Test objects were left in place; pscat-cloud will confirm the deletion after 24 hours. |
+| Step 6: ChatGPT, PNG and large SVG | Not possible yet: `gcs` is refused with the `none` auth method, and ChatGPT connects only with no auth or OAuth. Waits for OAuth (owner decision). |
+
+A new `allUsers` invoker binding on Cloud Run takes about 30 to 60 s to take
+effect; until then Cloud Run's own HTML 401 can alternate with the server's
+answers. That is a platform delay, not a pscat-mcp problem.
