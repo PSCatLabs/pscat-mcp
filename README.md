@@ -556,6 +556,10 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 
 ## Authentication
 
+Which methods to run for which MCP client (ChatGPT, Claude, Codex and
+others) is discussed in [`docs/AUTH_STRATEGY.md`](docs/AUTH_STRATEGY.md), a
+proposal awaiting approval.
+
 With `PSCAT_MCP_AUTH` unset (or listing `bearer`), the HTTP server will
 not start without at least one bearer token, unless
 `PSCAT_MCP_ALLOW_UNAUTHENTICATED=true` is set **and** the bind address is
