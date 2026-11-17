@@ -250,6 +250,7 @@ token is `401`, never anonymous.
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
 | `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
+| `PSCAT_MCP_ARTIFACT_LINKS` | `off` (or unset): the server refuses to start with `none` and `memory` links (one anonymous client could fill the results budget the links share with authenticated clients) |
 
 **After the window closes.** Cloud Run scales to zero, so an expired
 `PSCAT_MCP_AUTH_NONE_UNTIL` left in the configuration meets every cold start

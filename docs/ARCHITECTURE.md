@@ -515,12 +515,13 @@ unknown one are one JSON-RPC "resource not found" whose message does not
 repeat the URI. Render URIs are not listed by `resources/list`.
 
 Its limits are the async jobs': one process, lost on restart, invisible to
-other instances. Under the `none` auth method (and
-`--allow-unauthenticated`) every caller is the one principal `anonymous`:
-they share one quota, and any of them can read any link. Unlike async jobs,
-links are not refused with `none`: the quota and the shared budget bound
-what anonymous callers can hold, and an operator who turns on both accepts a
-shared space. Over stdio there is one principal, the local user.
+other instances. Like async jobs, memory links are refused at startup with
+the `none` auth method (`http::check_none_with_artifact_links`): every
+anonymous caller is the one principal `anonymous`, so one could fill the
+results budget the links share with authenticated clients, and read the
+others' links. (A Cloud Storage backend under `none` is for #140.) Under
+`--allow-unauthenticated` (loopback only) they start, and every caller shares
+the one `anonymous` quota. Over stdio there is one principal, the local user.
 
 **Async jobs and Tasks.** `start_render` resolves `delivery` like the other
 tools (a refusal comes before a job is accepted) and records it on the job
@@ -877,7 +878,9 @@ never used. Fewer than N entries, or an entry that is not an address
 (a port or brackets are tolerated), is an unknown source.
 
 **Async jobs.** All anonymous callers are one principal, so `none` and async
-jobs (which MCP Tasks need) are refused together at startup.
+jobs (which MCP Tasks need) are refused together at startup, and so are
+`none` and in-memory artifact links (`PSCAT_MCP_ARTIFACT_LINKS=memory`),
+which share the results budget with every client.
 
 **Logs.** A request `none` admits carries `auth_method=none`. A rejection logs
 its `reason` only. The client address is logged at DEBUG at most (so that an

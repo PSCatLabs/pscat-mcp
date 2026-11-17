@@ -241,6 +241,11 @@ async fn without_a_store_url_and_both_are_refused() {
             let err = &r["structuredContent"]["error"];
             assert_eq!(err["code"], "invalid_request", "{tool} {d}: {r}");
             assert_eq!(err["input"]["code"], "delivery", "{tool} {d}: {r}");
+            if d != "link" {
+                let msg = err["message"].as_str().unwrap();
+                assert!(msg.contains("retry with delivery: \"inline\""), "{msg}");
+                assert!(text_of(&r).contains("retry with delivery: \"inline\""));
+            }
             assert!(blocks_of(&r, "image").is_empty());
         }
     }

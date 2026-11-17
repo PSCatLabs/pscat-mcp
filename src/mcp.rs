@@ -1159,7 +1159,8 @@ impl PscatMcp {
         match (d, self.service.artifacts()) {
             (Delivery::Url | Delivery::Both, None) => Err(delivery_error(format!(
                 "delivery {} needs links, and this server keeps no artifacts \
-                 (PSCAT_MCP_ARTIFACT_LINKS is off); use delivery inline",
+                 (PSCAT_MCP_ARTIFACT_LINKS is off); retry with delivery: \"inline\" (or \
+                 without delivery) to get the output in the result",
                 d.as_str()
             ))),
             (Delivery::Auto, None) => Ok(Delivery::Inline),
@@ -1199,8 +1200,8 @@ impl PscatMcp {
     ) -> Result<StoredRender, RenderError> {
         let Some(store) = self.service.artifacts() else {
             return Err(delivery_error(
-                "this server keeps no artifacts (PSCAT_MCP_ARTIFACT_LINKS is off); use delivery \
-                 inline"
+                "this server keeps no artifacts (PSCAT_MCP_ARTIFACT_LINKS is off); retry with \
+                 delivery: \"inline\""
                     .into(),
             ));
         };

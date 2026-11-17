@@ -673,7 +673,8 @@ pub struct ArtifactConfig {
     /// Where `delivery` `url` and `both` keep the output: `off` (no links:
     /// those values are refused), `memory` (this process's memory, read with
     /// `resources/read` of `pscat://render/<render_id>/<n>`; one instance
-    /// only, lost on restart) or `gcs` (Cloud Storage signed URLs: not
+    /// only, lost on restart; refused with the `none` auth method) or `gcs`
+    /// (Cloud Storage signed URLs: not
     /// implemented yet, so the server refuses to start with it).
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINKS", value_enum, default_value_t = LinksBackend::Off)]
     pub artifact_links: LinksBackend,
@@ -694,9 +695,9 @@ pub struct ArtifactConfig {
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_URL_TTL_SECS", default_value_t = 1800)]
     pub artifact_url_ttl_secs: u64,
 
-    /// Bytes one principal may have stored at once (memory backend). Every
-    /// caller under the `none` auth method is the one principal
-    /// `anonymous`, so they share it. Must hold one largest output
+    /// Bytes one principal may have stored at once (memory backend; refused
+    /// with the `none` auth method, whose callers would all share one
+    /// principal). Must hold one largest output
     /// (`--max-output-bytes`, plus 1 KiB) and be at most
     /// `--job-results-budget-bytes`, which bounds every principal together.
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_QUOTA_BYTES", default_value_t = DEFAULT_ARTIFACT_QUOTA_BYTES)]
