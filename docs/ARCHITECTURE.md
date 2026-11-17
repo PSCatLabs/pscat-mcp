@@ -469,8 +469,9 @@ in the handler before the render; an unknown value, or `url`/`both` with no
 store, is `invalid_request` with `error.input.code` `delivery`, before any
 worker starts. With no argument the operator default applies
 (`PSCAT_MCP_ARTIFACT_DELIVERY`); `ArtifactConfig::check` refuses to start
-with a default other than `inline` when links are off, and with
-`PSCAT_MCP_ARTIFACT_LINKS=gcs`. `auto` is decided after the render, on the
+with a default other than `inline` when links are off, and checks the
+store's own settings (for `gcs`: a bucket, the prefix, a TTL of at most 7
+days, the signer and the test-only endpoint overrides). `auto` is decided after the render, on the
 artifacts' total size against `PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES`; with no
 store it is `inline`.
 
@@ -495,10 +496,11 @@ stores nothing; a store refusal is the tool's failure envelope.
 backend uploads), `read` (bytes for `resources/read`; a signed-URL backend,
 which serves nothing itself, keeps the default `None`), `ttl` and
 `quota_bytes`. Each `ArtifactLink` has a `uri` (the `resource_link`), a
-`download_url` and a `LinkScheme` (`Pscat` or `Https`). Cloud Storage
-(#140) is meant to implement it with an upload in `put` and a signed URL per
-object; only the server process would hold storage credentials, never the
-worker.
+`download_url` and a `LinkScheme` (`Pscat` or `Https`). Both backends are
+built from `ArtifactConfig`: the memory store by `RenderService` over its job
+store (`with_artifacts`, rebuilt by `with_jobs`), the Cloud Storage store by
+`build_service_with`, because its TLS client can fail the start, and
+installed with `with_artifact_store`.
 
 **The memory backend.** `MemoryArtifactStore` keeps the decoded bytes in the
 `JobStore`'s ledger (`put_artifacts`, `read_artifact`), so stored output and
@@ -522,7 +524,7 @@ other instances. Like async jobs, memory links are refused at startup with
 the `none` auth method (`http::check_none_with_artifact_links`): every
 anonymous caller is the one principal `anonymous`, so one could fill the
 results budget the links share with authenticated clients, and read the
-others' links. (A Cloud Storage backend under `none` is for #140.) Under
+others' links. Under
 `--allow-unauthenticated` (loopback only) they start, and every caller shares
 the one `anonymous` quota. Over stdio there is one principal, the local user.
 
@@ -538,9 +540,13 @@ time, rather than refusing `delivery` on `start_render`, keeps an operator
 default of `url` working for jobs too.
 
 **Logs.** No log line holds a link, a `render_id` or artifact bytes: the
-tool layer logs no result, the store logs nothing, the not-found error does
-not echo the URI, and capture mode records request bodies with every
-`pscat://render/<id>` (also JSON-escaped) redacted (`redact_render_links`).
+tool layer logs no result, the store logs nothing (the Cloud Storage store
+logs a failure as codes only, below), the not-found error does not echo the
+URI, and capture mode records request bodies and headers with every
+`pscat://render/<id>` (also JSON-escaped) redacted (`redact_render_links`)
+and the query string of every `http(s)` URL replaced by `[redacted]`
+(`redact_url_queries`), so a signed URL a client sends back never lands in
+the file. Capture mode does not record response bodies at all.
 rmcp itself logs whole requests, responses and notifications below WARN
 (`rmcp::service` at DEBUG, INFO and TRACE; the raw line and a per-message line
 in `rmcp::transport::async_rw` and `...::streamable_http_server::tower`), which
@@ -549,6 +555,82 @@ bearer capabilities. So `telemetry::rmcp_clamp`, a filter on the log layer
 next to the `RUST_LOG` filter, holds every `rmcp` target to WARN and ERROR
 whatever `RUST_LOG` says (`RUST_LOG=trace` included); our `pscat_mcp` targets
 are untouched. rmcp's WARN and ERROR lines stay (`tests/logging.rs`).
+
+### The Cloud Storage backend
+
+`src/gcs.rs` (#140), `PSCAT_MCP_ARTIFACT_LINKS=gcs`. Only the server
+process talks to Google; the worker gets no credential and no new
+capability (its seccomp filter refuses sockets on Linux, which is what keeps
+it from the metadata server: on Cloud Run that server answers every process
+in the container).
+
+`GcsArtifactStore::put`, for one call:
+
+1. **Reserve** the call's charge (its bytes plus 1 KiB, as the memory store
+   charges) against the principal's quota: bytes uploaded within the last TTL,
+   in an in-memory ledger, so **per instance**. Over it,
+   `results_budget_exceeded` with `artifact_quota_bytes`, before any network
+   call. A call that fails before its first upload is refunded; one that
+   fails after keeps its charge, since its objects may exist.
+2. **Credentials.** An access token from the metadata server
+   (`GET /computeMetadata/v1/instance/service-accounts/default/token`,
+   `Metadata-Flavor: Google`, and the response must carry it too), cached
+   behind an async mutex until 300 s before it expires (or half its life, if
+   shorter), so one caller refreshes and the rest wait. The signer is
+   `PSCAT_MCP_ARTIFACT_SIGNER`, or the metadata server's `default/email`,
+   fetched once. No key, key file or credential variable exists.
+3. **Upload** each artifact as `<prefix><render_id>/<n>.<ext>` with one
+   `multipart` upload (`upload/storage/v1/b/<bucket>/o?uploadType=multipart&ifGenerationMatch=0`).
+   Multipart because the metadata part sets `contentType` and
+   `contentDisposition` (`inline; filename="pscat-<n>.<ext>"`) in the same
+   request: a media upload followed by a metadata `PATCH` would need
+   `storage.objects.update`, which the runtime account does not have.
+   `ifGenerationMatch=0` makes an existing name a `412`, so nothing is ever
+   overwritten (the `render_id` is a fresh UUID v4 anyway). The multipart
+   boundary is random and drawn again if the bytes contain it.
+4. **Sign** each object's V4 URL: the canonical request (`GET`, the
+   path-style `/<bucket>/<object>`, the `X-Goog-Algorithm`, `-Credential`,
+   `-Date`, `-Expires` and `-SignedHeaders=host` query, `host:storage.googleapis.com`,
+   `UNSIGNED-PAYLOAD`) and the string-to-sign (`GOOG4-RSA-SHA256`, the
+   time, the scope `<date>/auto/storage/goog4_request`, the canonical
+   request's SHA-256) are built in `v4_string_to_sign`, checked against
+   Google's conformance vectors in unit tests; IAM Credentials
+   `projects/-/serviceAccounts/<signer>:signBlob` signs the string with the
+   account's Google-managed key, and the signature is hex-encoded into
+   `X-Goog-Signature`. One clock reading (injectable, whole seconds) gives
+   `X-Goog-Date` and `expires_at`. The links point at
+   `https://storage.googleapis.com` whatever the test-only storage override
+   says, which only redirects uploads.
+
+The HTTP client is the OAuth server's stack (hyper, hyper-rustls with ring
+and webpki roots), typed over `Full<Bytes>` for the POSTs; no Google SDK.
+Each call has its own timeout (`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`), reads
+at most 64 KiB of response and follows no redirect. The three base URLs
+(metadata server, IAM Credentials, Storage uploads) can be overridden for
+tests only, by hidden flags (`PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT`) that must
+be `https`, or `http` on a loopback host; the built-in metadata default is
+plain `http://metadata.google.internal`, as the metadata server requires.
+
+**Failures.** Any failure of those calls (status, timeout, transport, an
+unexpected answer) is `storage_unavailable` (`ErrorCode::StorageUnavailable`,
+added for this; retryable), logged once as a WARN with `code`, `stage`
+(`credentials`, `upload`, `signing`), `failure` and at most `status`. Its
+message names the stage and status and says to retry or use `inline`; it
+never holds a URL, the bucket, a token or a response body, and neither does
+any `Debug` form (the token and the settings print redacted). In
+`mcp.rs`, `store_output` and `job_result` turn `storage_unavailable` into an
+inline result for `both` and `auto` (`fall_back_inline`), with a note in the
+text and `structuredContent.delivery_note`; for `url` it is the tool's
+error. A quota refusal is an error for every delivery. A job's fallback is
+delivered: its result counts as fetched and no links are remembered.
+
+**`none` is refused** with `gcs` by `http::check_none_with_artifact_links`:
+every anonymous caller would share one quota, and anyone who can reach the
+server could upload to the bucket and mint signed URLs, which are bearer
+capabilities. `read` returns `None`: the signed URL is the only way to the
+bytes, and `resources/read` of any `http(s)` URI is "resource not found"
+with a message that does not echo it (the guide's own not-found error, which
+names the URI, is reached only by other URIs).
 
 ## Agent guidance (prompts and resources)
 
@@ -695,6 +777,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Async jobs held | per principal and in all (unfinished), `server_busy` | 4, 16 |
 | Async job results | byte budget (largest result reserved while a job runs), TTL after it finishes | 128 MiB, 1 h |
 | Stored artifacts (memory links) | per-principal quota; the async job results budget, shared; TTL after storing | 32 MiB, 128 MiB, 30 min |
+| Uploaded artifacts (`gcs` links) | per-principal bytes within one TTL, per instance; signed URL lifetime (at most 7 days); each Google call's timeout and 64 KiB response cap | 32 MiB, 30 min, 10 s |
 
 PSCat has **no operators for processes, network or environment access**
 (see PSCat's `SECURITY.md`). The worker's environment is cleared anyway
@@ -872,7 +955,9 @@ Linux job is x86_64).
   any request and nothing is stored between requests, except async jobs
   when `--async-jobs` turns them on (see [Async jobs](#async-jobs)) and
   stored artifacts when `PSCAT_MCP_ARTIFACT_LINKS=memory` turns them on (see
-  [Artifact delivery](#artifact-delivery)).
+  [Artifact delivery](#artifact-delivery)). With `gcs` the objects live in
+  the bucket, and only the token cache and the upload-quota ledger are per
+  instance.
 
 ### Auth methods
 
@@ -966,8 +1051,9 @@ never used. Fewer than N entries, or an entry that is not an address
 
 **Async jobs.** All anonymous callers are one principal, so `none` and async
 jobs (which MCP Tasks need) are refused together at startup, and so are
-`none` and in-memory artifact links (`PSCAT_MCP_ARTIFACT_LINKS=memory`),
-which share the results budget with every client.
+`none` and artifact links: in memory (`PSCAT_MCP_ARTIFACT_LINKS=memory`),
+which share the results budget with every client, and in Cloud Storage
+(`gcs`), whose signed URLs anyone could then mint.
 
 **Logs.** A request `none` admits carries `auth_method=none`. A rejection logs
 its `reason` only. The client address is logged at DEBUG at most (so that an
@@ -1060,7 +1146,8 @@ The choice stays with the owner; recording it here is part of that decision.
   `backend::RenderBackend`. Dropping the returned future must stop the job.
 * **Artifact storage**: implement `artifacts::ArtifactStore` (see
   [Artifact delivery](#artifact-delivery)) and build it in
-  `RenderService::with_artifacts`; the memory backend is the one there is.
+  `RenderService::with_artifacts` (or, if building it can fail, in
+  `build_service_with`, as the Cloud Storage store is).
   Output larger than `PSCAT_MCP_MAX_OUTPUT_BYTES` still fails with
   `output_too_large`: links do not raise the output limit.
 * **Authentication**: implement `auth::AuthMethod` and list it in `PSCAT_MCP_AUTH` (see [Auth methods](#auth-methods)).

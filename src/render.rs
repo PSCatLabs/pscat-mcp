@@ -110,6 +110,10 @@ pub enum ErrorCode {
     JobNotFinished,
     /// The async job results held in memory would pass the server's budget.
     ResultsBudgetExceeded,
+    /// Artifact links (`delivery` `url`) could not be made: the upload to,
+    /// or the signing for, the link store failed. Retryable; nothing is
+    /// returned by link.
+    StorageUnavailable,
 }
 
 impl ErrorCode {
@@ -134,6 +138,7 @@ impl ErrorCode {
             ErrorCode::UnknownJob => "unknown_job",
             ErrorCode::JobNotFinished => "job_not_finished",
             ErrorCode::ResultsBudgetExceeded => "results_budget_exceeded",
+            ErrorCode::StorageUnavailable => "storage_unavailable",
         }
     }
 }
@@ -662,15 +667,20 @@ impl RenderService {
 
     fn rebuild_artifacts(mut self) -> Self {
         let c = &self.artifact_config;
-        self.artifacts = match c.artifact_links {
-            LinksBackend::Memory => Some(Arc::new(MemoryArtifactStore::new(
-                self.jobs.clone(),
-                c.ttl(),
-                c.artifact_quota_bytes,
-            ))),
-            // `gcs` is refused at startup (`ArtifactConfig::check`).
-            LinksBackend::Off | LinksBackend::Gcs => None,
-        };
+        match c.artifact_links {
+            LinksBackend::Memory => {
+                self.artifacts = Some(Arc::new(MemoryArtifactStore::new(
+                    self.jobs.clone(),
+                    c.ttl(),
+                    c.artifact_quota_bytes,
+                )))
+            }
+            LinksBackend::Off => self.artifacts = None,
+            // Built by `build_service_with` (its TLS client can fail) and
+            // installed with `with_artifact_store`; it holds nothing of the
+            // job store, so a later `with_jobs` keeps it.
+            LinksBackend::Gcs => {}
+        }
         self
     }
 

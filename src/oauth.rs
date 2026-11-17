@@ -282,7 +282,7 @@ impl Allowlist {
 
 /// A URL from the configuration, checked: `https`, or `http` to a loopback
 /// host (tests and local development); no fragment.
-fn checked_url(name: &str, value: &str, allow_query: bool) -> anyhow::Result<http::Uri> {
+pub(crate) fn checked_url(name: &str, value: &str, allow_query: bool) -> anyhow::Result<http::Uri> {
     let uri: http::Uri = value
         .parse()
         .map_err(|_| anyhow::anyhow!("{name} is not a URL"))?;
