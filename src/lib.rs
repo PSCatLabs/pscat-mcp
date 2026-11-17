@@ -33,6 +33,7 @@ pub mod handwrite;
 pub mod http;
 pub mod jobs;
 pub mod mcp;
+pub mod oauth;
 pub mod pscat_extras;
 pub mod render;
 pub mod sheet;

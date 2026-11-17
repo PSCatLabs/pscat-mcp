@@ -825,7 +825,8 @@ impl HttpConfig {
 pub enum AuthMethodKind {
     /// Static bearer tokens (`PSCAT_MCP_AUTH_TOKENS`, `PSCAT_MCP_AUTH_TOKEN_FILE`).
     Bearer,
-    /// OAuth 2.1 access tokens (issue #119; not implemented yet).
+    /// OAuth 2.1 access tokens from an external authorization server
+    /// (`PSCAT_MCP_OAUTH_*`, see [`crate::oauth`]).
     Oauth,
     /// No authentication, with guard rails (issue #120; see
     /// `crate::auth_none`). Never on by default.
@@ -857,12 +858,16 @@ impl AuthMethodKind {
 pub struct AuthConfig {
     /// Authentication methods accepted on `/mcp`, comma separated, tried in
     /// turn: a request passes if any accepts it. `bearer` (static tokens),
-    /// `oauth` (not implemented yet; refuses to start), `none` (no
+    /// `oauth` (JWT access tokens, `PSCAT_MCP_OAUTH_*`), `none` (no
     /// authentication, for staging, with its own `--auth-none-*` guard
     /// rails). Unset: bearer tokens, or `--allow-unauthenticated` on a
     /// loopback address, as before.
     #[arg(long = "auth", env = "PSCAT_MCP_AUTH", value_name = "METHODS")]
     pub auth: Option<String>,
+
+    /// Settings of the `oauth` method.
+    #[command(flatten)]
+    pub oauth: crate::oauth::OauthConfig,
 
     /// Settings of the `none` method.
     #[command(flatten)]

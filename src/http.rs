@@ -1,10 +1,15 @@
-//! HTTP transport: `/mcp` (Streamable HTTP, authenticated) and the health
-//! paths `/healthz` and `/health`.
+//! HTTP transport: `/mcp` (Streamable HTTP, authenticated), the health
+//! paths `/healthz` and `/health`, and with `oauth` enabled the Protected
+//! Resource Metadata.
 //!
 //! * `GET /healthz` and `GET /health` — the same unauthenticated liveness
 //!   handler; does no rendering. `/health` exists because Cloud Run's front
 //!   end reserves paths ending in `z` and answers 404 for `/healthz` from
 //!   outside the service; `/healthz` stays for the in-container probes.
+//! * `GET /.well-known/oauth-protected-resource` and the same with the
+//!   resource URL's path appended (`…/mcp`), only with `oauth` enabled:
+//!   the RFC 9728 document naming the resource, the authorization server and
+//!   the scopes; unauthenticated, as the MCP authorization spec requires.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
 //!   responses, behind the [`Authenticator`] (every enabled auth method,
 //!   checked before rmcp sees the request, so an unauthenticated request
@@ -43,6 +48,7 @@ use crate::auth_none::NoneGuard;
 use crate::capture::{Capture, capture_layer};
 use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
 use crate::mcp::PscatMcp;
+use crate::oauth::OauthAuth;
 use crate::render::RenderService;
 
 /// Slack added to the body limit for the JSON-RPC envelope and arguments.
@@ -124,8 +130,9 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
 ///
 /// * `PSCAT_MCP_AUTH` / `--auth` unset: exactly [`authenticator`].
 /// * Set: an [`AuthChain`] of the listed methods, in order. An empty or
-///   unknown list is refused; so is `oauth` until it is implemented (issue
-///   #119). `bearer` needs at least one token. `none` is the explicit
+///   unknown list is refused. `bearer` needs at least one token; `oauth`
+///   needs its issuer, resource and allowlist ([`OauthAuth::from_config`]).
+///   `none` is the explicit
 ///   no-auth mode (issue #120, [`crate::auth_none`]): it is refused together
 ///   with async jobs (every anonymous caller is one principal, so one could
 ///   read or cancel another's jobs; Tasks need async jobs, so are covered),
@@ -137,24 +144,23 @@ pub fn authenticator_with(
     http: &HttpConfig,
     auth: &AuthConfig,
 ) -> anyhow::Result<Arc<dyn Authenticator>> {
-    let Some(kinds) = auth
+    let kinds = auth
         .methods()
-        .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?
-    else {
+        .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+    if auth.oauth.is_configured()
+        && !kinds
+            .as_ref()
+            .is_some_and(|k| k.contains(&AuthMethodKind::Oauth))
+    {
+        tracing::warn!(
+            "PSCAT_MCP_OAUTH_* settings are given but `oauth` is not in PSCAT_MCP_AUTH; they are \
+             ignored"
+        );
+    }
+    let Some(kinds) = kinds else {
         warn_unused_none_settings(auth);
         return authenticator(http);
     };
-    for kind in &kinds {
-        let issue = match kind {
-            AuthMethodKind::Bearer | AuthMethodKind::None => continue,
-            AuthMethodKind::Oauth => "#119",
-        };
-        anyhow::bail!(
-            "refusing to start: auth method `{}` (PSCAT_MCP_AUTH / --auth) is not implemented yet \
-             (PSCatLabs/pscat-mcp{issue}); only `bearer` and `none` are available",
-            kind.as_str()
-        );
-    }
     if kinds.contains(&AuthMethodKind::None) {
         if http.async_jobs {
             anyhow::bail!(
@@ -191,6 +197,11 @@ pub fn authenticator_with(
                 }
                 methods.push(Box::new(BearerTokenAuth::new(tokens.iter())));
             }
+            AuthMethodKind::Oauth => {
+                let oauth = OauthAuth::from_config(&auth.oauth)
+                    .map_err(|e| anyhow::anyhow!("refusing to start: {e:#}"))?;
+                methods.push(Box::new(oauth));
+            }
             AuthMethodKind::None => {
                 let guard = NoneGuard::new(&auth.none)
                     .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
@@ -202,7 +213,6 @@ pub fn authenticator_with(
                 );
                 methods.push(Box::new(NoAuth::guarded(guard)));
             }
-            AuthMethodKind::Oauth => unreachable!("refused above"),
         }
     }
     if !kinds.contains(&AuthMethodKind::Bearer) && !tokens.is_empty() {
@@ -291,6 +301,7 @@ pub fn router_with_capture(
     mcp_config: StreamableHttpServerConfig,
     capture: Option<Arc<Capture>>,
 ) -> Router {
+    let auth_metadata = auth.published_metadata();
     let limits = service.limits();
     let body_limit = mcp_body_limit(limits.max_text_bytes());
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
@@ -312,6 +323,7 @@ pub fn router_with_capture(
     Router::new()
         .route("/healthz", get(healthz))
         .route("/health", get(healthz))
+        .merge(metadata_routes(auth_metadata))
         .route_service("/mcp", mcp)
         .layer(
             ServiceBuilder::new()
@@ -338,6 +350,19 @@ pub fn router_with_capture(
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
+}
+
+/// RFC 9728 Protected Resource Metadata routes, unauthenticated like the
+/// health paths; empty unless an enabled method (`oauth`) publishes one.
+fn metadata_routes(meta: Option<crate::auth::ResourceMetadata>) -> Router {
+    let mut app = Router::new();
+    if let Some(meta) = meta {
+        let doc = Arc::new(meta.document);
+        for path in &meta.paths {
+            app = app.route(path, get(resource_metadata).with_state(doc.clone()));
+        }
+    }
+    app
 }
 
 /// Which of `application/json` and `text/event-stream` a request's `Accept`
@@ -500,6 +525,22 @@ async fn drain(mut body: Body, mut seen: u64) {
 
 async fn healthz() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// The Protected Resource Metadata document (RFC 9728). Public and static,
+/// so any origin may read it (browser-based MCP clients fetch it too).
+async fn resource_metadata(State(doc): State<Arc<serde_json::Value>>) -> Response {
+    let mut resp = axum::Json(doc.as_ref().clone()).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    resp
 }
 
 /// Authenticate from the headers alone, by every enabled method in turn. An
