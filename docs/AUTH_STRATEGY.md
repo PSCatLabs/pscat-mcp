@@ -156,8 +156,9 @@ $0.00004/s, which is about **$100 a month per instance**. The hard bound is
   for abuse mitigation, not quotas.
 * It needs an external Application Load Balancer with a serverless NEG.
   The `run.app` URL bypasses it unless ingress is restricted [GC8].
-  Restricting ingress changes `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` to 2
-  (docs/CLOUD_RUN.md).
+  Behind the load balancer the hop count changes: docs/CLOUD_RUN.md gives 2
+  from Google's documentation, but only the direct `run.app` value (1) has
+  been measured, so measure it on the real setup before relying on 2.
 * Cost, Standard tier [GC6][GC7]:
   * $0.0068/h per policy, about $5 a month;
   * $0.0014/h per rule, about $1 a month;
@@ -373,7 +374,7 @@ is live. Use E only if CI must not hold a long-lived secret. Skip B and C.
 | T10 | pscat-mcp | Per-tool `securitySchemes` in tool metadata for ChatGPT | ChatGPT's mixed-auth UI [O1] | low |
 | T11 | pscat-cloud | Choose and provision the identity source (Q3); register the redirects listed in Q1 | unblocks #119 acceptance and pscat-cloud#26 | high |
 | T12 | pscat-cloud | Production layout: an auth service plus an optional public service, `--max-instances`, budget alert | cost bound and separate limits (Q2) | high |
-| T13 | pscat-cloud | External ALB + serverless NEG + Cloud Armor throttle; restrict ingress; hops = 2 (pscat-cloud#8) | cross-instance rate limit for the public tier | medium |
+| T13 | pscat-cloud | External ALB + serverless NEG + Cloud Armor throttle; restrict ingress; measure the trusted-hop count behind the ALB (docs say 2, unmeasured) (pscat-cloud#8) | cross-instance rate limit for the public tier | medium |
 | T14 | pscat-cloud | Token issuance runbook or script for option A (Secret Manager versions) | repeatable key issuance and revocation | medium |
 | T15 | pscat | Per-client setup page (#1136) from Q5 | users of every client | medium |
 | T16 | pscat | ChatGPT package (#1253) points at the OAuth URL | ChatGPT cannot send a header | medium |
