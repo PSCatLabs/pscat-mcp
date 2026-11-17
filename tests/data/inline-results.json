@@ -1,0 +1,315 @@
+{
+  "pdf": {
+    "content": [
+      {
+        "resource": {
+          "blob": "JVBERi0xLjc=",
+          "mimeType": "application/pdf",
+          "uri": "urn:pscat:render:UUID:document"
+        },
+        "type": "resource"
+      },
+      {
+        "text": "Rendered 1 page as PDF (20x15 pt at 144 dpi = 40x30 px, 8 bytes) with PSCat VERSION in 56 ms.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "artifacts": [
+        {
+          "bytes": 8,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "application/pdf",
+          "returned_as": "blob",
+          "width_pt": 20.0,
+          "width_px": 40
+        }
+      ],
+      "elapsed_ms": 56,
+      "format": "pdf",
+      "mime_type": "application/pdf",
+      "ok": true,
+      "page_count": 1,
+      "program_output": "",
+      "program_output_truncated": false,
+      "renderer": "RENDERER",
+      "steps_used": 1234
+    }
+  },
+  "png_one_page": {
+    "content": [
+      {
+        "data": "iVBORw0KGgpub3QtcmVhbGx5LWEtcG5n",
+        "mimeType": "image/png",
+        "type": "image"
+      },
+      {
+        "text": "Rendered 1 page as PNG (20x15 pt at 144 dpi = 40x30 px, 24 bytes) with PSCat VERSION in 56 ms.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "artifacts": [
+        {
+          "bytes": 24,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/png",
+          "page": 1,
+          "returned_as": "image",
+          "width_pt": 20.0,
+          "width_px": 40
+        }
+      ],
+      "elapsed_ms": 56,
+      "format": "png",
+      "mime_type": "image/png",
+      "ok": true,
+      "page_count": 1,
+      "program_output": "",
+      "program_output_truncated": false,
+      "renderer": "RENDERER",
+      "steps_used": 1234
+    }
+  },
+  "png_two_pages_stdout": {
+    "content": [
+      {
+        "data": "iVBORw0KGgpub3QtcmVhbGx5LWEtcG5n",
+        "mimeType": "image/png",
+        "type": "image"
+      },
+      {
+        "data": "iVBORw0KGgpub3QtcmVhbGx5LWEtcG5n",
+        "mimeType": "image/png",
+        "type": "image"
+      },
+      {
+        "text": "Rendered 2 pages as PNG (20x15 pt at 144 dpi = 40x30 px, 40x30 px, 48 bytes) with PSCat VERSION in 56 ms.\nProgram output:\nhello\n\n[program output truncated]",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "artifacts": [
+        {
+          "bytes": 24,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/png",
+          "page": 1,
+          "returned_as": "image",
+          "width_pt": 20.0,
+          "width_px": 40
+        },
+        {
+          "bytes": 24,
+          "height_px": 30,
+          "mime_type": "image/png",
+          "page": 2,
+          "returned_as": "image",
+          "width_px": 40
+        }
+      ],
+      "elapsed_ms": 56,
+      "format": "png",
+      "mime_type": "image/png",
+      "ok": true,
+      "page_count": 2,
+      "program_output": "hello\n",
+      "program_output_truncated": true,
+      "renderer": "RENDERER",
+      "steps_used": 1234
+    }
+  },
+  "sheet": {
+    "content": [
+      {
+        "data": "iVBORw0KGgpub3QtcmVhbGx5LWEtcG5n",
+        "mimeType": "image/png",
+        "type": "image"
+      },
+      {
+        "text": "Composed a review sheet of 2 cells (1 failed) as PNG (40x30 px, 24 bytes) with PSCat VERSION in 78 ms.\nrow 0 column 0: 10x10 pt at 72 dpi = 10x10 px, at (1, 2): ok\nrow 1 column 0: 9 dpi, 2x2 px, shown at 4x, at (3, 4): limit_exceeded (steps): limitcheck",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "bytes": 24,
+      "cells": [
+        {
+          "column": 0,
+          "dpi": 72.0,
+          "height_pt": 10.0,
+          "height_px": 10,
+          "ok": true,
+          "row": 0,
+          "width_pt": 10.0,
+          "width_px": 10,
+          "x": 1,
+          "y": 2,
+          "zoom": 1
+        },
+        {
+          "column": 0,
+          "dpi": 9.0,
+          "error": {
+            "code": "limit_exceeded",
+            "limit": "steps",
+            "message": "limitcheck"
+          },
+          "height_px": 2,
+          "ok": false,
+          "row": 1,
+          "width_px": 2,
+          "x": 3,
+          "y": 4,
+          "zoom": 4
+        }
+      ],
+      "elapsed_ms": 56,
+      "failed_cells": 1,
+      "format": "png",
+      "height_px": 30,
+      "mime_type": "image/png",
+      "ok": true,
+      "renderer": "RENDERER",
+      "steps_used": 1234,
+      "wall_ms": 78,
+      "width_px": 40
+    }
+  },
+  "svg_blob": {
+    "content": [
+      {
+        "resource": {
+          "blob": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+          "mimeType": "image/svg+xml",
+          "uri": "urn:pscat:render:UUID:page:1"
+        },
+        "type": "resource"
+      },
+      {
+        "resource": {
+          "blob": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+          "mimeType": "image/svg+xml",
+          "uri": "urn:pscat:render:UUID:page:2"
+        },
+        "type": "resource"
+      },
+      {
+        "text": "Rendered 2 pages as SVG (20x15 pt at 144 dpi = 40x30 px, 20x15 pt at 144 dpi = 40x30 px, 82 bytes) with PSCat VERSION in 56 ms.\nThe SVG is over 8 bytes (PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES), so each page is a blob resource (base64) rather than text.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "artifacts": [
+        {
+          "bytes": 41,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/svg+xml",
+          "page": 1,
+          "returned_as": "blob",
+          "width_pt": 20.0,
+          "width_px": 40
+        },
+        {
+          "bytes": 41,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/svg+xml",
+          "page": 2,
+          "returned_as": "blob",
+          "width_pt": 20.0,
+          "width_px": 40
+        }
+      ],
+      "elapsed_ms": 56,
+      "format": "svg",
+      "mime_type": "image/svg+xml",
+      "ok": true,
+      "page_count": 2,
+      "program_output": "",
+      "program_output_truncated": false,
+      "renderer": "RENDERER",
+      "steps_used": 1234
+    }
+  },
+  "svg_text": {
+    "content": [
+      {
+        "resource": {
+          "mimeType": "image/svg+xml",
+          "text": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+          "uri": "urn:pscat:render:UUID:page:1"
+        },
+        "type": "resource"
+      },
+      {
+        "resource": {
+          "mimeType": "image/svg+xml",
+          "text": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+          "uri": "urn:pscat:render:UUID:page:2"
+        },
+        "type": "resource"
+      },
+      {
+        "text": "Rendered 2 pages as SVG (20x15 pt at 144 dpi = 40x30 px, 20x15 pt at 144 dpi = 40x30 px, 82 bytes) with PSCat VERSION in 56 ms.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "resultType": "complete",
+    "structuredContent": {
+      "artifacts": [
+        {
+          "bytes": 41,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/svg+xml",
+          "page": 1,
+          "returned_as": "text",
+          "width_pt": 20.0,
+          "width_px": 40
+        },
+        {
+          "bytes": 41,
+          "dpi": 144.0,
+          "height_pt": 15.0,
+          "height_px": 30,
+          "mime_type": "image/svg+xml",
+          "page": 2,
+          "returned_as": "text",
+          "width_pt": 20.0,
+          "width_px": 40
+        }
+      ],
+      "elapsed_ms": 56,
+      "format": "svg",
+      "mime_type": "image/svg+xml",
+      "ok": true,
+      "page_count": 2,
+      "program_output": "",
+      "program_output_truncated": false,
+      "renderer": "RENDERER",
+      "steps_used": 1234
+    }
+  }
+}

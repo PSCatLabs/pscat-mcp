@@ -419,3 +419,110 @@ async fn a_queue_timeout_logs_server_busy_with_the_wait() {
     assert_eq!(lines_with(&logs, "render started").len(), 1, "{logs}");
     no_program_text(&logs);
 }
+
+// ------------------------------------------------ artifact links in the logs
+//
+// A link to a stored artifact is a capability (a signed URL will be one
+// outright): no log line and no capture record may hold it, its render id,
+// or the artifact's bytes (#139).
+
+/// Render with `delivery: url` and read the link back, then return the
+/// render id, a base64 chunk of the artifact, the logs and the capture file.
+async fn links_round_trip(rust_log: Option<&str>) -> (String, String, String, String) {
+    let capture = std::env::temp_dir().join(format!(
+        "pscat-mcp-links-capture-{}.jsonl",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let capture_path = capture.to_string_lossy().into_owned();
+    let server = start_http_with(
+        rust_log,
+        &[
+            ("PSCAT_MCP_ARTIFACT_LINKS", "memory"),
+            ("PSCAT_MCP_CAPTURE_FILE", &capture_path),
+        ],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "render_postscript",
+        "arguments": {"source": "0.3 setgray 0 0 40 40 rectfill", "width": 40, "height": 40,
+                      "delivery": "url"},
+    }});
+    let (status, body) = post(&http, &server.base, &call, Some("2025-06-18")).await;
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    let id = v["result"]["structuredContent"]["render_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no render_id: {body}"))
+        .to_string();
+    let uri = format!("pscat://render/{id}/1");
+    let read = json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read",
+                      "params": {"uri": uri}});
+    // As a 2026-07-28 client would, the read names the URI in `Mcp-Name`
+    // too, a header capture mode records.
+    let resp = http
+        .post(&server.base)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("mcp-protocol-version", "2025-06-18")
+        .header("mcp-method", "resources/read")
+        .header("mcp-name", &uri)
+        .body(read.to_string())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&body).expect("json");
+    let blob = v["result"]["contents"][0]["blob"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no blob: {body}"));
+    let chunk = blob[blob.len() / 2..blob.len() / 2 + 24.min(blob.len() / 2)].to_string();
+    // A read of a link that does not exist: the error must not echo it.
+    let missing = json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+                         "params": {"uri": format!("pscat://render/{id}/9")}});
+    let (_, body) = post(&http, &server.base, &missing, Some("2025-06-18")).await;
+    assert!(body.contains("error"), "{body}");
+    assert!(
+        !body.contains(&id),
+        "the not-found error echoes the link: {body}"
+    );
+    let logs = stop(server).await;
+    let captured = std::fs::read_to_string(&capture).unwrap_or_default();
+    let _ = std::fs::remove_file(&capture);
+    (id, chunk, logs, captured)
+}
+
+fn no_links(id: &str, chunk: &str, logs: &str, captured: &str) {
+    assert!(logs.contains("listening"), "no server log at all: {logs}");
+    for (what, text) in [("logs", logs), ("capture file", captured)] {
+        assert!(!text.contains(id), "the render id is in the {what}: {text}");
+        assert!(!text.contains(chunk), "artifact bytes are in the {what}");
+    }
+    assert!(!logs.contains("pscat://render/"), "{logs}");
+    // The capture recorded the read, with the link redacted.
+    assert!(captured.contains("resources/read"), "{captured}");
+    assert!(
+        captured.contains("pscat://render/[redacted]/1"),
+        "{captured}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn links_never_reach_the_logs_or_the_capture_file() {
+    let (id, chunk, logs, captured) = links_round_trip(None).await;
+    no_links(&id, &chunk, &logs, &captured);
+}
+
+/// The server's own code at its most verbose: still no link. (`rmcp`'s own
+/// DEBUG lines dump whole messages; the default filter holds its
+/// `rmcp::service` target at WARN, see `src/telemetry.rs`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn links_stay_out_of_the_logs_at_trace() {
+    let (id, chunk, logs, captured) = links_round_trip(Some("info,pscat_mcp=trace")).await;
+    no_links(&id, &chunk, &logs, &captured);
+}

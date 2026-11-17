@@ -72,6 +72,9 @@ authentication and container packaging.
 | `render_result` | A finished job's result: what `render_postscript` returns (the same content blocks and envelope, within the same output caps), or the failed render's error with `isError`. A queued or running job is `job_not_finished`, a cancelled one `cancelled`. It can be fetched again until the job expires. | read-only, idempotent |
 | `cancel_render` | Cancels a job: a queued one never starts, a running one's worker is killed. Returns the job's status (`cancelled` once it has stopped); a finished job is left as it is. | not read-only, idempotent, non-destructive |
 
+`render_postscript`, `chalkboard_math`, `handwrite`, `review_sheet` and
+`start_render` also take `delivery` (see [Artifact links](#artifact-links)).
+
 ### Output formats
 
 | Format | Returned as | MIME type |
@@ -236,6 +239,70 @@ synchronous results even with `--tasks` on, because its Tasks capability
 never reaches this stateless server. For rmcp, connect with
 `serve_with_lifecycle(.., ClientLifecycleMode::Discover { preferred_versions: [V_2026_07_28] })`.
 `tests/jobs.rs::over_http_an_rmcp_tasks_client_gets_a_task` pins this.
+
+## Artifact links
+
+Some clients do not show the model an inline image (ChatGPT, issue #138),
+so the four render tools can return their output as links instead of, or as
+well as, inline content blocks. The `delivery` argument chooses:
+
+| `delivery` | Result |
+|---|---|
+| `inline` | today's result, byte for byte: images, text or blob resources. The default, unless the operator set `PSCAT_MCP_ARTIFACT_DELIVERY`. |
+| `url` | no bytes: one `resource_link` block per artifact, and a short text block naming every link. |
+| `both` | the inline blocks and the links. |
+| `auto` | links when the output (all artifacts, before base64) is over `PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES`, otherwise inline. With no link store it is inline. |
+
+With links, `structuredContent` has the call's `render_id` (random, a UUID
+v4) and, for each entry of `artifacts` (the manifest: one per page, or one
+PDF document), `download_url` and `expires_at` (RFC 3339, UTC), with
+`returned_as` `link` when the bytes are not inline. `review_sheet` has
+`render_id`, `download_url`, `expires_at` and `returned_as` at the top level.
+The link is in all three places (the `resource_link`, `structuredContent` and
+the text) because clients differ in which they show the model. Diagnostics
+stay inline whatever the delivery: errors, page counts, sizes, the cells of a
+sheet and the program's stdout. A failed render stores nothing.
+
+Links need a store, `PSCAT_MCP_ARTIFACT_LINKS`:
+
+* `off` (the default): `url` and `both` fail with `invalid_request` and
+  `error.input.code` `delivery`; nothing is ever silently inline instead.
+* `memory`: the bytes are kept in the server process for
+  `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` (30 minutes) and served by
+  `resources/read` of `pscat://render/<render_id>/<n>` (`n` from 1, in the
+  manifest's order), as a blob resource, to the client that made them only.
+  Another client's link, an expired one and one that never existed get the
+  same JSON-RPC "resource not found" error, which does not repeat the URI.
+  They are not listed by `resources/list`. A `pscat://` link is an MCP
+  resource, not something a browser can fetch.
+* `gcs`: Cloud Storage signed URLs (#140). Not implemented yet: the server
+  refuses to start with it.
+
+**Limits of the memory store.** Like async jobs it is in one process: lost
+on a restart, and invisible to any other instance, so over HTTP it works only
+on a single instance (see [Long renders](#long-renders-async-jobs)). Each
+client may hold at most `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` (32 MiB) of stored
+output at once; over it a call is refused with `results_budget_exceeded` and
+`error.input.code` `artifact_quota_bytes` (with `limit_bytes` and
+`reached_bytes`) until earlier links expire. All clients together share the
+async-job results budget (`PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`, also when
+async jobs are off): stored output counts against it like an unfetched job
+result and is never dropped before its TTL, and a call that would pass it is
+refused with `error.input.code` `results_budget_bytes`. **The server refuses
+to start with the `none` auth method and memory links**, as it does with
+`none` and async jobs: every anonymous caller is the one principal
+`anonymous`, so one could fill the budget the links share with authenticated
+clients, and read the others' links. (Cloud Storage links under `none` are
+for #140.) With `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback only) memory
+links still start, and every caller shares the one `anonymous` quota; over
+stdio there is one principal, the local user.
+
+**Async jobs and Tasks.** `start_render` takes `delivery` too (an unusable
+one is refused before the job is accepted), and it is applied when the result
+is fetched: the first `render_result` (or `tasks/get`) stores the output and
+later fetches return the same links until they expire, then store it again.
+A Tasks call that finishes before `PSCAT_MCP_TASK_AFTER_MS` returns its
+result with the delivery applied at once.
 
 ## Prompts and resources
 
@@ -551,6 +618,11 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_JOB_RESULT_TTL_MS` | 3600000 | how long a finished job and its result are kept |
 | `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` | 134217728 | memory for job results, all jobs together; at least one largest result (`PSCAT_MCP_MAX_OUTPUT_BYTES` × 4/3 plus stdout and 4 KiB); job settings are checked only when jobs are on |
 | `PSCAT_MCP_JOB_RESULTS_PER_PRINCIPAL_BYTES` | the budget less one largest result (the whole budget when that holds fewer than two) | job-result bytes one client (token, or the stdio user) may have reserved and held, so one client cannot fill the budget for the others (`results_budget_exceeded`, `error.input.code` `results_per_principal_bytes`); at least one largest result and at most the budget (equal to the budget turns the share off); checked only when jobs are on |
+| `PSCAT_MCP_ARTIFACT_LINKS` | `off` | where `delivery` `url`/`both` links point (see [Artifact links](#artifact-links)): `off`, `memory` (this process, `resources/read` of `pscat://render/<render_id>/<n>`; one instance only, lost on restart; refused with the `none` auth method) or `gcs` (not implemented yet: refuses to start) |
+| `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` | the `delivery` of a call that gives none: `inline`, `url`, `both` or `auto`; anything but `inline` needs links on (else the server refuses to start). An argument overrides it |
+| `PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES` | 1048576 | with `delivery` `auto`: output over this many bytes (all artifacts, before base64) is returned as links |
+| `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` | 1800 | how long a link works; the memory store drops the bytes then |
+| `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | 33554432 | stored output one client (token, or the stdio user) may hold at once (`results_budget_exceeded`, `error.input.code` `artifact_quota_bytes`); at least `PSCAT_MCP_MAX_OUTPUT_BYTES` plus 1 KiB, at most `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`, which bounds all clients together |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level and, when set, replaces the default filter `info,rmcp::service=warn`, which keeps rmcp's per-request "Service initialized as server" dump of the `initialize` parameters (over stdio, the client's own `clientInfo` and capabilities: client-chosen strings) out of the logs; a `RUST_LOG` that brings `rmcp::service` to INFO logs it again |
 | `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 
@@ -706,7 +778,10 @@ nothing: see [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#no-authentication-for-stagi
 
 Because every anonymous caller is the same principal, one could poll, fetch
 or cancel another's async job, so the server **refuses to start with `none`
-and async jobs** (`PSCAT_MCP_ASYNC_JOBS`; MCP Tasks need them too). Off
+and async jobs** (`PSCAT_MCP_ASYNC_JOBS`; MCP Tasks need them too), and for
+the same reason with `none` and in-memory artifact links
+(`PSCAT_MCP_ARTIFACT_LINKS=memory`: one anonymous client could fill the
+results budget they share with authenticated clients). Off
 loopback, `none` is the only way to run without a token:
 `--allow-unauthenticated` alone is still refused unless the bind address is
 loopback. Anonymous requests carry `auth_method=none` in the logs; a
@@ -755,16 +830,31 @@ untrusted code. Each render or validation:
    or disconnects, even if it is stuck inside a single long operator;
 6. has its output size, page count and stdout capped.
 
+Artifact links (`delivery` `url`/`both`, off by default) change none of
+this: the store only ever receives the finished bytes a worker returned, and
+the worker gets nothing new. A link's `render_id` is random (a UUID v4), a
+link is served only to the client that made it, and links are never logged,
+not even in capture mode, where a request naming one is recorded with its id
+redacted. rmcp's own DEBUG lines (target `rmcp::service`) dump whole messages,
+links included; the default filter holds that target at WARN, so a
+`RUST_LOG` that raises it is for local debugging only.
+
 PSCat has no operators for processes, network or environment access. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full table (and [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md) for deployment) of which
 control is enforced by PSCat and which by the server.
 
 ## Current limitations
 
-* **No artifact storage.** Output over `PSCAT_MCP_MAX_OUTPUT_BYTES` returns
-  `output_too_large`, with `error.input.code` `output_bytes` and the limit
-  and the size reached in `error.input.limit_bytes` and `reached_bytes`. No
-  links are returned.
+* **Output over the output limit is refused, links or not.** Output over
+  `PSCAT_MCP_MAX_OUTPUT_BYTES` returns `output_too_large`, with
+  `error.input.code` `output_bytes` and the limit and the size reached in
+  `error.input.limit_bytes` and `reached_bytes`, whatever the `delivery`.
+* **Artifact links are in memory only.** The memory store
+  (`PSCAT_MCP_ARTIFACT_LINKS=memory`) has the async jobs' limits: one
+  instance, lost on restart. Its `pscat://` links are MCP resources, which a
+  browser cannot open; `https` signed URLs (Cloud Storage) are #140. A client
+  on a protocol before 2025-06-18 may not know `resource_link` blocks; the
+  link is also in the text and in `structuredContent`.
 * **SVG output is large, so a large SVG is a blob.** PSCat draws text as
   glyph outlines (paths, not `<text>` elements) and a gradient as many
   separate shapes, so an SVG grows quickly: an 88 KB SVG came from a
@@ -927,11 +1017,12 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the pinned PSCat checkout in `$CARGO_HOME/git/checkouts` (found without running cargo, so it can't wait on the package-cache lock; the byte comparison is skipped with a message when the checkout isn't there, and fails when `CI` is set), and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; the font-pack line (none without a pack directory; with the `cjk-thai` fixture, the pack the catalog lists, and each size as read); with a worker that cannot start, the guide says the packs "could not be read just now" and prompts still answer, and once the worker starts the next request lists the packs (a failed catalog read is not kept); unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
 | `tests/font_pack.rs` | the font-pack directory with a 13 KB `cjk-thai` stand-in (`tests/data/font-pack`): the worker finds the pack face and, unset, does not; a `fonts/catalog/` beside a copy of the server binary (the executable-directory case) is found with the setting unset, and the same copy without it is not; the catalog lists the pack and no path (also in `get_renderer_info`); programs cannot read the directory (absolute, relative, `..`, symlink out, `filenameforall`, a planted `lib/`), nor write there; the worker's environment is `PSCAT_HOME` only (a fake worker), and the server's `HOME`, `XDG_DATA_HOME`, `PSCAT_HOME` and `PSCAT_ROOT` are not inherited; a Japanese `review_sheet` label differs from `???` with the pack and is identical without it; a missing path or a file refuses to start; `filename status` answers for the compiled-in `lib/` only (not a planted `lib/`) and is `false` for every other name |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
-| `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line |
+| `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line; artifact links: a `delivery: url` render and the `resources/read` of its link leave neither the `render_id`, a `pscat://render/` link nor the artifact's bytes in the logs (default filter and `pscat_mcp=trace`) or in the capture file, which records the read with the id redacted, and a not-found read does not echo the link |
+| `tests/artifacts.rs` | artifact delivery (#139) over an in-process pipe and over HTTP: with no store, `delivery` `inline` or `auto`, and with the memory store, no `delivery`, `inline` or `auto` under the threshold, every tool's result (PNG pages, SVG, PDF, `chalkboard_math`, `handwrite`, `review_sheet`) is the same as today's, with no link field; `url`/`both` with no store `invalid_request` (`error.input.code` `delivery`, a message saying to retry with `delivery: "inline"`, `start_render` too); `url` a manifest of one `resource_link` per page (three pages) with `download_url`, `expires_at` and `render_id`, the links named in the text, no bytes inline and `resources/read` returning each page; `both` the same bytes inline and by link for PNG, SVG and PDF; links from every render tool; `auto` over a threshold; diagnostics (stdout, a PostScript error) inline; the operator default and an argument overriding it; the per-client quota refused with `artifact_quota_bytes`; expiry after the TTL with an injected clock, freeing the quota; a `start_render` job with `delivery: url` storing its result once across two `render_result` calls; over HTTP, another bearer token's `resources/read` of a link failing exactly like a never-issued one. A fixture (`tests/data/inline-results.json`, frozen before #139) pins the inline result builders byte for byte, and unit tests in `src/artifacts.rs` cover the store (owner, TTL, quota, the shared budget, link redaction) |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth` without its settings, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
 | `tests/oauth.rs` | the `oauth` method against a local mock authorization server: valid RS256 and ES256 tokens, an audience array and a verified email are accepted; expired, without `exp`, not yet valid, wrong or missing audience, wrong issuer, bad signature, tampered payload, an ES256 header on the RSA key, an HS256 token signed with the public key, `alg: none`, an unknown `kid`, no `sub`, a non-JWT and an oversized token get `401 invalid_token`; a user not on the allowlist (or with an unverified email) gets `403 not_allowed` without an `error` parameter; missing scopes get `403 insufficient_scope`; no PostScript runs for any refused request; `bearer,oauth` accepts a static token without contacting the issuer and a JWT, and answers garbage with one merged challenge; the Protected Resource Metadata is served at both well-known paths without auth (the `resource_metadata` URL of a real 401 included), independent of `Host`, and not at all without `oauth`; a hung issuer bounds JWT requests by the JWKS timeout with one fetch between them while requests without a JWT (static token, no header, garbage; `oauth` first or alone) go straight through; a known key past its TTL is used without waiting while the issuer hangs; unknown `kid`s trigger one JWKS fetch, and a rotated key is picked up; discovery (RFC 8414, OpenID Connect fallback, explicit JWKS URL, a mismatched issuer refused); the binary refuses an incomplete or unsafe configuration without echoing allowlist entries, and its logs carry `auth_method=oauth` and fixed reasons but never a subject, email or token |
-| `tests/auth_none.rs` | the explicit no-auth mode and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an invalid time, a bad CIDR, a zero limit, async jobs or Tasks with `none`); an already expired time starting with `none` disabled (`bearer,none`: a token is `200`, no header is `403 unauthenticated_access_expired`, the startup log warns and `auth_methods` lists only `bearer`; `none` alone: every request is `403`); and, in-process with an injected clock, the refusal after the expiry of a running server |
+| `tests/auth_none.rs` | the explicit no-auth mode and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an invalid time, a bad CIDR, a zero limit, async jobs, Tasks or memory artifact links with `none`); an already expired time starting with `none` disabled (`bearer,none`: a token is `200`, no header is `403 unauthenticated_access_expired`, the startup log warns and `auth_methods` lists only `bearer`; `none` alone: every request is `403`); and, in-process with an injected clock, the refusal after the expiry of a running server |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |

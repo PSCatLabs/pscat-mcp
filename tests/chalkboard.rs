@@ -117,6 +117,7 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
             "board",
             "color",
             "config",
+            "delivery",
             "dpi",
             "format",
             "ghosting",

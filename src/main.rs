@@ -4,7 +4,9 @@
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use pscat_mcp::capture::CaptureConfig;
-use pscat_mcp::config::{AuthConfig, HttpConfig, JobsConfig, LimitsConfig, WorkerConfig};
+use pscat_mcp::config::{
+    ArtifactConfig, AuthConfig, HttpConfig, JobsConfig, LimitsConfig, WorkerConfig,
+};
 use pscat_mcp::telemetry::{self, LogFormat};
 
 // PSCat's memory limit needs its counting allocator. Each render runs in its
@@ -44,6 +46,8 @@ enum Command {
         #[command(flatten)]
         jobs: JobsConfig,
         #[command(flatten)]
+        artifacts: ArtifactConfig,
+        #[command(flatten)]
         capture: CaptureConfig,
         /// Log format.
         #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Json)]
@@ -57,6 +61,8 @@ enum Command {
         worker: WorkerConfig,
         #[command(flatten)]
         jobs: JobsConfig,
+        #[command(flatten)]
+        artifacts: ArtifactConfig,
         /// Log format (logs go to stderr).
         #[arg(long, env = "PSCAT_MCP_LOG_FORMAT", value_enum, default_value_t = LogFormat::Pretty)]
         log_format: LogFormat,
@@ -84,6 +90,7 @@ fn main() -> std::process::ExitCode {
             limits,
             worker,
             jobs,
+            artifacts,
             capture,
             log_format,
         } => run(log_format, async move {
@@ -92,7 +99,7 @@ fn main() -> std::process::ExitCode {
                 enabled: http.async_jobs,
                 ..jobs
             };
-            let service = pscat_mcp::build_service_with_jobs(limits, jobs, &worker)?;
+            let service = pscat_mcp::build_service_with(limits, jobs, artifacts, &worker)?;
             let capture = match &capture.capture_file {
                 Some(path) => {
                     pscat_mcp::http::check_capture_bind(&http)?;
@@ -113,10 +120,12 @@ fn main() -> std::process::ExitCode {
             limits,
             worker,
             jobs,
+            artifacts,
             log_format,
         } => run(log_format, async move {
             // One long-lived process and one local user: jobs are always on.
-            let service = pscat_mcp::build_service_with_jobs(limits, jobs.enabled(), &worker)?;
+            let service =
+                pscat_mcp::build_service_with(limits, jobs.enabled(), artifacts, &worker)?;
             pscat_mcp::mcp::serve_stdio(service).await
         }),
     }

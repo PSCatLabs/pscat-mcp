@@ -17,10 +17,13 @@
 //!   checked in the server, turned into a program in the worker.
 //! * [`jobs`] — the async job store behind `start_render` and the Tasks
 //!   extension, owned by the render service.
+//! * [`artifacts`] — artifact delivery: the `delivery` argument, the
+//!   [`artifacts::ArtifactStore`] trait and its memory backend.
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
 
+pub mod artifacts;
 pub mod auth;
 pub mod auth_none;
 pub mod backend;
@@ -60,11 +63,24 @@ pub fn build_service_with_jobs(
     jobs: config::JobsConfig,
     worker: &config::WorkerConfig,
 ) -> anyhow::Result<Arc<render::RenderService>> {
+    build_service_with(limits, jobs, config::ArtifactConfig::default(), worker)
+}
+
+/// [`build_service_with_jobs`] with artifact delivery as `artifacts` says.
+pub fn build_service_with(
+    limits: config::LimitsConfig,
+    jobs: config::JobsConfig,
+    artifacts: config::ArtifactConfig,
+    worker: &config::WorkerConfig,
+) -> anyhow::Result<Arc<render::RenderService>> {
     limits.check().map_err(anyhow::Error::msg)?;
     if let Some(warning) = limits.deprecation_warning() {
         tracing::warn!("{warning}");
     }
     jobs.check(&limits).map_err(anyhow::Error::msg)?;
+    artifacts
+        .check(&limits, &jobs)
+        .map_err(anyhow::Error::msg)?;
     let exe = worker.exe()?;
     let font_pack_dir = worker.font_pack_dir().map_err(anyhow::Error::msg)?;
     let mut backend = backend::SubprocessBackend::new(exe, limits.clone());
@@ -80,6 +96,7 @@ pub fn build_service_with_jobs(
     Ok(Arc::new(
         render::RenderService::new(Arc::new(backend), limits)
             .with_font_packs_configured(font_pack_dir.is_some())
-            .with_jobs(jobs),
+            .with_jobs(jobs)
+            .with_artifacts(artifacts),
     ))
 }

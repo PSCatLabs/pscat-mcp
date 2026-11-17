@@ -660,6 +660,28 @@ async fn shutdown_signal() {
     }
 }
 
+/// Refuse the `none` auth method together with in-memory artifact links:
+/// every unauthenticated caller is the one principal `anonymous`, so one of
+/// them could fill the results budget the links share with every other
+/// client (`PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`), and read the others'
+/// links. The same reason async jobs are refused with `none`.
+pub fn check_none_with_artifact_links(
+    auth: &AuthConfig,
+    service: &RenderService,
+) -> anyhow::Result<()> {
+    let none = matches!(auth.methods(), Ok(Some(kinds)) if kinds.contains(&AuthMethodKind::None));
+    if none && service.artifacts().is_some() {
+        anyhow::bail!(
+            "refusing to start: auth method `none` (PSCAT_MCP_AUTH / --auth) cannot be combined \
+             with in-memory artifact links (PSCAT_MCP_ARTIFACT_LINKS=memory): every \
+             unauthenticated caller is the same principal, so one could fill the results budget \
+             the links share with authenticated clients (PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES) \
+             and read another's links. Turn the links off, or remove `none`"
+        );
+    }
+    Ok(())
+}
+
 /// Serve until SIGTERM/SIGINT, then shut down gracefully.
 ///
 /// On a signal the listener stops accepting connections and in-flight
@@ -683,6 +705,7 @@ pub async fn serve_with_capture(
     if capture.is_some() {
         check_capture_bind(&config)?;
     }
+    check_none_with_artifact_links(auth_config, &service)?;
     let auth = authenticator_with(&config, auth_config)?;
     let mcp_ct = CancellationToken::new();
     let jobs_service = service.clone();
@@ -702,6 +725,7 @@ pub async fn serve_with_capture(
         auth = %auth.describe(),
         auth_methods = %auth.methods().join(","),
         async_jobs = jobs_service.jobs().enabled(),
+        artifact_links = jobs_service.artifacts().map_or("off", |a| a.name()),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
         "listening; MCP endpoint at /mcp, health at /healthz and /health"

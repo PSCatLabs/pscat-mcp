@@ -135,7 +135,7 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
     assert_eq!(
         names,
         [
-            "dpi", "ink", "jitter", "paper", "seed", "size", "text", "width"
+            "delivery", "dpi", "ink", "jitter", "paper", "seed", "size", "text", "width"
         ]
     );
     assert_eq!(

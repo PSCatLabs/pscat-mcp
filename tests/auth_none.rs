@@ -698,6 +698,22 @@ fn startup_refusals() {
             "{env:?}: {stderr}"
         );
     }
+    // In-memory artifact links share the results budget across clients:
+    // refused with `none` too (#139).
+    for env in [
+        vec![none, ("PSCAT_MCP_ARTIFACT_LINKS", "memory")],
+        vec![
+            ("PSCAT_MCP_AUTH", "bearer,none"),
+            ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+            ("PSCAT_MCP_ARTIFACT_LINKS", "memory"),
+        ],
+    ] {
+        let stderr = refused(&env);
+        assert!(
+            stderr.contains("cannot be combined") && stderr.contains("PSCAT_MCP_ARTIFACT_LINKS"),
+            "{env:?}: {stderr}"
+        );
+    }
     // `bearer` alone with async jobs is fine to configure (not started here).
 }
 

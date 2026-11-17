@@ -126,6 +126,8 @@ one. Everything the deployment wires:
   With async jobs on (`PSCAT_MCP_ASYNC_JOBS`, see below), add
   `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (128 MiB by default): job results
   waiting to be fetched live in the server process, not in a worker.
+  The same holds with in-memory artifact links
+  (`PSCAT_MCP_ARTIFACT_LINKS=memory`), which share that budget.
 * **CPU.** One vCPU per concurrent render. Rendering is CPU-bound and
   single-threaded. **Set `PSCAT_MCP_MAX_CONCURRENT_RENDERS` explicitly, equal
   to the service's `--cpu`.** Unset, it defaults to min(CPUs the process
@@ -175,6 +177,12 @@ up to the memory limit each, beside the synchronous ones; results add up to
 result by default, so lower it when several tokens share the service). A hosted design (a shared job and
 result store, and a place the render gets CPU, such as a Cloud Run Job) is
 tracked in the `pscat-cloud` brief, not here.
+
+In-memory artifact links (`PSCAT_MCP_ARTIFACT_LINKS=memory`, the README's
+"Artifact links") have the same limits: a `pscat://render/...` link made on
+one instance is "resource not found" on any other, and a restart loses every
+link. Use them on a single instance; Cloud Storage signed URLs (#140) are the
+backend meant for Cloud Run.
 
 ## Font packs
 
@@ -242,6 +250,7 @@ token is `401`, never anonymous.
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
 | `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
+| `PSCAT_MCP_ARTIFACT_LINKS` | `off` (or unset): the server refuses to start with `none` and `memory` links (one anonymous client could fill the results budget the links share with authenticated clients) |
 
 **After the window closes.** Cloud Run scales to zero, so an expired
 `PSCAT_MCP_AUTH_NONE_UNTIL` left in the configuration meets every cold start

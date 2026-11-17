@@ -32,6 +32,12 @@
 //!   synchronous call, with no queue timeout. Cancelling drops the render,
 //!   which kills the worker (`backend::Worker`'s drop).
 //!
+//! * **Stored artifacts.** The memory artifact store
+//!   ([`crate::artifacts::MemoryArtifactStore`]) keeps its bytes in this
+//!   store's ledger: they are charged against the same results budget as the
+//!   jobs, never evicted for room (a link handed out stays valid until its
+//!   TTL), and held to a quota per principal of their own.
+//!
 //! Nothing here knows about MCP: results are kept as
 //! [`RenderOutput`]/[`RenderError`] and formatted by the tool layer.
 
@@ -44,6 +50,9 @@ use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::artifacts::{
+    ArtifactObject, Delivery, RENDER_CHARGE_BYTES, StoredRender, store_refusal,
+};
 use crate::config::{JOB_MIN_CHARGE_BYTES, JobsConfig, LimitsConfig};
 use crate::render::{ErrorCode, InputDiagnostic, RenderError, RenderOutput};
 
@@ -127,6 +136,12 @@ pub struct JobResult {
     pub tool: String,
     /// The render, or why it failed.
     pub outcome: Result<Arc<RenderOutput>, Arc<RenderError>>,
+    /// How the result is to be returned, as the call that started the job
+    /// asked (`inline` unless [`JobStore::set_delivery`] said otherwise).
+    pub delivery: Delivery,
+    /// The links already handed out for this result, if any, so fetching it
+    /// again gives the same `render_id` instead of storing it again.
+    pub stored: Option<StoredRender>,
 }
 
 enum State {
@@ -163,6 +178,19 @@ struct Job {
     charge: usize,
     /// Whether its result was fetched at least once.
     fetched: bool,
+    /// How its result is returned.
+    delivery: Delivery,
+    /// The links its result was stored under, once it was.
+    stored: Option<StoredRender>,
+}
+
+/// One call's artifacts held for the memory artifact store.
+struct StoredSet {
+    owner: String,
+    expires: Instant,
+    objects: Vec<ArtifactObject>,
+    /// Bytes charged against the results budget.
+    charge: usize,
 }
 
 impl Job {
@@ -177,7 +205,9 @@ impl Job {
 #[derive(Default)]
 struct Inner {
     jobs: HashMap<String, Job>,
-    /// Sum of every job's `charge`.
+    /// The memory artifact store's renders, by render id.
+    artifacts: HashMap<String, StoredSet>,
+    /// Sum of every job's and every stored render's `charge`.
     charged: usize,
 }
 
@@ -369,6 +399,8 @@ impl JobStore {
                 cancel: cancel.clone(),
                 charge: need,
                 fetched: false,
+                delivery: Delivery::Inline,
+                stored: None,
             },
         );
         Ok((id, cancel))
@@ -437,7 +469,152 @@ impl JobStore {
         inner.charged = inner.charged - old + charge;
     }
 
-    /// Drop the finished jobs older than the TTL.
+    /// Drop the stored renders that expired by `now`.
+    fn sweep_artifacts(inner: &mut Inner, now: Instant) {
+        let mut freed = 0;
+        inner.artifacts.retain(|_, a| {
+            let keep = a.expires > now;
+            if !keep {
+                freed += a.charge;
+            }
+            keep
+        });
+        inner.charged -= freed;
+    }
+
+    /// Hold `objects` for `owner` until `expires`, under a new random id
+    /// (UUID v4), which is returned. Refused with `results_budget_exceeded`
+    /// when `owner`'s stored renders would pass `quota`
+    /// (`error.input.code` `artifact_quota_bytes`) or the results budget
+    /// would be passed even after every delivered job result is dropped
+    /// (`results_budget_bytes`). Stored renders are never dropped for room.
+    pub(crate) fn put_artifacts(
+        &self,
+        owner: &str,
+        objects: Vec<ArtifactObject>,
+        quota: usize,
+        expires: Instant,
+        now: Instant,
+    ) -> Result<String, RenderError> {
+        let need = objects
+            .iter()
+            .fold(RENDER_CHARGE_BYTES, |n, o| n.saturating_add(o.bytes.len()));
+        let mut inner = self.lock();
+        self.sweep(&mut inner);
+        Self::sweep_artifacts(&mut inner, now);
+        let mine: usize = inner
+            .artifacts
+            .values()
+            .filter(|a| a.owner == owner)
+            .map(|a| a.charge)
+            .sum();
+        if mine.saturating_add(need) > quota {
+            return Err(store_refusal(
+                format!(
+                    "your stored renders hold {mine} bytes and this one needs {need}; this \
+                     server keeps at most {quota} bytes per client until links expire; use \
+                     delivery inline, or wait for earlier links to expire"
+                ),
+                "artifact_quota_bytes",
+                quota,
+                mine.saturating_add(need),
+            ));
+        }
+        let budget = self.config.job_results_budget_bytes;
+        let delivered: usize = inner
+            .jobs
+            .values()
+            .filter(|j| j.evictable())
+            .map(|j| j.charge)
+            .sum();
+        let held = inner.charged - delivered;
+        if held.saturating_add(need) > budget {
+            return Err(store_refusal(
+                format!(
+                    "results held in memory take {held} of this server's {budget} bytes and \
+                     this render needs {need}; use delivery inline, or try again later"
+                ),
+                "results_budget_bytes",
+                budget,
+                held.saturating_add(need),
+            ));
+        }
+        while inner.charged + need > budget {
+            if Self::evict_fetched(&mut inner, owner, false).is_none() {
+                break;
+            }
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        inner.charged += need;
+        inner.artifacts.insert(
+            id.clone(),
+            StoredSet {
+                owner: owner.to_string(),
+                expires,
+                objects,
+                charge: need,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Artifact `n` (from 1) of `owner`'s stored render `id`, unless it
+    /// expired by `now`: its MIME type and bytes. Another principal's id is
+    /// `None`, like an unknown one.
+    pub(crate) fn read_artifact(
+        &self,
+        owner: &str,
+        id: &str,
+        n: usize,
+        now: Instant,
+    ) -> Option<(String, Arc<[u8]>)> {
+        let mut inner = self.lock();
+        Self::sweep_artifacts(&mut inner, now);
+        let set = inner.artifacts.get(id).filter(|a| a.owner == owner)?;
+        let o = set.objects.get(n.checked_sub(1)?)?;
+        Some((o.mime_type.clone(), o.bytes.clone()))
+    }
+
+    /// Bytes `owner`'s stored renders are charged.
+    pub fn artifact_charged_bytes(&self, owner: &str) -> usize {
+        self.lock()
+            .artifacts
+            .values()
+            .filter(|a| a.owner == owner)
+            .map(|a| a.charge)
+            .sum()
+    }
+
+    /// Record how `owner`'s job `id` returns its result. Called once, as
+    /// the job is accepted.
+    pub(crate) fn set_delivery(&self, owner: &str, id: &str, delivery: Delivery) {
+        let mut inner = self.lock();
+        if let Ok(job) = self.get(&mut inner, owner, id) {
+            job.delivery = delivery;
+        }
+    }
+
+    /// Remember the links `owner`'s job `id`'s result was stored under, so
+    /// fetching it again returns them.
+    pub(crate) fn remember_links(&self, owner: &str, id: &str, stored: StoredRender) {
+        let mut inner = self.lock();
+        if let Ok(job) = self.get(&mut inner, owner, id) {
+            job.stored = Some(stored);
+        }
+    }
+
+    /// Undo the fetch of `owner`'s job `id`: its result could not be
+    /// delivered (storing it for links was refused), so it must not become
+    /// evictable as if the client had it.
+    pub(crate) fn unmark_fetched(&self, owner: &str, id: &str) {
+        let mut inner = self.lock();
+        if let Ok(job) = self.get(&mut inner, owner, id) {
+            job.fetched = false;
+        }
+    }
+
+    /// Drop the finished jobs older than the TTL, and the stored renders
+    /// that have expired.
     fn sweep(&self, inner: &mut Inner) {
         let ttl = self.config.result_ttl();
         let mut freed = 0;
@@ -449,6 +626,7 @@ impl JobStore {
             keep
         });
         inner.charged -= freed;
+        Self::sweep_artifacts(inner, Instant::now());
     }
 
     fn get<'a>(
@@ -533,6 +711,8 @@ impl JobStore {
         let result = outcome.map(|outcome| JobResult {
             tool: job.tool.clone(),
             outcome,
+            delivery: job.delivery,
+            stored: job.stored.clone(),
         });
         Ok((facts, result))
     }

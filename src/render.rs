@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::artifacts::{ArtifactStore, LinksBackend, MemoryArtifactStore};
 use crate::backend::{BackendError, RenderBackend};
-use crate::config::{JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
+use crate::config::{
+    ArtifactConfig, JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX,
+};
 use crate::generate::{GenerateJob, PlannedPage};
 use crate::jobs::{JobState, JobStatus, JobStore};
 use crate::worker::{
@@ -589,7 +592,12 @@ pub struct RenderService {
     /// ([`RenderService::with_font_packs_configured`]). Only reported.
     font_packs_configured: bool,
     /// Async jobs (off unless [`RenderService::with_jobs`] turned them on).
-    jobs: JobStore,
+    /// Its ledger also holds the memory artifact store's bytes.
+    jobs: Arc<JobStore>,
+    /// Artifact delivery settings ([`RenderService::with_artifacts`]).
+    artifact_config: ArtifactConfig,
+    /// Where links point, when `artifact_config` turns them on.
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     /// Counters for health and tests.
     pub counters: Arc<Counters>,
 }
@@ -599,7 +607,9 @@ impl RenderService {
     pub fn new(backend: Arc<dyn RenderBackend>, limits: LimitsConfig) -> Self {
         let slots = Arc::new(Semaphore::new(limits.concurrency()));
         RenderService {
-            jobs: JobStore::new(JobsConfig::default(), &limits),
+            jobs: Arc::new(JobStore::new(JobsConfig::default(), &limits)),
+            artifact_config: ArtifactConfig::default(),
+            artifacts: None,
             backend,
             limits,
             slots,
@@ -625,8 +635,58 @@ impl RenderService {
     /// The same service serving async jobs with `jobs` (on only when
     /// `jobs.enabled`).
     pub fn with_jobs(mut self, jobs: JobsConfig) -> Self {
-        self.jobs = JobStore::new(jobs, &self.limits);
+        self.jobs = Arc::new(JobStore::new(jobs, &self.limits));
+        self.rebuild_artifacts()
+    }
+
+    /// The same service with artifact delivery as `config` says: links
+    /// (`url`, `both`, `auto`) only with a backend. The memory backend
+    /// shares the async-job results budget, so it is built over the job
+    /// store whichever of this and [`Self::with_jobs`] comes last.
+    pub fn with_artifacts(mut self, config: ArtifactConfig) -> Self {
+        self.artifact_config = config;
+        self.rebuild_artifacts()
+    }
+
+    /// The same service with `store` as its artifact store (tests: a store
+    /// with its own clock). `config`'s backend setting is not consulted.
+    pub fn with_artifact_store(
+        mut self,
+        config: ArtifactConfig,
+        store: Arc<dyn ArtifactStore>,
+    ) -> Self {
+        self.artifact_config = config;
+        self.artifacts = Some(store);
         self
+    }
+
+    fn rebuild_artifacts(mut self) -> Self {
+        let c = &self.artifact_config;
+        self.artifacts = match c.artifact_links {
+            LinksBackend::Memory => Some(Arc::new(MemoryArtifactStore::new(
+                self.jobs.clone(),
+                c.ttl(),
+                c.artifact_quota_bytes,
+            ))),
+            // `gcs` is refused at startup (`ArtifactConfig::check`).
+            LinksBackend::Off | LinksBackend::Gcs => None,
+        };
+        self
+    }
+
+    /// The artifact store links point to, if any.
+    pub fn artifacts(&self) -> Option<&Arc<dyn ArtifactStore>> {
+        self.artifacts.as_ref()
+    }
+
+    /// Artifact delivery settings.
+    pub fn artifact_config(&self) -> &ArtifactConfig {
+        &self.artifact_config
+    }
+
+    /// The job store's ledger, shared with the memory artifact store.
+    pub fn job_store(&self) -> &Arc<JobStore> {
+        &self.jobs
     }
 
     /// The async job store.

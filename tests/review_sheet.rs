@@ -230,7 +230,9 @@ async fn the_tool_is_listed_with_the_plugins_arguments() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["dpi", "entries", "height", "labels", "sizes", "width"]
+        [
+            "delivery", "dpi", "entries", "height", "labels", "sizes", "width"
+        ]
     );
     assert_eq!(schema["required"], json!(["entries"]));
     assert_eq!(props["entries"]["maxItems"], 12, "{schema}");
