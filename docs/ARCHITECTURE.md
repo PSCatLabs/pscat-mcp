@@ -745,9 +745,18 @@ and `http::authenticator_with` builds it. Nothing about it is on by default.
 one that no other method found a credential in, in this order:
 
 1. **Expiry** (`PSCAT_MCP_AUTH_NONE_UNTIL`): `AuthError::AccessExpired`
-   (`403`). Startup refuses a time that has passed; the time is also checked
-   per request, because an instance can outlive it. The clock is injectable
-   (`NoneGuard::with_clock`).
+   (`403`). The time is checked per request, because an instance can outlive
+   it. The clock is injectable (`NoneGuard::with_clock`). A time that has
+   already passed at startup does not refuse to start (a scale-to-zero cold
+   start must not take the bearer clients down): `http::authenticator_with`
+   logs a warning and puts `auth::ExpiredNoAuth` in the chain in place of
+   `NoAuth`. It is a fallback too, never admits and reads no clock, and
+   answers every request that reaches it `AccessExpired`, so a request with
+   no credential gets the same `403` as on a running server whose window just
+   closed. `AuthMethod::is_active` is false for it, so `auth_methods` lists
+   only the real methods (empty when `none` was the only one: every request
+   is then `403`). A malformed time, a bad CIDR, a zero limit and async jobs
+   still refuse to start; they are configuration errors.
 2. **Source allowlist** (`PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS`):
    `AuthError::SourceNotAllowed` (`403`), also for an address that cannot be
    determined (fail closed). A refused source creates no limiter state.

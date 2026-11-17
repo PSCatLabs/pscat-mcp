@@ -311,6 +311,14 @@ pub trait AuthMethod: Send + Sync + 'static {
         false
     }
 
+    /// Whether this method is part of the enabled set. `false` for a
+    /// placeholder that only answers a refusal ([`ExpiredNoAuth`]): it is
+    /// consulted but never listed in [`Authenticator::methods`] or
+    /// [`Authenticator::describe`].
+    fn is_active(&self) -> bool {
+        true
+    }
+
     /// Short description for startup logs (no secrets).
     fn summary(&self) -> String;
 }
@@ -428,12 +436,17 @@ impl Authenticator for AuthChain {
     }
 
     fn methods(&self) -> Vec<&'static str> {
-        self.methods.iter().map(|m| m.name()).collect()
+        self.methods
+            .iter()
+            .filter(|m| m.is_active())
+            .map(|m| m.name())
+            .collect()
     }
 
     fn describe(&self) -> String {
         self.methods
             .iter()
+            .filter(|m| m.is_active())
             .map(|m| m.summary())
             .collect::<Vec<_>>()
             .join(", ")
@@ -508,6 +521,43 @@ impl AuthMethod for NoAuth {
             Some(guard) => guard.summary(),
             None => "none (unauthenticated, loopback only)".into(),
         }
+    }
+}
+
+/// What stands in for `none` when `PSCAT_MCP_AUTH_NONE_UNTIL` had already
+/// passed at startup (issue #128). `none` is disabled, not an error: the
+/// server starts, so the other methods keep working through a cold start.
+///
+/// It is a fallback like [`NoAuth`] and refuses every request it is asked
+/// about, with [`AuthError::AccessExpired`] (`403
+/// unauthenticated_access_expired`), the answer a running server gives once
+/// the window closes. It never admits and reads no clock, so no request can
+/// become anonymous through it. It is not [active](AuthMethod::is_active):
+/// the enabled methods do not list `none`.
+#[derive(Debug)]
+pub struct ExpiredNoAuth;
+
+impl AuthMethod for ExpiredNoAuth {
+    fn name(&self) -> &'static str {
+        NoAuth::NAME
+    }
+
+    fn check<'a>(&'a self, _parts: &'a http::request::Parts) -> AuthFuture<'a, Outcome> {
+        Box::pin(std::future::ready(Outcome::Rejected(
+            AuthError::AccessExpired,
+        )))
+    }
+
+    fn is_fallback(&self) -> bool {
+        true
+    }
+
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    fn summary(&self) -> String {
+        "none (disabled: expired)".into()
     }
 }
 
@@ -978,6 +1028,40 @@ mod tests {
             block_on(c.admit(&parts_with(&[("x-fake-user", "alice")]))).unwrap(),
             Principal::new("fake", "fake:alice")
         );
+    }
+
+    #[test]
+    fn an_expired_none_refuses_and_is_not_listed() {
+        // In either order, beside bearer or alone: a request with no
+        // credential is a 403, never anonymous and never a bare 401; a
+        // valid token still gets in and a wrong one stays a 401.
+        for expired_first in [true, false] {
+            let expired: Box<dyn AuthMethod> = Box::new(ExpiredNoAuth);
+            let c = if expired_first {
+                chain(vec![expired, Box::new(auth())])
+            } else {
+                chain(vec![Box::new(auth()), expired])
+            };
+            assert_eq!(c.methods(), ["bearer"], "{expired_first}");
+            assert!(!c.describe().contains("none"), "{}", c.describe());
+            let d = block_on(c.admit(&parts(None))).unwrap_err();
+            assert_eq!(d.error, AuthError::AccessExpired, "{expired_first}");
+            assert_eq!(d.rejected_by, ["none"]);
+            assert_eq!(
+                block_on(c.admit(&parts(Some("Bearer alpha-token")))).unwrap(),
+                Principal::new("bearer", "token#0"),
+                "{expired_first}"
+            );
+            let d = block_on(c.admit(&parts(Some("Bearer wrong")))).unwrap_err();
+            assert_eq!(d.error, AuthError::InvalidToken, "{expired_first}");
+        }
+        let alone = chain(vec![Box::new(ExpiredNoAuth)]);
+        assert!(alone.methods().is_empty());
+        for header in [None, Some("Bearer alpha-token"), Some("Basic x")] {
+            let d = block_on(alone.admit(&parts(header))).unwrap_err();
+            assert_eq!(d.error, AuthError::AccessExpired, "{header:?}");
+            assert_eq!(d.error.status(), StatusCode::FORBIDDEN);
+        }
     }
 
     #[test]

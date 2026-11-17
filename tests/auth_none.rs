@@ -2,7 +2,7 @@
 //! `PSCAT_MCP_AUTH=none` and `bearer,none`, the source allowlist, the
 //! per-client rate limit, the trusted-hop client address (a forged
 //! `X-Forwarded-For` can neither escape the allowlist nor reset or spend
-//! another client's limit), the expiry at startup and at request time, and
+//! another client's limit), the expiry at startup (an expired time disables `none`) and at request time, and
 //! the refusal with async jobs. Most tests run the real server binary over
 //! HTTP; the request-time expiry runs the router in-process with an
 //! injected clock, so none of them waits for a timer.
@@ -666,20 +666,8 @@ async fn a_forged_x_forwarded_for_changes_nothing() {
 #[test]
 fn startup_refusals() {
     let none = ("PSCAT_MCP_AUTH", "none");
-    // Already past.
-    let stderr = refused(&[none, ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-01-01T00:00:00Z")]);
-    assert!(
-        stderr.contains("has expired") && stderr.contains("already passed"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("PSCAT_MCP_AUTH_NONE_UNTIL"), "{stderr}");
-    // With an offset, too.
-    let stderr = refused(&[
-        none,
-        ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-01-01T00:00:00+02:00"),
-    ]);
-    assert!(stderr.contains("already passed"), "{stderr}");
-    // Not a time, a bad CIDR, a zero limit or window.
+    // A time that is not a time (an expired one starts: see
+    // `an_expired_window_starts_with_none_disabled`), a bad CIDR, a zero limit or window.
     let stderr = refused(&[none, ("PSCAT_MCP_AUTH_NONE_UNTIL", "next tuesday")]);
     assert!(stderr.contains("not an RFC 3339 time"), "{stderr}");
     let stderr = refused(&[
@@ -711,6 +699,165 @@ fn startup_refusals() {
         );
     }
     // `bearer` alone with async jobs is fine to configure (not started here).
+}
+
+/// The startup log lines of `srv`, once the `auth_methods` line is in.
+fn enabled_methods(srv: &Server) -> String {
+    let lines = srv.lines();
+    let enabled = lines
+        .iter()
+        .find(|v| v["message"] == "auth methods enabled (PSCAT_MCP_AUTH)")
+        .unwrap_or_else(|| panic!("no auth methods line: {lines:?}"));
+    enabled["auth_methods"].as_str().unwrap().to_string()
+}
+
+/// The WARN a start with an expired window logs: it names the setting and
+/// the expiry time.
+fn assert_expiry_warning(srv: &Server, until: &str) {
+    let lines = srv.lines();
+    let warned = lines
+        .iter()
+        .find(|v| {
+            v["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("`none` is DISABLED"))
+        })
+        .unwrap_or_else(|| panic!("no expiry warning: {lines:?}"));
+    assert_eq!(warned["level"], "WARN");
+    let m = warned["message"].as_str().unwrap();
+    assert!(m.contains("PSCAT_MCP_AUTH_NONE_UNTIL"), "{m}");
+    assert_eq!(warned["until"], until, "{warned}");
+    // The loud "ENABLED" warning of a live `none` is not logged.
+    let text = srv.log.lock().unwrap().join("\n");
+    assert!(!text.contains("is ENABLED"), "{text}");
+}
+
+/// An already expired window does not stop the server (issue #128): with
+/// `bearer,none` it starts with `none` disabled, a bearer request is
+/// served, and a request with no credential is `403`, not admitted and not a
+/// bare `401`. The startup log warns and lists only `bearer`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_window_starts_with_none_disabled() {
+    for (methods, until) in [
+        ("bearer,none", "2020-01-01T00:00:00Z"),
+        ("none,bearer", "2020-01-01T00:00:00+02:00"),
+    ] {
+        let srv = Server::start(&[
+            ("PSCAT_MCP_AUTH", methods),
+            ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+            ("PSCAT_MCP_AUTH_NONE_UNTIL", until),
+        ])
+        .await;
+        let good = srv
+            .post(&[
+                ("Authorization", &bearer(TOKEN)),
+                ("X-Forwarded-For", "1.2.3.4"),
+            ])
+            .await;
+        assert_eq!(good.status, 200, "{good:?}");
+        for headers in [vec![], vec![("X-Forwarded-For", "203.0.113.7")]] {
+            let seen = srv.post(&headers).await;
+            assert_eq!(seen.status, 403, "{headers:?}: {seen:?}");
+            assert_eq!(seen.error_code(), "unauthenticated_access_expired");
+        }
+        // A wrong token is still a 401 and never anonymous.
+        let wrong = srv.post(&[("Authorization", "Bearer wrong")]).await;
+        assert_eq!(wrong.status, 401, "{wrong:?}");
+        assert_eq!(wrong.error_code(), "invalid_token");
+        assert_eq!(enabled_methods(&srv), "bearer");
+        let parsed = chrono::DateTime::parse_from_rfc3339(until).unwrap();
+        assert_expiry_warning(&srv, &parsed.with_timezone(&chrono::Utc).to_rfc3339());
+        // The two 403s were logged as refused, and nothing was ever
+        // admitted as `none`.
+        let reasons = srv.rejection_reasons(3).await;
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|r| r.as_str() == "unauthenticated_access_expired")
+                .count(),
+            2,
+            "{reasons:?}"
+        );
+        // Wait for the response lines of the four requests, then look at
+        // who each was admitted as.
+        let mut done = Vec::new();
+        for _ in 0..100 {
+            done = srv
+                .lines()
+                .into_iter()
+                .filter(|v| v["message"] == "finished processing request")
+                .collect();
+            if done.len() >= 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(done.len(), 4, "{done:?}");
+        let admitted: Vec<&Value> = done.iter().filter(|v| v["status"] == 200).collect();
+        assert_eq!(admitted.len(), 1, "{done:?}");
+        assert_eq!(admitted[0]["span"]["auth_method"], "bearer", "{done:?}");
+        assert!(
+            done.iter().all(|v| v["span"]["auth_method"] != "none"),
+            "{done:?}"
+        );
+    }
+}
+
+/// `none` alone and expired: the server starts (consistent with the above)
+/// and every request is `403 unauthenticated_access_expired`, with or
+/// without a header. Nothing is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_none_alone_answers_403_to_everything() {
+    let srv = Server::start(&[
+        ("PSCAT_MCP_AUTH", "none"),
+        ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-01-01T00:00:00Z"),
+        // Tokens are ignored without `bearer`, as ever.
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+    ])
+    .await;
+    for headers in [
+        vec![],
+        vec![("Authorization", "Bearer wrong")],
+        vec![("Authorization", "Basic x")],
+    ] {
+        let seen = srv.post(&headers).await;
+        assert_eq!(seen.status, 403, "{headers:?}: {seen:?}");
+        assert_eq!(seen.error_code(), "unauthenticated_access_expired");
+    }
+    let seen = srv.post(&[("Authorization", &bearer(TOKEN))]).await;
+    assert_eq!(seen.status, 403, "{seen:?}");
+    assert_eq!(enabled_methods(&srv), "");
+    assert_expiry_warning(&srv, "2020-01-01T00:00:00+00:00");
+    let text = srv.log.lock().unwrap().join("\n");
+    assert!(text.contains("no auth method is enabled"), "{text}");
+}
+
+/// A malformed time is a configuration error even beside bearer: no start.
+#[test]
+fn a_malformed_time_still_refuses_beside_bearer() {
+    let stderr = refused(&[
+        ("PSCAT_MCP_AUTH", "bearer,none"),
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+        ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-13-45"),
+    ]);
+    assert!(stderr.contains("not an RFC 3339 time"), "{stderr}");
+    // An expired time does not excuse the other errors either.
+    let stderr = refused(&[
+        ("PSCAT_MCP_AUTH", "bearer,none"),
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+        ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-01-01T00:00:00Z"),
+        ("PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS", "banana"),
+    ]);
+    assert!(stderr.contains("banana"), "{stderr}");
+    let stderr = refused(&[
+        ("PSCAT_MCP_AUTH", "none"),
+        ("PSCAT_MCP_AUTH_NONE_UNTIL", "2020-01-01T00:00:00Z"),
+        ("PSCAT_MCP_ASYNC_JOBS", "true"),
+    ]);
+    assert!(
+        stderr.contains("cannot be combined with async jobs"),
+        "{stderr}"
+    );
 }
 
 /// A future expiry starts and serves, and the startup line says when.
