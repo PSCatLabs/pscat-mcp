@@ -541,10 +541,14 @@ default of `url` working for jobs too.
 tool layer logs no result, the store logs nothing, the not-found error does
 not echo the URI, and capture mode records request bodies with every
 `pscat://render/<id>` (also JSON-escaped) redacted (`redact_render_links`).
-rmcp itself logs whole requests and responses at DEBUG under
-`rmcp::service`, which the default filter holds at WARN; raising it with
-`RUST_LOG` logs links like it logs PostScript sources. That matters more for
-signed URLs (#140), which are bearer capabilities.
+rmcp itself logs whole requests, responses and notifications below WARN
+(`rmcp::service` at DEBUG, INFO and TRACE; the raw line and a per-message line
+in `rmcp::transport::async_rw` and `...::streamable_http_server::tower`), which
+would log links like it logs PostScript sources, and signed URLs (#140) are
+bearer capabilities. So `telemetry::rmcp_clamp`, a filter on the log layer
+next to the `RUST_LOG` filter, holds every `rmcp` target to WARN and ERROR
+whatever `RUST_LOG` says (`RUST_LOG=trace` included); our `pscat_mcp` targets
+are untouched. rmcp's WARN and ERROR lines stay (`tests/logging.rs`).
 
 ## Agent guidance (prompts and resources)
 
@@ -858,9 +862,11 @@ Linux job is x86_64).
   bytes (see [Artifact delivery](#artifact-delivery)). The one exception is the opt-in capture mode
   (`--capture-file`), which records request bodies and tokens never, and is
   refused unless the bind address is loopback.
-  The default filter holds rmcp's `rmcp::service` target to WARN, so its
-  INFO dump of the `initialize` parameters (over stdio, the client's own
-  strings) stays out of the logs; `RUST_LOG` replaces the default (`tests/logging.rs`).
+  Every `rmcp` target is held to WARN and ERROR by a filter on the log layer
+  that `RUST_LOG` cannot lift, so rmcp's dumps of whole messages (the
+  `initialize` parameters, which over stdio are the client's own strings,
+  requests, results) stay out of the logs; `RUST_LOG` replaces the default
+  filter for our own targets (`tests/logging.rs`).
 * **Statelessness**: Streamable HTTP runs without sessions
   (`legacy_session_mode = false`, JSON responses), so any instance can serve
   any request and nothing is stored between requests, except async jobs
