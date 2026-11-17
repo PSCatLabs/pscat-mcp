@@ -237,11 +237,33 @@ token is `401`, never anonymous.
 | Setting | Value |
 |---|---|
 | `PSCAT_MCP_AUTH` | `bearer,none` (or `none` with no token at all) |
-| `PSCAT_MCP_AUTH_NONE_UNTIL` | a near time, such as a week ahead (`2026-12-01T00:00:00Z`). Startup refuses a past time, and a running instance answers `403` after it |
+| `PSCAT_MCP_AUTH_NONE_UNTIL` | a near time, such as a week ahead (`2026-12-01T00:00:00Z`). A running instance answers `403` after it, and a start after it (a cold start, a new revision) comes up with `none` disabled instead of failing; see "After the window closes" below |
 | `PSCAT_MCP_AUTH_NONE_TRUSTED_HOPS` | see "The client address" below: `1` on the `run.app` URL (measured, see below), `2` behind an external Application Load Balancer |
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
 | `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
+
+**After the window closes.** Cloud Run scales to zero, so an expired
+`PSCAT_MCP_AUTH_NONE_UNTIL` left in the configuration meets every cold start
+and every new revision. The server does not refuse to start then, because
+that would take the bearer clients, CI end-to-end runs and deploys down with
+the anonymous access it was only meant to add. With `none` in
+`PSCAT_MCP_AUTH` and a time that has already passed, it starts normally with
+`none` disabled:
+
+* a `WARN` names `PSCAT_MCP_AUTH_NONE_UNTIL` and the expiry time, and the
+  startup `auth_methods` line lists only the methods still enabled (`bearer`);
+* bearer requests work as before, and a wrong token is still `401`;
+* a request with no credential gets `403 unauthenticated_access_expired`,
+  exactly what a running instance answers once its window closes. It is
+  never admitted;
+* with `none` as the only method, the server still starts, `auth_methods` is
+  empty and every request gets that `403`.
+
+This is a safe state, not a finished one: remove `none` and the
+`PSCAT_MCP_AUTH_NONE_*` settings, or set a later time, at the next deploy. A
+malformed time, a bad CIDR, a rate limit or window of 0, and `none` with
+async jobs are configuration errors and still refuse to start.
 
 Cloud Run itself must let the caller in: ChatGPT can't send a Google ID
 token, so the service needs `--allow-unauthenticated` (the public

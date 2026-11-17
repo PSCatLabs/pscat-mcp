@@ -9,9 +9,12 @@
 //! [`AuthError`] that carries the status:
 //!
 //! 1. **Expiry** (`PSCAT_MCP_AUTH_NONE_UNTIL`, RFC 3339): from that instant
-//!    on, requests get `403 unauthenticated_access_expired`. Startup refuses
-//!    a time that has already passed, but a Cloud Run instance can outlive
-//!    it, so the time is checked on every request.
+//!    on, requests get `403 unauthenticated_access_expired`. A running
+//!    instance can outlive the time (Cloud Run), so it is checked on every
+//!    request. A time that has already passed at startup does not stop the
+//!    server (a cold start must not take the other methods down): `none` is
+//!    left out of the enabled methods and [`crate::auth::ExpiredNoAuth`]
+//!    answers the same 403 in its place (see `http::authenticator_with`).
 //! 2. **Source allowlist** (`PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS`): a client
 //!    address outside every listed CIDR gets `403 source_not_allowed`. An
 //!    address that cannot be determined is outside the list. Rejected
@@ -68,7 +71,8 @@ pub const DEFAULT_RATE_WINDOW_SECS: u64 = 60;
 pub struct NoneAuthConfig {
     /// With `none` in `--auth`: the time, RFC 3339 (for example
     /// `2026-12-01T00:00:00Z`), after which no-auth requests are refused
-    /// with 403. The server refuses to start if it has already passed.
+    /// with 403. If it has already passed at startup, the server still
+    /// starts, with `none` disabled and a warning.
     #[arg(
         long = "auth-none-until",
         env = "PSCAT_MCP_AUTH_NONE_UNTIL",
@@ -288,8 +292,9 @@ impl std::fmt::Debug for NoneGuard {
 
 impl NoneGuard {
     /// Build the guard from `config` with the system clock. Fails with a
-    /// message for an unparsable or already passed `until`, a bad CIDR, or a
-    /// rate limit or window of 0.
+    /// message for an unparsable `until`, a bad CIDR, or a rate limit or
+    /// window of 0. An `until` that has already passed is not an error: see
+    /// [`NoneGuard::is_expired`].
     pub fn new(config: &NoneAuthConfig) -> Result<NoneGuard, String> {
         NoneGuard::with_clock(config, Arc::new(Utc::now))
     }
@@ -307,14 +312,6 @@ impl NoneGuard {
                         )
                     })?
                     .with_timezone(&Utc);
-                if clock() >= until {
-                    return Err(format!(
-                        "auth method `none` has expired: PSCAT_MCP_AUTH_NONE_UNTIL / \
-                         --auth-none-until is {}, which has already passed; set a later time, \
-                         or remove `none` from PSCAT_MCP_AUTH",
-                        until.to_rfc3339()
-                    ));
-                }
                 Some(until)
             }
         };
@@ -371,6 +368,12 @@ impl NoneGuard {
         }
         s.push(')');
         s
+    }
+
+    /// Whether the expiry has passed now. The same test [`NoneGuard::check`]
+    /// applies to every request.
+    pub fn is_expired(&self) -> bool {
+        self.until.is_some_and(|until| (self.clock)() >= until)
     }
 
     /// When the mode expires, if it does.
@@ -792,13 +795,14 @@ mod tests {
             g.check(&peer("198.51.100.4")),
             Err(AuthError::AccessExpired)
         );
-        // Expiry wins over everything else, and a restart refuses.
+        // Expiry wins over everything else.
         assert_eq!(g.check(&peer("10.0.0.1")), Err(AuthError::AccessExpired));
-        let err = NoneGuard::with_clock(&cfg, c).err().unwrap();
-        assert!(
-            err.contains("has expired") && err.contains("already passed"),
-            "{err}"
-        );
+        assert!(g.is_expired());
+        // A restart after it builds a guard that reports the expiry (the
+        // server then disables `none`); it is not a construction error.
+        let again = NoneGuard::with_clock(&cfg, c).unwrap();
+        assert!(again.is_expired());
+        assert_eq!(again.until(), Some(until));
     }
 
     #[test]

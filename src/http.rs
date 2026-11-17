@@ -43,7 +43,9 @@ use tower::ServiceBuilder;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
-use crate::auth::{AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial, NoAuth};
+use crate::auth::{
+    AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial, ExpiredNoAuth, NoAuth,
+};
 use crate::auth_none::NoneGuard;
 use crate::capture::{Capture, capture_layer};
 use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
@@ -136,8 +138,14 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
 ///   no-auth mode (issue #120, [`crate::auth_none`]): it is refused together
 ///   with async jobs (every anonymous caller is one principal, so one could
 ///   read or cancel another's jobs; Tasks need async jobs, so are covered),
-///   and with an expired `PSCAT_MCP_AUTH_NONE_UNTIL`; it may run off
-///   loopback, and a loud warning is logged. `--allow-unauthenticated` is
+///   (an expired `PSCAT_MCP_AUTH_NONE_UNTIL` is not refused: `none` is
+///   disabled instead, see below); it may run off loopback, and a loud
+///   warning is logged. A `PSCAT_MCP_AUTH_NONE_UNTIL` that has already
+///   passed at startup (issue #128) starts the server with `none` left out
+///   of the enabled methods and [`ExpiredNoAuth`] in its place, which
+///   answers `403 unauthenticated_access_expired` to a request with no
+///   credential. Scale-to-zero cold starts must not take the other methods
+///   down; with `none` alone, every request gets that 403. `--allow-unauthenticated` is
 ///   still refused on a non-loopback bind, and is otherwise ignored (with a
 ///   warning): the list says what is accepted.
 pub fn authenticator_with(
@@ -205,6 +213,17 @@ pub fn authenticator_with(
             AuthMethodKind::None => {
                 let guard = NoneGuard::new(&auth.none)
                     .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+                if let Some(until) = guard.until().filter(|_| guard.is_expired()) {
+                    tracing::warn!(
+                        until = %until.to_rfc3339(),
+                        "auth method `none` is DISABLED: PSCAT_MCP_AUTH_NONE_UNTIL / \
+                         --auth-none-until has already passed, so requests with no credential \
+                         get 403 unauthenticated_access_expired; the other methods are \
+                         unaffected. Remove `none` from PSCAT_MCP_AUTH or set a later time"
+                    );
+                    methods.push(Box::new(ExpiredNoAuth));
+                    continue;
+                }
                 tracing::warn!(
                     guard = %guard.summary(),
                     "auth method `none` is ENABLED: /mcp accepts requests with NO credentials \
@@ -221,6 +240,12 @@ pub fn authenticator_with(
         );
     }
     let chain = AuthChain::new(methods);
+    if chain.methods().is_empty() {
+        tracing::warn!(
+            "no auth method is enabled (`none` is the only one in PSCAT_MCP_AUTH and it has \
+             expired): every request to /mcp gets 403 unauthenticated_access_expired"
+        );
+    }
     tracing::info!(
         auth_methods = %chain.methods().join(","),
         "auth methods enabled (PSCAT_MCP_AUTH)"
