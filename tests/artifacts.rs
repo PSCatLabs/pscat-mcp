@@ -698,12 +698,10 @@ fn refused_start(env: &[(&str, &str)]) -> (bool, String) {
 
 #[test]
 fn gcs_and_a_default_without_links_refuse_to_start() {
+    // `gcs` needs a bucket (the rest is in tests/artifacts_gcs.rs).
     let (ok, err) = refused_start(&[("PSCAT_MCP_ARTIFACT_LINKS", "gcs")]);
     assert!(!ok, "{err}");
-    assert!(
-        err.contains("not implemented yet") && err.contains("#140"),
-        "{err}"
-    );
+    assert!(err.contains("PSCAT_MCP_ARTIFACT_BUCKET"), "{err}");
     let (ok, err) = refused_start(&[("PSCAT_MCP_ARTIFACT_DELIVERY", "url")]);
     assert!(!ok, "{err}");
     assert!(err.contains("PSCAT_MCP_ARTIFACT_LINKS is off"), "{err}");

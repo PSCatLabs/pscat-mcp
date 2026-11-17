@@ -583,6 +583,11 @@ pub struct RenderToolOutput {
     /// each with its `download_url` and `expires_at`, is the manifest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub render_id: Option<String>,
+    /// Set when links were asked for (`delivery` `both`, or `auto` over the
+    /// threshold) but could not be made (`storage_unavailable`): the output
+    /// is inline instead, and this says so. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_note: Option<String>,
     /// The failure, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -644,6 +649,11 @@ pub struct SheetToolOutput {
     /// When `download_url` stops working (RFC 3339, UTC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Set when links were asked for (`delivery` `both`, or `auto` over the
+    /// threshold) but could not be made (`storage_unavailable`): the output
+    /// is inline instead, and this says so. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_note: Option<String>,
     /// The failure, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -1025,17 +1035,31 @@ impl PscatMcp {
         }
         if let Some(store) = service.artifacts() {
             let c = service.artifact_config();
-            let note = format!(
-                " With delivery url or both, the output is also kept on this server for {} s (at \
-                 most {} bytes per client at once) and linked as \
-                 pscat://render/<render_id>/<n> resources, read with resources/read by the same \
-                 client; auto gives links when the output is over {} bytes. The default delivery \
-                 here is {}.",
-                store.ttl().as_secs(),
-                store.quota_bytes(),
-                c.artifact_threshold_bytes,
-                c.artifact_delivery.as_str()
-            );
+            let note = if store.name() == "gcs" {
+                format!(
+                    " With delivery url or both, the output is uploaded to Cloud Storage and \
+                     linked by https signed URLs that work for {} s (at most {} bytes per client \
+                     within that time); auto gives links when the output is over {} bytes. If \
+                     the upload fails, url returns storage_unavailable and both or auto return \
+                     the output inline. The default delivery here is {}.",
+                    store.ttl().as_secs(),
+                    store.quota_bytes(),
+                    c.artifact_threshold_bytes,
+                    c.artifact_delivery.as_str()
+                )
+            } else {
+                format!(
+                    " With delivery url or both, the output is also kept on this server for {} s \
+                     (at most {} bytes per client at once) and linked as \
+                     pscat://render/<render_id>/<n> resources, read with resources/read by the \
+                     same client; auto gives links when the output is over {} bytes. The default \
+                     delivery here is {}.",
+                    store.ttl().as_secs(),
+                    store.quota_bytes(),
+                    c.artifact_threshold_bytes,
+                    c.artifact_delivery.as_str()
+                )
+            };
             for name in LINK_TOOLS {
                 if let Some(route) = tool_router.map.get_mut(name) {
                     let base = route.attr.description.clone().unwrap_or_default();
@@ -1077,6 +1101,7 @@ impl PscatMcp {
             // Known now only when no pack directory is configured; otherwise
             // `guide()` reads the installed packs from the catalog first.
             artifact_links_ttl_secs: service.artifacts().map(|a| a.ttl().as_secs()),
+            artifact_links_signed: service.artifacts().is_some_and(|a| a.name() == "gcs"),
             pack_faces: if service.font_packs_configured() {
                 PackFaces::Configured { installed: None }
             } else {
@@ -1169,14 +1194,15 @@ impl PscatMcp {
     }
 
     /// Store `out`'s artifacts if `delivery` comes to links for its size,
-    /// for the principal `owner` gives. `None` when the result is inline.
-    /// The second value says whether the bytes go inline too (`both`).
+    /// for the principal `owner` gives. A store failure
+    /// (`storage_unavailable`) is the tool's error for `url` only: for
+    /// `both` and `auto` the output goes inline, with a note.
     async fn store_output(
         &self,
         out: &RenderOutput,
         delivery: Delivery,
         owner: impl FnOnce() -> Result<String, RenderError>,
-    ) -> Result<Option<(StoredRender, bool)>, RenderError> {
+    ) -> Result<Stored, RenderError> {
         let total = out
             .artifacts
             .iter()
@@ -1186,10 +1212,12 @@ impl PscatMcp {
             self.service.artifact_config().artifact_threshold_bytes,
         );
         if decided == Delivery::Inline {
-            return Ok(None);
+            return Ok(Stored::Inline);
         }
-        let stored = self.put_output(out, &owner()?).await?;
-        Ok(Some((stored, decided.inline_bytes())))
+        match self.put_output(out, &owner()?).await {
+            Ok(stored) => Ok(Stored::Links(stored, decided.inline_bytes())),
+            Err(err) => fall_back_inline(delivery, err),
+        }
     }
 
     /// Store `out`'s artifacts for `owner`.
@@ -1237,8 +1265,8 @@ impl PscatMcp {
             .store_output(&out, delivery, || principal(self.transport, ext))
             .await
         {
-            Ok(None) => render_success(out, svg),
-            Ok(Some((stored, inline))) => render_success_with(
+            Ok(Stored::Inline) => render_success(out, svg),
+            Ok(Stored::Links(stored, inline)) => render_success_with(
                 out,
                 svg,
                 Some(Links {
@@ -1246,6 +1274,7 @@ impl PscatMcp {
                     inline,
                 }),
             ),
+            Ok(Stored::Fallback(note)) => with_delivery_note(render_success(out, svg), &note),
             Err(err) => failure_with(lead, err),
         }
     }
@@ -1289,14 +1318,22 @@ impl PscatMcp {
                     }
                     stored
                 }
-                Err(err) => {
-                    // Not delivered: keep the result as unfetched, so it is
-                    // not dropped for room before the client gets it.
-                    if let Some(id) = job_id {
-                        self.service.jobs().unmark_fetched(owner, id);
+                Err(err) => match fall_back_inline(result.delivery, err) {
+                    // Delivered inline: nothing to remember, and the
+                    // result counts as fetched.
+                    Ok(Stored::Fallback(note)) => {
+                        return with_delivery_note(render_success((*out).clone(), svg), &note);
                     }
-                    return failure_with(lead, err);
-                }
+                    Ok(_) => unreachable!("fall_back_inline gives a fallback or an error"),
+                    Err(err) => {
+                        // Not delivered: keep the result as unfetched, so it
+                        // is not dropped for room before the client gets it.
+                        if let Some(id) = job_id {
+                            self.service.jobs().unmark_fetched(owner, id);
+                        }
+                        return failure_with(lead, err);
+                    }
+                },
             },
         };
         render_success_with(
@@ -1663,14 +1700,15 @@ impl PscatMcp {
             .store_output(&out, delivery, || principal(self.transport, &ext))
             .await
         {
-            Ok(None) => sheet_success(out),
-            Ok(Some((stored, inline))) => sheet_success_with(
+            Ok(Stored::Inline) => sheet_success(out),
+            Ok(Stored::Links(stored, inline)) => sheet_success_with(
                 out,
                 Some(Links {
                     stored: &stored,
                     inline,
                 }),
             ),
+            Ok(Stored::Fallback(note)) => with_delivery_note(sheet_success(out), &note),
             Err(err) => sheet_failure(err),
         }
     }
@@ -2104,6 +2142,14 @@ impl ServerHandler for PscatMcp {
                 .await
                 .map(ReadResourceResponse::from);
         }
+        // A signed URL (`gcs` links) is fetched over HTTPS, not read here;
+        // the error must not echo it, since it is a bearer capability.
+        if request.uri.starts_with("https://") || request.uri.starts_with("http://") {
+            return Err(ErrorData::resource_not_found(
+                "an http(s) link is not an MCP resource on this server; fetch it over HTTPS",
+                None,
+            ));
+        }
         self.guide()
             .await
             .read(&request.uri)
@@ -2370,6 +2416,48 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
     render_success_with(out, svg_text_max, None)
 }
 
+/// What [`PscatMcp::store_output`] made of a result.
+enum Stored {
+    /// Inline, as asked (or as `auto` decided).
+    Inline,
+    /// Links, and whether the bytes are inline too (`both`).
+    Links(StoredRender, bool),
+    /// Links were asked for (`both`, `auto`) and could not be made: inline,
+    /// with this note.
+    Fallback(String),
+}
+
+/// A store failure for `delivery`: `storage_unavailable` with `both` or
+/// `auto` is a fallback to inline (the store already logged the failure);
+/// anything else (`url`, or a quota refusal) stays the tool's error.
+fn fall_back_inline(delivery: Delivery, err: RenderError) -> Result<Stored, RenderError> {
+    if err.code == ErrorCode::StorageUnavailable && delivery != Delivery::Url {
+        Ok(Stored::Fallback(
+            "Links could not be made this time (storage_unavailable), so the output is inline \
+             instead; a retry may give links."
+                .to_string(),
+        ))
+    } else {
+        Err(err)
+    }
+}
+
+/// `result` with `note` appended to its text block and set as
+/// `structuredContent.delivery_note`.
+fn with_delivery_note(mut result: CallToolResult, note: &str) -> CallToolResult {
+    if let Some(i) = result.content.iter().rposition(|c| c.as_text().is_some()) {
+        let text = format!(
+            "{}\n{note}",
+            result.content[i].as_text().map_or("", |t| t.text.as_str())
+        );
+        result.content[i] = ContentBlock::text(text);
+    }
+    if let Some(Value::Object(m)) = result.structured_content.as_mut() {
+        m.insert("delivery_note".into(), Value::String(note.to_string()));
+    }
+    result
+}
+
 /// Links to a call's stored artifacts, and whether the bytes are inline too
 /// (`both`) or not (`url`).
 #[derive(Clone, Copy)]
@@ -2411,6 +2499,17 @@ impl Links<'_> {
         {
             text.push_str(
                 "\nThe pscat:// links are MCP resources on this server, read with resources/read.",
+            );
+        }
+        if self
+            .stored
+            .links
+            .iter()
+            .any(|l| l.scheme == LinkScheme::Https)
+        {
+            text.push_str(
+                "\nThe https links are signed URLs: anyone holding one can fetch the file until \
+                 it expires.",
             );
         }
         text
@@ -2540,6 +2639,7 @@ fn render_success_with(
         steps_used: Some(out.steps_used),
         elapsed_ms: Some(out.elapsed_ms),
         render_id: links.map(|l| l.stored.render_id.clone()),
+        delivery_note: None,
         error: None,
         renderer,
     };
@@ -2598,6 +2698,7 @@ fn failure_with(lead: &str, err: RenderError) -> CallToolResult {
         steps_used: None,
         elapsed_ms: None,
         render_id: None,
+        delivery_note: None,
         error: Some(err),
         renderer: RendererIdentity::current(),
     };
@@ -2689,6 +2790,7 @@ fn sheet_success_with(out: RenderOutput, links: Option<Links<'_>>) -> CallToolRe
         render_id: links.map(|l| l.stored.render_id.clone()),
         download_url: links.and_then(|l| l.stored.links.first().map(|k| k.download_url.clone())),
         expires_at: links.map(|l| l.stored.expires_at_rfc3339()),
+        delivery_note: None,
         error: None,
         renderer,
     };
@@ -2713,6 +2815,7 @@ fn sheet_failure(err: RenderError) -> CallToolResult {
         render_id: None,
         download_url: None,
         expires_at: None,
+        delivery_note: None,
         error: Some(err),
         renderer: RendererIdentity::current(),
     };

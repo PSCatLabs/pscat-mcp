@@ -674,8 +674,8 @@ pub struct ArtifactConfig {
     /// those values are refused), `memory` (this process's memory, read with
     /// `resources/read` of `pscat://render/<render_id>/<n>`; one instance
     /// only, lost on restart; refused with the `none` auth method) or `gcs`
-    /// (Cloud Storage signed URLs: not
-    /// implemented yet, so the server refuses to start with it).
+    /// (uploaded to Cloud Storage, `PSCAT_MCP_ARTIFACT_BUCKET`, and linked by
+    /// HTTPS V4 signed URLs; refused with the `none` auth method).
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINKS", value_enum, default_value_t = LinksBackend::Off)]
     pub artifact_links: LinksBackend,
 
@@ -691,18 +691,70 @@ pub struct ArtifactConfig {
     pub artifact_threshold_bytes: usize,
 
     /// How long a link works, in seconds. The memory backend drops the
-    /// bytes then.
+    /// bytes then; a signed URL (`gcs`) expires then, at most 604800 (7
+    /// days, the V4 signing maximum).
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_URL_TTL_SECS", default_value_t = 1800)]
     pub artifact_url_ttl_secs: u64,
 
-    /// Bytes one principal may have stored at once (memory backend; refused
-    /// with the `none` auth method, whose callers would all share one
-    /// principal). Must hold one largest output
-    /// (`--max-output-bytes`, plus 1 KiB) and be at most
+    /// Bytes one principal may have stored at once: held in memory (memory
+    /// backend), or uploaded within the last TTL (`gcs`, counted per server
+    /// instance). Links are refused with the `none` auth method, whose
+    /// callers would all share one principal. Must hold one largest output
+    /// (`--max-output-bytes`, plus 1 KiB); with memory, at most
     /// `--job-results-budget-bytes`, which bounds every principal together.
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_QUOTA_BYTES", default_value_t = DEFAULT_ARTIFACT_QUOTA_BYTES)]
     pub artifact_quota_bytes: usize,
+
+    /// `gcs`: the Cloud Storage bucket objects are uploaded to (required
+    /// with `gcs`).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_BUCKET")]
+    pub artifact_bucket: Option<String>,
+
+    /// `gcs`: the object name prefix; objects are
+    /// `<prefix><render_id>/<n>.<ext>`. Letters, digits, `.`, `_`, `-` and
+    /// `/`, ending in `/`, with no leading `/` and no `..`.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_PREFIX", default_value = DEFAULT_ARTIFACT_PREFIX)]
+    pub artifact_prefix: String,
+
+    /// `gcs`: the service account whose key signs the URLs, through the IAM
+    /// Credentials `signBlob` API. Unset: the account the metadata server
+    /// reports for the instance (the runtime service account).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_SIGNER")]
+    pub artifact_signer: Option<String>,
+
+    /// `gcs`: the timeout of each call to the metadata server, IAM
+    /// Credentials or Cloud Storage, in milliseconds.
+    #[arg(
+        long,
+        env = "PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS",
+        default_value_t = 10_000
+    )]
+    pub artifact_gcs_timeout_ms: u64,
+
+    /// For tests only: the metadata server's base URL (default
+    /// `http://metadata.google.internal`). Must be `https`, or `http` on a
+    /// loopback host.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_GCS_METADATA_ENDPOINT", hide = true)]
+    pub artifact_gcs_metadata_endpoint: Option<String>,
+
+    /// For tests only: the IAM Credentials API's base URL (default
+    /// `https://iamcredentials.googleapis.com`). `https`, or `http` on a
+    /// loopback host.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_GCS_IAM_ENDPOINT", hide = true)]
+    pub artifact_gcs_iam_endpoint: Option<String>,
+
+    /// For tests only: the Cloud Storage base URL uploads go to (default
+    /// `https://storage.googleapis.com`). `https`, or `http` on a loopback
+    /// host. Signed URLs always name `https://storage.googleapis.com`.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_GCS_STORAGE_ENDPOINT", hide = true)]
+    pub artifact_gcs_storage_endpoint: Option<String>,
 }
+
+/// The default object name prefix of the `gcs` backend.
+pub const DEFAULT_ARTIFACT_PREFIX: &str = "renders/";
+
+/// The longest a V4 signed URL may work: 7 days.
+pub const MAX_SIGNED_URL_TTL_SECS: u64 = 604_800;
 
 /// The default `auto` threshold: 1 MiB.
 pub const DEFAULT_ARTIFACT_THRESHOLD_BYTES: usize = 1024 * 1024;
@@ -718,6 +770,13 @@ impl Default for ArtifactConfig {
             artifact_threshold_bytes: DEFAULT_ARTIFACT_THRESHOLD_BYTES,
             artifact_url_ttl_secs: 1800,
             artifact_quota_bytes: DEFAULT_ARTIFACT_QUOTA_BYTES,
+            artifact_bucket: None,
+            artifact_prefix: DEFAULT_ARTIFACT_PREFIX.to_string(),
+            artifact_signer: None,
+            artifact_gcs_timeout_ms: 10_000,
+            artifact_gcs_metadata_endpoint: None,
+            artifact_gcs_iam_endpoint: None,
+            artifact_gcs_storage_endpoint: None,
         }
     }
 }
@@ -734,29 +793,29 @@ impl ArtifactConfig {
         Duration::from_secs(self.artifact_url_ttl_secs)
     }
 
+    /// The same settings with the `gcs` backend on, uploading to `bucket`.
+    pub fn gcs(mut self, bucket: &str) -> Self {
+        self.artifact_links = LinksBackend::Gcs;
+        self.artifact_bucket = Some(bucket.to_string());
+        self
+    }
+
     /// Reject settings that cannot work with `limits` and `jobs` (whose
     /// results budget the memory backend shares).
     pub fn check(&self, limits: &LimitsConfig, jobs: &JobsConfig) -> Result<(), String> {
         match self.artifact_links {
-            LinksBackend::Gcs => {
-                return Err(
-                    "PSCAT_MCP_ARTIFACT_LINKS=gcs (Cloud Storage signed URLs) is not implemented \
-                     yet (PSCatLabs/pscat-mcp#140); use off or memory"
-                        .into(),
-                );
-            }
             LinksBackend::Off => {
                 if self.artifact_delivery != Delivery::Inline {
                     return Err(format!(
                         "PSCAT_MCP_ARTIFACT_DELIVERY={} needs links, but \
-                         PSCAT_MCP_ARTIFACT_LINKS is off; set PSCAT_MCP_ARTIFACT_LINKS=memory \
-                         or the delivery to inline",
+                         PSCAT_MCP_ARTIFACT_LINKS is off; set PSCAT_MCP_ARTIFACT_LINKS to memory \
+                         or gcs, or the delivery to inline",
                         self.artifact_delivery.as_str()
                     ));
                 }
                 return Ok(());
             }
-            LinksBackend::Memory => {}
+            LinksBackend::Memory | LinksBackend::Gcs => {}
         }
         if self.artifact_url_ttl_secs == 0 {
             return Err("artifact-url-ttl-secs must be positive".into());
@@ -769,12 +828,63 @@ impl ArtifactConfig {
                 self.artifact_quota_bytes
             ));
         }
+        if self.artifact_links == LinksBackend::Gcs {
+            return self.check_gcs();
+        }
         if self.artifact_quota_bytes > jobs.job_results_budget_bytes {
             return Err(format!(
                 "artifact-quota-bytes ({}) must not exceed job-results-budget-bytes ({}), the \
                  budget stored artifacts share with async job results",
                 self.artifact_quota_bytes, jobs.job_results_budget_bytes
             ));
+        }
+        Ok(())
+    }
+
+    /// The `gcs` backend's own settings. The quota is not bounded by the
+    /// results budget: nothing is held in memory.
+    fn check_gcs(&self) -> Result<(), String> {
+        use crate::gcs;
+        if self.artifact_url_ttl_secs > MAX_SIGNED_URL_TTL_SECS {
+            return Err(format!(
+                "artifact-url-ttl-secs ({}) must be at most {MAX_SIGNED_URL_TTL_SECS} (7 days) \
+                 with PSCAT_MCP_ARTIFACT_LINKS=gcs: a V4 signed URL lasts no longer",
+                self.artifact_url_ttl_secs
+            ));
+        }
+        let bucket = self.artifact_bucket.as_deref().unwrap_or("");
+        if bucket.is_empty() {
+            return Err(
+                "PSCAT_MCP_ARTIFACT_LINKS=gcs needs PSCAT_MCP_ARTIFACT_BUCKET, the bucket the \
+                 output is uploaded to"
+                    .into(),
+            );
+        }
+        gcs::check_bucket(bucket)?;
+        gcs::check_prefix(&self.artifact_prefix)?;
+        if let Some(signer) = &self.artifact_signer {
+            gcs::check_signer(signer)?;
+        }
+        if self.artifact_gcs_timeout_ms == 0 {
+            return Err("artifact-gcs-timeout-ms must be positive".into());
+        }
+        for (name, value) in [
+            (
+                "PSCAT_MCP_ARTIFACT_GCS_METADATA_ENDPOINT",
+                &self.artifact_gcs_metadata_endpoint,
+            ),
+            (
+                "PSCAT_MCP_ARTIFACT_GCS_IAM_ENDPOINT",
+                &self.artifact_gcs_iam_endpoint,
+            ),
+            (
+                "PSCAT_MCP_ARTIFACT_GCS_STORAGE_ENDPOINT",
+                &self.artifact_gcs_storage_endpoint,
+            ),
+        ] {
+            if let Some(v) = value {
+                gcs::check_endpoint(name, v)?;
+            }
         }
         Ok(())
     }
@@ -1044,10 +1154,8 @@ mod tests {
             ..ArtifactConfig::default()
         })
         .unwrap_err();
-        assert!(
-            gcs.contains("not implemented yet") && gcs.contains("#140"),
-            "{gcs}"
-        );
+        assert!(gcs.contains("PSCAT_MCP_ARTIFACT_BUCKET"), "{gcs}");
+        assert!(check(ArtifactConfig::default().gcs("example-bucket")).is_ok());
         for d in [Delivery::Url, Delivery::Both, Delivery::Auto] {
             let e = check(ArtifactConfig {
                 artifact_delivery: d,

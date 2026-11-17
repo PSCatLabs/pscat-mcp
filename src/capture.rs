@@ -15,7 +15,8 @@
 //! * for `Authorization`, only the scheme (`Bearer`), never the credential;
 //! * in every recorded value and in the body, the id of a stored-artifact
 //!   link (`pscat://render/<render_id>/...`, which `Mcp-Name` carries for a
-//!   `resources/read`) redacted;
+//!   `resources/read`) redacted, and the query string of every `http(s)` URL
+//!   (a Cloud Storage signed URL's signature is in it) too;
 //! * the request body, cut at [`MAX_BODY_BYTES`];
 //! * the response status and content type (not the response body).
 //!
@@ -138,7 +139,7 @@ pub fn head_record(
                 .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 .collect();
             // `Mcp-Name` carries a `resources/read` URI: never a link.
-            let joined = crate::artifacts::redact_render_links(&values.join(", "));
+            let joined = crate::artifacts::redact_links(&values.join(", "));
             recorded.insert(lname, Value::String(joined));
         } else {
             other.push(lname);
@@ -189,7 +190,7 @@ pub async fn capture_layer(
     // Cut on a character boundary where possible.
     // A `resources/read` of a stored artifact names its link: never record
     // it (see `crate::artifacts`).
-    let text = crate::artifacts::redact_render_links(&String::from_utf8_lossy(&bytes[..cut]));
+    let text = crate::artifacts::redact_links(&String::from_utf8_lossy(&bytes[..cut]));
     let obj = record.as_object_mut().expect("object");
     obj.insert("seq".into(), json!(seq));
     obj.insert("unix_ms".into(), json!(unix_ms));

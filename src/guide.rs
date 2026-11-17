@@ -160,6 +160,9 @@ pub struct ServerFacts {
     /// How long artifact links work, in seconds, when the operator turned
     /// them on (`delivery` `url` and `both`).
     pub artifact_links_ttl_secs: Option<u64>,
+    /// Whether those links are https signed URLs (Cloud Storage) rather
+    /// than `pscat://render/...` resources.
+    pub artifact_links_signed: bool,
 }
 
 impl ServerFacts {
@@ -511,6 +514,11 @@ fn note(path: &str, facts: &ServerFacts) -> String {
              saved, and there is no file path to show the user."
                 .to_string(),
         ),
+        Some(ttl) if facts.artifact_links_signed => lines.push(format!(
+            "- Pages come back inline in the tool result, or, with the `delivery` argument \
+             (`url`, `both`, `auto`), as https links that work for {ttl} s and that anyone \
+             holding them can open. There is no `out_path` and no file path to show the user."
+        )),
         Some(ttl) => lines.push(format!(
             "- Pages come back inline in the tool result, or, with the `delivery` argument \
              (`url`, `both`, `auto`), as links that work for {ttl} s (`pscat://render/...` \
@@ -763,6 +771,7 @@ mod tests {
             max_prompt_argument_bytes: MAX_PROMPT_ARGUMENT_BYTES,
             pack_faces: PackFaces::NotConfigured,
             artifact_links_ttl_secs: None,
+            artifact_links_signed: false,
         }
     }
 
@@ -848,6 +857,23 @@ mod tests {
         assert_eq!(either(&["a"]), "`a`");
         assert!(!n.contains("`bands`, "));
         assert!(n.contains("20 s"));
+    }
+
+    #[test]
+    fn link_line_follows_the_backend() {
+        let memory = ServerFacts {
+            artifact_links_ttl_secs: Some(1800),
+            ..facts()
+        };
+        let n = note("pscat/SKILL.md", &memory);
+        assert!(n.contains("1800 s (`pscat://render/...`"), "{n}");
+        let gcs = ServerFacts {
+            artifact_links_signed: true,
+            ..memory
+        };
+        let n = note("pscat/SKILL.md", &gcs);
+        assert!(n.contains("https links that work for 1800 s"), "{n}");
+        assert!(!n.contains("pscat://render"), "{n}");
     }
 
     #[test]

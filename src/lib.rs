@@ -19,6 +19,8 @@
 //!   extension, owned by the render service.
 //! * [`artifacts`] — artifact delivery: the `delivery` argument, the
 //!   [`artifacts::ArtifactStore`] trait and its memory backend.
+//! * [`gcs`] — the Cloud Storage artifact store: uploads and keyless V4
+//!   signed URLs (server process only).
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
@@ -31,6 +33,7 @@ pub mod build_info;
 pub mod capture;
 pub mod catalog;
 pub mod config;
+pub mod gcs;
 pub mod generate;
 pub mod guide;
 pub mod handwrite;
@@ -93,10 +96,20 @@ pub fn build_service_with(
         }
         backend = backend.with_font_pack_dir(dir);
     }
-    Ok(Arc::new(
-        render::RenderService::new(Arc::new(backend), limits)
-            .with_font_packs_configured(font_pack_dir.is_some())
-            .with_jobs(jobs)
-            .with_artifacts(artifacts),
-    ))
+    // The Cloud Storage store is built here, where its TLS client can fail
+    // the start; the memory store is built by the service over its ledger.
+    let gcs = match artifacts.artifact_links {
+        artifacts::LinksBackend::Gcs => {
+            Some(Arc::new(gcs::GcsArtifactStore::from_config(&artifacts)?))
+        }
+        _ => None,
+    };
+    let mut service = render::RenderService::new(Arc::new(backend), limits)
+        .with_font_packs_configured(font_pack_dir.is_some())
+        .with_jobs(jobs);
+    service = match gcs {
+        Some(store) => service.with_artifact_store(artifacts, store),
+        None => service.with_artifacts(artifacts),
+    };
+    Ok(Arc::new(service))
 }

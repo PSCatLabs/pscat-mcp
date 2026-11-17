@@ -181,8 +181,106 @@ tracked in the `pscat-cloud` brief, not here.
 In-memory artifact links (`PSCAT_MCP_ARTIFACT_LINKS=memory`, the README's
 "Artifact links") have the same limits: a `pscat://render/...` link made on
 one instance is "resource not found" on any other, and a restart loses every
-link. Use them on a single instance; Cloud Storage signed URLs (#140) are the
-backend meant for Cloud Run.
+link. Use them on a single instance; Cloud Storage signed URLs (below) are
+the backend meant for Cloud Run.
+
+## Cloud Storage artifact links
+
+`PSCAT_MCP_ARTIFACT_LINKS=gcs` uploads the output of a `delivery` `url`,
+`both` or `auto` call to a bucket and returns `https` V4 signed URLs, which
+ChatGPT, a browser or any HTTP client can open (README, "Cloud Storage
+links"). The server signs without a key: it takes an access token from the
+metadata server and asks the IAM Credentials API to sign with the runtime
+account's Google-managed key. Nothing in the configuration is a credential.
+
+**Settings.**
+
+| Setting | Value |
+|---|---|
+| `PSCAT_MCP_ARTIFACT_LINKS` | `gcs` |
+| `PSCAT_MCP_ARTIFACT_BUCKET` | the bucket (required) |
+| `PSCAT_MCP_ARTIFACT_PREFIX` | `renders/` (the default); the IAM condition below must name the same prefix |
+| `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` | `1800` (the default) to `3600`; at most 604800 |
+| `PSCAT_MCP_ARTIFACT_SIGNER` | unset: the runtime service account signs |
+| `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` (the default) keeps existing clients' results unchanged; a call asks for links with `delivery` |
+| `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | bytes one token may upload per TTL, **per instance** |
+| `PSCAT_MCP_AUTH` | without `none`: the server refuses to start with `none` and `gcs` |
+
+Never set the `PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT` variables in a
+deployment: they exist to point the server at a local fake in tests.
+
+**Grants**, with `PROJECT`, `BUCKET` and `SA` (the runtime service
+account's email) as placeholders. Turn on uniform bucket-level access first
+(see "The bucket" below): an IAM condition on a bucket binding is accepted
+only on a bucket with uniform access.
+
+1. The IAM Service Account Credentials API is enabled:
+
+   ```bash
+   gcloud services enable iamcredentials.googleapis.com --project PROJECT
+   ```
+
+2. The runtime account may create and read objects, under the prefix only,
+   and nothing else on the bucket: a custom role with exactly
+   `storage.objects.create` and `storage.objects.get`, bound on the bucket
+   with an IAM condition on the prefix. No `list`, `update` or `delete`: the
+   server never needs them, and `ifGenerationMatch=0` means it never
+   overwrites (overwriting would need `delete`).
+
+   ```bash
+   gcloud iam roles create pscatArtifactWriter --project PROJECT \
+     --title "PSCat artifact writer" \
+     --permissions storage.objects.create,storage.objects.get
+   gcloud storage buckets add-iam-policy-binding gs://BUCKET \
+     --member serviceAccount:SA \
+     --role projects/PROJECT/roles/pscatArtifactWriter \
+     --condition 'title=renders-prefix,expression=resource.name.startsWith("projects/_/buckets/BUCKET/objects/renders/")'
+   ```
+
+   A signed URL acts with the signer's permissions, so `objects.get` is
+   what lets it serve the object.
+
+3. The runtime account may sign as itself, and as no other account: Token
+   Creator (which holds `iam.serviceAccounts.signBlob`) on its own service
+   account resource, not on the project.
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding SA \
+     --member serviceAccount:SA \
+     --role roles/iam.serviceAccountTokenCreator
+   ```
+
+**The bucket.**
+
+* **Uniform bucket-level access** on, so no object ACL can grant more than
+  the bindings above.
+* **Public access prevention** enforced: signed URLs still work, since they
+  act as the signer, but no object can be made public.
+* **A lifecycle rule deleting objects after 1 day**: the server deletes
+  nothing, so this is what removes output, whatever the URL's TTL, and also
+  the objects of a call that failed part-way.
+
+  ```bash
+  gcloud storage buckets update gs://BUCKET \
+    --uniform-bucket-level-access --public-access-prevention
+  printf '%s' '{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}' > lifecycle.json
+  gcloud storage buckets update gs://BUCKET --lifecycle-file=lifecycle.json
+  ```
+
+**What a signed URL is.** Anyone holding one can fetch that object until it
+expires; it is not tied to the client that made it and cannot be revoked
+early, short of deleting the object. The server never logs one. Keep the
+TTL short. Only the server process holds a token; the render worker gets
+none, and on Linux its seccomp filter refuses every socket, which is what
+keeps it from the metadata server (reachable from every process in the
+container otherwise). See "Sandbox" below.
+
+**Failures.** If the metadata server, IAM or Storage fails or times out
+(`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`, 10 s each), a `url` call returns
+`storage_unavailable` and a `both` or `auto` call returns its output inline
+with a `delivery_note`. Each failure logs one WARN, `artifact links failed`,
+with `code`, `stage` and `status` only; a 403 at `upload` or `signing`
+usually means a missing grant above.
 
 ## Font packs
 
@@ -250,7 +348,7 @@ token is `401`, never anonymous.
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | the connector's source ranges, if you know them; unset allows any source |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `_RATE_WINDOW_SECS` | `60` per `60` s per client by default. The limit is kept in each instance, so with several instances it multiplies: also set `--max-instances` to a small number |
 | `PSCAT_MCP_ASYNC_JOBS` | unset: the server refuses to start with `none` and async jobs (one anonymous principal could read or cancel another's jobs). MCP Tasks need async jobs too |
-| `PSCAT_MCP_ARTIFACT_LINKS` | `off` (or unset): the server refuses to start with `none` and `memory` links (one anonymous client could fill the results budget the links share with authenticated clients) |
+| `PSCAT_MCP_ARTIFACT_LINKS` | `off` (or unset): the server refuses to start with `none` and `memory` links (one anonymous client could fill the results budget the links share with authenticated clients), and with `none` and `gcs` links (anyone could upload to the bucket and mint signed URLs) |
 
 **After the window closes.** Cloud Run scales to zero, so an expired
 `PSCAT_MCP_AUTH_NONE_UNTIL` left in the configuration meets every cold start

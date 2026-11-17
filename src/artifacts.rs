@@ -15,10 +15,10 @@
 //!   with a per-principal quota and a TTL, and are served by `resources/read`
 //!   of `pscat://render/<render_id>/<n>`. It lives in one process: lost on a
 //!   restart, and invisible to any other instance.
-//! * A Cloud Storage backend (#140) is not implemented. The trait is shaped
-//!   for it: `put` is async (an upload), each link has a scheme
-//!   ([`LinkScheme::Https`] for a signed URL) and an expiry, and `read` may
-//!   return nothing because such a backend serves no bytes itself.
+//! * [`crate::gcs::GcsArtifactStore`] is the Cloud Storage backend
+//!   (`PSCAT_MCP_ARTIFACT_LINKS=gcs`, #140): `put` uploads, each link is an
+//!   `https` V4 signed URL ([`LinkScheme::Https`]) with an expiry, and
+//!   `read` returns nothing because it serves no bytes itself.
 //!
 //! Links are capabilities for whoever holds them (a signed URL is one
 //! outright), so nothing here logs a link, a `render_id` or the bytes.
@@ -95,8 +95,8 @@ pub enum LinksBackend {
     Off,
     /// In this process's memory, served by `resources/read`.
     Memory,
-    /// Cloud Storage signed URLs (#140). Recognised, not implemented: the
-    /// server refuses to start with it.
+    /// Uploaded to Cloud Storage and linked by V4 signed URLs
+    /// (`crate::gcs`).
     Gcs,
 }
 
@@ -148,6 +148,63 @@ pub fn redact_render_links(text: &str) -> String {
         }
         rest = &rest[id_len..];
     }
+}
+
+/// `text` with the query string of every `http(s)://` URL replaced by
+/// `[redacted]`, also where JSON escapes the slashes (`https:\/\/`). A signed
+/// URL's query (`X-Goog-Signature`, ...) is what makes it a capability, so
+/// a client that sends one back (in a tool argument, say) never has it
+/// recorded (capture mode). A URL ends at whitespace, a quote, `<`, `>`, a
+/// backtick, or a backslash escaping a quote or whitespace (`\"`, `\n`);
+/// other JSON escapes (`\/`, `&`) are part of it.
+pub fn redact_url_queries(text: &str) -> String {
+    const SCHEMES: [&str; 4] = ["https://", "http://", "https:\\/\\/", "http:\\/\\/"];
+    /// The length of the URL text at the start of `s` that is not `stop`
+    /// and not the URL's end.
+    fn run(s: &str, stop: Option<char>) -> usize {
+        let mut it = s.char_indices().peekable();
+        while let Some((i, c)) = it.next() {
+            let ends = c.is_whitespace()
+                || matches!(c, '"' | '\'' | '<' | '>' | '`')
+                || Some(c) == stop
+                || (c == '\\'
+                    && matches!(it.peek(), Some((_, '"' | 'n' | 'r' | 't' | '\\')) | None));
+            if ends {
+                return i;
+            }
+            if c == '\\' {
+                it.next();
+            }
+        }
+        s.len()
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let next = SCHEMES
+            .iter()
+            .filter_map(|p| rest.find(p).map(|i| (i, p.len())))
+            .min();
+        let Some((i, len)) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..i + len]);
+        rest = &rest[i + len..];
+        let path = run(rest, Some('?'));
+        out.push_str(&rest[..path]);
+        rest = &rest[path..];
+        if let Some(query) = rest.strip_prefix('?') {
+            out.push_str("?[redacted]");
+            rest = &query[run(query, None)..];
+        }
+    }
+}
+
+/// [`redact_render_links`] and [`redact_url_queries`]: what capture mode
+/// applies to every value it records.
+pub fn redact_links(text: &str) -> String {
+    redact_url_queries(&redact_render_links(text))
 }
 
 /// One artifact to store: its MIME type and its bytes.
@@ -436,6 +493,35 @@ mod tests {
         assert!(out.contains("pscat://render/[redacted]/2"), "{out}");
         assert!(out.contains("pscat://guide/a.md"), "{out}");
         assert_eq!(redact_render_links("no links"), "no links");
+    }
+
+    #[test]
+    fn url_queries_are_redacted_escaped_or_not() {
+        let url = "https://storage.googleapis.com/b/renders/x/1.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=abcdef0123";
+        let body = format!(
+            r#"{{"a":"{url}","b":"see {url} now","c":"https:\/\/h\/p?X-Goog-Signature=feed\/x"}}"#
+        );
+        let out = redact_url_queries(&body);
+        assert!(
+            !out.contains("abcdef0123") && !out.contains("feed"),
+            "{out}"
+        );
+        assert!(!out.contains("X-Goog"), "{out}");
+        assert!(
+            out.contains(r#""https://storage.googleapis.com/b/renders/x/1.png?[redacted]""#),
+            "{out}"
+        );
+        assert!(out.contains("png?[redacted] now"), "{out}");
+        assert!(out.contains(r#"https:\/\/h\/p?[redacted]""#), "{out}");
+        // Some encoders escape `&` as `\u0026`: still one query.
+        let out = redact_url_queries(r#""https://h/p?a=1\u0026X-Goog-Signature=beef""#);
+        assert_eq!(out, r#""https://h/p?[redacted]""#);
+        assert_eq!(redact_url_queries("no urls ?a=b"), "no urls ?a=b");
+        assert_eq!(redact_url_queries("https://h/p"), "https://h/p");
+        assert_eq!(
+            redact_url_queries("http://h/p?q é"),
+            "http://h/p?[redacted] é"
+        );
     }
 
     #[test]

@@ -109,8 +109,10 @@ Failures are tool results with `isError: true` and
 `source_too_large`, `unsupported_format`, `invalid_dimensions`,
 `too_many_pixels`, `postscript_error`, `limit_exceeded`, `timeout`,
 `too_many_pages`, `output_too_large`, `server_busy`, `cancelled`,
-`worker_failed`, and for async jobs `unknown_job`, `job_not_finished` and
-`results_budget_exceeded`. A failed render never returns an image.
+`worker_failed`, for async jobs `unknown_job`, `job_not_finished` and
+`results_budget_exceeded`, and for Cloud Storage links
+`storage_unavailable` (see [Artifact links](#artifact-links)). A failed
+render never returns an image.
 
 ## Long renders: async jobs
 
@@ -275,8 +277,9 @@ Links need a store, `PSCAT_MCP_ARTIFACT_LINKS`:
   same JSON-RPC "resource not found" error, which does not repeat the URI.
   They are not listed by `resources/list`. A `pscat://` link is an MCP
   resource, not something a browser can fetch.
-* `gcs`: Cloud Storage signed URLs (#140). Not implemented yet: the server
-  refuses to start with it.
+* `gcs`: the server uploads the output to a Cloud Storage bucket and links
+  each object by an `https:` V4 signed URL, which a browser, ChatGPT or any
+  HTTP client can open until it expires. See [Cloud Storage links](#cloud-storage-links).
 
 **Limits of the memory store.** Like async jobs it is in one process: lost
 on a restart, and invisible to any other instance, so over HTTP it works only
@@ -292,10 +295,58 @@ refused with `error.input.code` `results_budget_bytes`. **The server refuses
 to start with the `none` auth method and memory links**, as it does with
 `none` and async jobs: every anonymous caller is the one principal
 `anonymous`, so one could fill the budget the links share with authenticated
-clients, and read the others' links. (Cloud Storage links under `none` are
-for #140.) With `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback only) memory
+clients, and read the others' links. With `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback only) memory
 links still start, and every caller shares the one `anonymous` quota; over
 stdio there is one principal, the local user.
+
+### Cloud Storage links
+
+With `PSCAT_MCP_ARTIFACT_LINKS=gcs` and `PSCAT_MCP_ARTIFACT_BUCKET`, a call
+whose delivery comes to links uploads each artifact, from the server process
+only, to `<PSCAT_MCP_ARTIFACT_PREFIX><render_id>/<n>.<ext>` (`renders/` by
+default; `n` from 1 in the manifest's order; `png`, `svg` or `pdf`). The
+result has the same shape as with memory links: `render_id`, a
+`download_url` and `expires_at` on each `artifacts` entry, a
+`resource_link` block per artifact, and a short text block, except that every
+link is the `https://storage.googleapis.com/<bucket>/<object>?X-Goog-...`
+signed URL itself. `resources/read` serves nothing for them.
+
+* **Uploads** are one `multipart` JSON-API upload per object with
+  `ifGenerationMatch=0`, so an existing object is never overwritten, and
+  metadata `contentType` (the artifact's MIME type) and
+  `contentDisposition` `inline; filename="pscat-<n>.<ext>"`. The server never
+  lists, reads or deletes objects; the bucket's lifecycle rule removes them
+  (see [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#cloud-storage-artifact-links)).
+* **Signed URLs** are V4 (`GOOG4-RSA-SHA256`), valid for
+  `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` (30 minutes by default, at most 7 days),
+  and signed without a key: the server asks the IAM Credentials API's
+  `signBlob` to sign with the account's Google-managed key. Its access token
+  comes from the metadata server only (cached until shortly before it
+  expires); no key, key file or credential variable is read.
+  `PSCAT_MCP_ARTIFACT_SIGNER` names the signing account; unset, it is the
+  account the metadata server reports (the Cloud Run runtime account).
+* **Failures.** If the credentials, an upload or a signature fails (each
+  call has its own timeout, `PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`), `delivery`
+  `url` returns `storage_unavailable`, a retryable error whose message says
+  to retry or use `delivery: "inline"`. `both` and `auto` return the output
+  inline instead, with a note in the text and in
+  `structuredContent.delivery_note`. The server logs one WARN line with the
+  code, the stage (`credentials`, `upload`, `signing`) and at most an HTTP
+  status: never a URL, a token or a response body. An upload that fails
+  part-way may leave earlier objects of that call in the bucket until the
+  lifecycle rule removes them.
+* **Quota.** Each client may upload `PSCAT_MCP_ARTIFACT_QUOTA_BYTES`
+  (the bytes plus 1 KiB a call) within one TTL, refused with
+  `results_budget_exceeded` and `error.input.code` `artifact_quota_bytes`,
+  as with memory links. The count is in memory and **per server instance**,
+  so with several instances a client may upload that much on each. It is
+  not bounded by the results budget: nothing is kept in memory.
+* **The `none` auth method is refused at startup with `gcs`**: every
+  anonymous caller is one principal, sharing one quota, and anyone who can
+  reach the server could upload to the bucket and mint signed URLs. With
+  `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback only) `gcs` still starts, and
+  every local caller shares the one `anonymous` quota and can mint signed
+  URLs.
 
 **Async jobs and Tasks.** `start_render` takes `delivery` too (an unusable
 one is refused before the job is accepted), and it is applied when the result
@@ -618,11 +669,16 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_JOB_RESULT_TTL_MS` | 3600000 | how long a finished job and its result are kept |
 | `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` | 134217728 | memory for job results, all jobs together; at least one largest result (`PSCAT_MCP_MAX_OUTPUT_BYTES` × 4/3 plus stdout and 4 KiB); job settings are checked only when jobs are on |
 | `PSCAT_MCP_JOB_RESULTS_PER_PRINCIPAL_BYTES` | the budget less one largest result (the whole budget when that holds fewer than two) | job-result bytes one client (token, or the stdio user) may have reserved and held, so one client cannot fill the budget for the others (`results_budget_exceeded`, `error.input.code` `results_per_principal_bytes`); at least one largest result and at most the budget (equal to the budget turns the share off); checked only when jobs are on |
-| `PSCAT_MCP_ARTIFACT_LINKS` | `off` | where `delivery` `url`/`both` links point (see [Artifact links](#artifact-links)): `off`, `memory` (this process, `resources/read` of `pscat://render/<render_id>/<n>`; one instance only, lost on restart; refused with the `none` auth method) or `gcs` (not implemented yet: refuses to start) |
+| `PSCAT_MCP_ARTIFACT_LINKS` | `off` | where `delivery` `url`/`both` links point (see [Artifact links](#artifact-links)): `off`, `memory` (this process, `resources/read` of `pscat://render/<render_id>/<n>`; one instance only, lost on restart) or `gcs` (Cloud Storage uploads and `https` V4 signed URLs, see [Cloud Storage links](#cloud-storage-links)); both are refused with the `none` auth method |
 | `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` | the `delivery` of a call that gives none: `inline`, `url`, `both` or `auto`; anything but `inline` needs links on (else the server refuses to start). An argument overrides it |
 | `PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES` | 1048576 | with `delivery` `auto`: output over this many bytes (all artifacts, before base64) is returned as links |
-| `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` | 1800 | how long a link works; the memory store drops the bytes then |
-| `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | 33554432 | stored output one client (token, or the stdio user) may hold at once (`results_budget_exceeded`, `error.input.code` `artifact_quota_bytes`); at least `PSCAT_MCP_MAX_OUTPUT_BYTES` plus 1 KiB, at most `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`, which bounds all clients together |
+| `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` | 1800 | how long a link works; the memory store drops the bytes then; with `gcs`, the signed URL's lifetime, at most 604800 (7 days) |
+| `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | 33554432 | stored output one client (token, or the stdio user) may hold at once, or with `gcs` upload within one TTL, counted per server instance (`results_budget_exceeded`, `error.input.code` `artifact_quota_bytes`); at least `PSCAT_MCP_MAX_OUTPUT_BYTES` plus 1 KiB; with `memory`, at most `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`, which bounds all clients together |
+| `PSCAT_MCP_ARTIFACT_BUCKET` | unset | `gcs`: the bucket objects are uploaded to; required with `gcs` |
+| `PSCAT_MCP_ARTIFACT_PREFIX` | `renders/` | `gcs`: the object name prefix (objects are `<prefix><render_id>/<n>.<ext>`): letters, digits, `.`, `_`, `-` and `/`, ending in `/`, with no leading `/`, empty segment or `..` |
+| `PSCAT_MCP_ARTIFACT_SIGNER` | the metadata server's default account | `gcs`: the service account whose Google-managed key signs the URLs, through IAM Credentials `signBlob`; the runtime account needs the Token Creator role on it |
+| `PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS` | 10000 | `gcs`: the timeout of each call to the metadata server, IAM Credentials or Cloud Storage |
+| `PSCAT_MCP_ARTIFACT_GCS_METADATA_ENDPOINT` / `_IAM_ENDPOINT` / `_STORAGE_ENDPOINT` | unset | **for tests only**, hidden from `--help`: the base URLs of the metadata server, IAM Credentials and Storage uploads, to point `gcs` at a local fake; `https`, or `http` on a loopback host, with no path. Never set them in a deployment. Signed URLs always name `https://storage.googleapis.com` |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level and, when set, replaces the default filter `info,rmcp::service=warn`, which keeps rmcp's per-request "Service initialized as server" dump of the `initialize` parameters (over stdio, the client's own `clientInfo` and capabilities: client-chosen strings) out of the logs; a `RUST_LOG` that brings `rmcp::service` to INFO logs it again |
 | `PSCAT_MCP_CAPTURE_FILE` | unset (off) | debug, `serve-http` only: append every `/mcp` request (allow-listed headers, no tokens, no query string, body cut at 64 KiB) as a JSON line to this file, to record a client's traffic for the replay fixtures; the file also holds the PostScript sources sent, so it is refused unless the bind address is loopback, and never for production |
 
@@ -839,6 +895,20 @@ redacted. rmcp's own DEBUG lines (target `rmcp::service`) dump whole messages,
 links included; the default filter holds that target at WARN, so a
 `RUST_LOG` that raises it is for local debugging only.
 
+With Cloud Storage links (`gcs`) only the server process talks to Google:
+it reads an access token from the metadata server, uploads, and has IAM sign
+the URLs. The worker is given no credential and no new capability, and on
+Linux its seccomp filter refuses every socket, so it cannot reach the
+metadata server itself; on Cloud Run the metadata server is otherwise
+reachable from every process in the container, so that filter, not the
+absence of a key, is the boundary. A signed URL is a bearer capability:
+anyone holding it can fetch that one object until it expires, so it is
+never logged, never put in an error message, and capture mode records any
+`http(s)` URL a client sends with its query string (where the signature
+is) redacted. Use a short TTL and a bucket with uniform access, public
+access prevention and a 1-day lifecycle rule
+([`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#cloud-storage-artifact-links)).
+
 PSCat has no operators for processes, network or environment access. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full table (and [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md) for deployment) of which
 control is enforced by PSCat and which by the server.
@@ -849,12 +919,19 @@ control is enforced by PSCat and which by the server.
   `PSCAT_MCP_MAX_OUTPUT_BYTES` returns `output_too_large`, with
   `error.input.code` `output_bytes` and the limit and the size reached in
   `error.input.limit_bytes` and `reached_bytes`, whatever the `delivery`.
-* **Artifact links are in memory only.** The memory store
+* **Memory links are one instance's.** The memory store
   (`PSCAT_MCP_ARTIFACT_LINKS=memory`) has the async jobs' limits: one
   instance, lost on restart. Its `pscat://` links are MCP resources, which a
-  browser cannot open; `https` signed URLs (Cloud Storage) are #140. A client
-  on a protocol before 2025-06-18 may not know `resource_link` blocks; the
-  link is also in the text and in `structuredContent`.
+  browser cannot open; use `gcs` for `https` links. A client on a protocol
+  before 2025-06-18 may not know `resource_link` blocks; the link is also in
+  the text and in `structuredContent`.
+* **Cloud Storage links are bearer capabilities, and their quota is per
+  instance.** Anyone holding a signed URL can fetch the object until it
+  expires; it cannot be revoked before then (short of rotating the signer's
+  keys or deleting the object). The upload quota is counted in each
+  instance's memory. Objects stay in the bucket until its lifecycle rule
+  deletes them, whatever the TTL. Only a fake of the Google APIs is used in
+  CI; the real-bucket check is in [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md#real-bucket-check).
 * **SVG output is large, so a large SVG is a blob.** PSCat draws text as
   glyph outlines (paths, not `<text>` elements) and a gradient as many
   separate shapes, so an SVG grows quickly: an 88 KB SVG came from a
@@ -1019,11 +1096,12 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line; artifact links: a `delivery: url` render and the `resources/read` of its link leave neither the `render_id`, a `pscat://render/` link nor the artifact's bytes in the logs (default filter and `pscat_mcp=trace`) or in the capture file, which records the read with the id redacted, and a not-found read does not echo the link |
 | `tests/artifacts.rs` | artifact delivery (#139) over an in-process pipe and over HTTP: with no store, `delivery` `inline` or `auto`, and with the memory store, no `delivery`, `inline` or `auto` under the threshold, every tool's result (PNG pages, SVG, PDF, `chalkboard_math`, `handwrite`, `review_sheet`) is the same as today's, with no link field; `url`/`both` with no store `invalid_request` (`error.input.code` `delivery`, a message saying to retry with `delivery: "inline"`, `start_render` too); `url` a manifest of one `resource_link` per page (three pages) with `download_url`, `expires_at` and `render_id`, the links named in the text, no bytes inline and `resources/read` returning each page; `both` the same bytes inline and by link for PNG, SVG and PDF; links from every render tool; `auto` over a threshold; diagnostics (stdout, a PostScript error) inline; the operator default and an argument overriding it; the per-client quota refused with `artifact_quota_bytes`; expiry after the TTL with an injected clock, freeing the quota; a `start_render` job with `delivery: url` storing its result once across two `render_result` calls; over HTTP, another bearer token's `resources/read` of a link failing exactly like a never-issued one. A fixture (`tests/data/inline-results.json`, frozen before #139) pins the inline result builders byte for byte, and unit tests in `src/artifacts.rs` cover the store (owner, TTL, quota, the shared budget, link redaction) |
+| `tests/artifacts_gcs.rs` | the Cloud Storage store (#140) against a local fake of the metadata server, IAM Credentials and Cloud Storage (no Google endpoint is called; the fake IAM signs a blob as its SHA-256, so the test recomputes the signature): the exact upload (path, `uploadType=multipart&ifGenerationMatch=0`, bearer token, metadata `name`, `contentType`, `contentDisposition`, the bytes) and the exact signed URL for a fixed injected time, built independently in the test, with `expires_at`; a three-page manifest under one `render_id`; the token cached, fetched once by concurrent calls, refreshed 300 s before expiry or at half a short life; the signer from the metadata server once, or the configured one with no fetch; the per-principal quota within the TTL; the metadata server down, Storage 412 and 500, IAM 403, each endpoint hanging past the timeout and nothing listening all `storage_unavailable` with no URL, token, bucket or body in the message; the start-up checks (bucket required, prefix, TTL over 7 days, signer, endpoint overrides, `none` refused); through the tools, `url` links in all three places for `render_postscript`, `handwrite` and `review_sheet`, `resources/read` serving nothing, `inline` uploading nothing, a failed upload or signing an error for `url` and an inline result with `delivery_note` for `both`, `auto` and a `start_render` job, the quota refusing `url` and `both` alike, the tool description; and, through the binary over HTTP at the default filter and `pscat_mcp=trace`, no signature, credential, token, response body or render id in the logs, one WARN line with codes only, and the capture file recording a signed URL sent back in a tool argument and in `Mcp-Name` with its query redacted. Unit tests in `src/gcs.rs` check the canonical request and string-to-sign against Google's conformance vectors |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth` without its settings, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
 | `tests/oauth.rs` | the `oauth` method against a local mock authorization server: valid RS256 and ES256 tokens, an audience array and a verified email are accepted; expired, without `exp`, not yet valid, wrong or missing audience, wrong issuer, bad signature, tampered payload, an ES256 header on the RSA key, an HS256 token signed with the public key, `alg: none`, an unknown `kid`, no `sub`, a non-JWT and an oversized token get `401 invalid_token`; a user not on the allowlist (or with an unverified email) gets `403 not_allowed` without an `error` parameter; missing scopes get `403 insufficient_scope`; no PostScript runs for any refused request; `bearer,oauth` accepts a static token without contacting the issuer and a JWT, and answers garbage with one merged challenge; the Protected Resource Metadata is served at both well-known paths without auth (the `resource_metadata` URL of a real 401 included), independent of `Host`, and not at all without `oauth`; a hung issuer bounds JWT requests by the JWKS timeout with one fetch between them while requests without a JWT (static token, no header, garbage; `oauth` first or alone) go straight through; a known key past its TTL is used without waiting while the issuer hangs; unknown `kid`s trigger one JWKS fetch, and a rotated key is picked up; discovery (RFC 8414, OpenID Connect fallback, explicit JWKS URL, a mismatched issuer refused); the binary refuses an incomplete or unsafe configuration without echoing allowlist entries, and its logs carry `auth_method=oauth` and fixed reasons but never a subject, email or token |
 | `tests/auth_none.rs` | the explicit no-auth mode and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an invalid time, a bad CIDR, a zero limit, async jobs, Tasks or memory artifact links with `none`); an already expired time starting with `none` disabled (`bearer,none`: a token is `200`, no header is `403 unauthenticated_access_expired`, the startup log warns and `auth_methods` lists only `bearer`; `none` alone: every request is `403`); and, in-process with an injected clock, the refusal after the expiry of a running server |
-| `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
+| `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`) and `storage_unavailable` (`tests/artifacts_gcs.rs`, which needs a fake of the Google APIs). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |
 | `evals/agent/` (`scripts/agent-eval.sh`) | local and manual only: real agents (Claude Code headless on the claude.ai subscription, optionally Codex) run the scenarios in `examples/agent-scenarios.md` and the LOCAL_TESTING first prompt over stdio and HTTP, checking tool choice, verbatim arguments, results, error codes and the answer; a billing guard refuses API-key billing. CI runs only its offline tests (guard and transcript checks on recorded fixtures). See [Automated agent evals](docs/LOCAL_TESTING.md#9-automated-agent-evals) |
 

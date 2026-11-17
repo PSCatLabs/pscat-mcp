@@ -1021,3 +1021,46 @@ what claude.ai, Claude Desktop or any other client does with an SVG blob;
 it); whether an SVG with fewer characters per token than the 1.9 measured
 goes over Claude Code's 25,000 tokens below 40 KiB (it would need under
 1.64); a multi-page SVG in a live session.
+
+## Real-bucket check
+
+The Cloud Storage backend (`PSCAT_MCP_ARTIFACT_LINKS=gcs`) is tested in CI
+against a local fake only (`tests/artifacts_gcs.rs`). This check runs it
+once against the real APIs, on the staging Cloud Run service, with the
+grants in [`CLOUD_RUN.md`](CLOUD_RUN.md#cloud-storage-artifact-links) in
+place. **It has not been run yet**; pscat-cloud fills in the record below.
+
+1. Deploy the revision under test with `PSCAT_MCP_ARTIFACT_LINKS=gcs`,
+   `PSCAT_MCP_ARTIFACT_BUCKET` set to the staging bucket, and no
+   `PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT` variable.
+2. With a bearer token, call `render_postscript` with `delivery: "url"`
+   (a one-page PNG), then with a three-page program and `format: "svg"`
+   over 1 MB. Fetch each `download_url` with `curl -sS -D - -o out`: expect
+   `200`, the `Content-Type` of the artifact and
+   `Content-Disposition: inline; filename="pscat-<n>.<ext>"`, and bytes equal
+   to an `inline` render of the same program.
+3. Fetch one URL with its `X-Goog-Signature` altered (expect `403`), and
+   one after `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` has passed (expect `400`
+   or `403`, expired).
+4. Call with `delivery: "both"` while the runtime account lacks
+   `storage.objects.create` (or on a revision pointing at a missing
+   bucket): expect the output inline with `delivery_note`, and one WARN
+   `artifact links failed` with `stage` `upload` and `status` `403` or
+   `404`, and no URL or token in the service's logs.
+5. Search the service's logs for the run's window for
+   `X-Goog-Signature`, `storage.googleapis.com` and the render ids: expect
+   no match.
+6. In ChatGPT (the owner): a PNG and a large SVG rendered with
+   `delivery: "url"` are shown or downloadable through the link.
+
+Record:
+
+| Item | Result |
+|---|---|
+| Date, server revision (`get_renderer_info`), PSCat version | _to fill in_ |
+| Step 2: status, content type, disposition, bytes match (PNG, SVG) | _to fill in_ |
+| Step 2: upload latency per object, from the logs or a timer | _to fill in_ |
+| Step 3: altered signature, expired URL | _to fill in_ |
+| Step 4: fallback and WARN line | _to fill in_ |
+| Step 5: log search | _to fill in_ |
+| Step 6: ChatGPT, PNG and large SVG | _to fill in (owner)_ |
