@@ -37,6 +37,9 @@ boundaries are, and where to extend it.
                                │  stdin: job   stdout: WorkerResult (JSON)
                                ▼
                          worker.rs  (child process, no async runtime)
+                           • Linux: seccomp filter (sandbox.rs) before the job is
+                             read; no sockets, io_uring, ptrace (refuses without);
+                             the server itself is non-dumpable
                            • Generate jobs: generate.rs writes the program here
                              (a review sheet: sheet.rs renders every cell and
                              composes the PNG here)
@@ -584,6 +587,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | File writes | PSCat (no write roots) + kernel `RLIMIT_FSIZE=0` | none allowed |
 | File reads | PSCat read roots: only compiled-in `lib/` (also with a font-pack directory) | — |
 | Open files | kernel `RLIMIT_NOFILE` | 64 |
+| Sockets, io_uring, ptrace, `process_vm_*`, `pidfd_getfd`, `bpf` | kernel seccomp filter, installed by the worker before it reads its job (**Linux only**): `EPERM` | none allowed |
 | Output bytes | worker (artifact cap: `output_too_large`, `error.input.code` `output_bytes`) + server (stdout cap, kill) | 8 MiB |
 | SVG returned as text (all pages together; at most the output cap) | server, when it builds the result: up to the limit each page is an embedded text resource, above it an embedded blob resource (base64). Not a failure; the worker holds SVG to the output cap, from the SVG text's length before any page is encoded (`output_too_large`, `error.input.code` `output_bytes`) | 40 KiB |
 | Pages returned | worker | 10 |
@@ -657,9 +661,86 @@ Known gaps:
 * If the server process itself is SIGKILLed, a running worker survives
   until its `RLIMIT_CPU` or its own time limit stops it (seconds). In a
   container the whole cgroup is torn down with the instance.
-* The worker shares the container's network namespace. PSCat cannot open
-  sockets, but defence in depth (seccomp, a network-less sandbox such as
-  gVisor, which Cloud Run gen1 provides) is recommended for public use.
+* The worker shares the container's network namespace, and on Cloud Run
+  the metadata server (169.254.169.254, which hands out the service
+  account's access token) answers every process in it. gVisor (Cloud Run's
+  first generation) does not change that: it filters the container's
+  system calls against the host kernel, not the container's own network.
+  What keeps the worker off the network is described under
+  [The worker's system-call filter](#the-workers-system-call-filter); it
+  is Linux only, and the server process is not filtered.
+
+### The worker's system-call filter
+
+`src/sandbox.rs`. PostScript has no network operators, so a program cannot
+open a socket; the filter is for the case where a bug in the interpreter
+gives a program code execution in the worker. The first thing
+`worker::run_stdio` does, before it reads a byte of the job and while the
+worker has one thread, is:
+
+1. `prctl(PR_SET_NO_NEW_PRIVS, 1)`, which lets an unprivileged process
+   install a filter (the container runs with `--cap-drop ALL`);
+2. `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)` with a classic BPF program
+   built in Rust from the `libc` crate's definitions (no libseccomp, no
+   new dependency);
+3. a check that the filter is in force: `socket(AF_INET)` must fail with
+   `EPERM` and an ordinary call must still succeed.
+
+If any step fails the worker writes one line to stderr and exits with
+status 4 without reading the job; the server reports `worker_failed` with
+that line (and logs it). There is no setting to run without the filter.
+
+The program checks the architecture first (`AUDIT_ARCH_X86_64` or
+`AUDIT_ARCH_AARCH64`; another value, such as a 32-bit call on a 64-bit
+kernel, is denied), on x86_64 denies every x32 call (numbers with bit 30
+set, which carry the x86_64 tag), then denies these numbers, taken from
+`libc::SYS_*` for the target, with `EPERM`:
+
+| Calls | Why |
+|---|---|
+| `socket`, `socketpair` | every address family: the worker talks to the server over inherited pipes and needs no socket, not even `AF_UNIX` |
+| `connect`, `bind`, `listen`, `accept`, `accept4` | defence in depth; the worker inherits no socket (a test checks) |
+| `io_uring_setup`, `io_uring_enter`, `io_uring_register` | io_uring can create and connect sockets itself, out of seccomp's sight |
+| `ptrace`, `process_vm_readv`, `process_vm_writev`, `pidfd_getfd` | the worker runs as the server's user: these could reach into the server's memory or copy its descriptors (its sockets) where the kernel's ptrace rules allow it |
+| `bpf` | not needed, and a large kernel surface |
+
+Everything else is allowed. A denied call returns `EPERM` rather than
+killing the worker, because some library code tries a socket and copes with
+failure (glibc's user lookup tries the nscd socket first); a denied call is
+not logged. Threads started later (PSCat's band threads) inherit the
+filter, and it survives `execve` and cannot be removed.
+
+What the filter does not cover:
+
+* **macOS** (development only): `install` does nothing there.
+* **Paths.** Seccomp sees numbers, not paths, so the filter cannot stop
+  the worker opening `/proc/<server pid>/mem`, which a process of the same
+  user may do where Yama's `ptrace_scope` is 0. The server closes that
+  itself: `serve-http` and `serve-stdio` call `sandbox::harden_server`
+  (`prctl(PR_SET_DUMPABLE, 0)`) before the runtime starts and before any
+  worker exists, and refuse to start if it fails. A non-dumpable process's
+  `/proc/<pid>/mem`, `environ` and `fd` need `CAP_SYS_PTRACE`, which the
+  container drops; the flag also turns off the server's core dumps. Nothing
+  in the server reads its own `/proc` files beyond what a process may always
+  read of itself. The worker is dumpable again after `execve`, which only
+  exposes the worker to the server.
+* **The server process.** It needs the network, so code execution in the
+  server would reach the metadata server. Untrusted input is never
+  processed there (see [Why a child process](#why-a-child-process)).
+* **Other architectures.** The filter knows x86_64 and aarch64; a Linux
+  build for anything else fails to compile rather than run unfiltered.
+* **Emulation.** Under user-mode emulation of another architecture (qemu,
+  Rosetta) the filter may fail to install, and the worker refuses its job,
+  or it may install and deny every call, and the worker can neither report
+  nor exit cleanly; either way the render fails (`worker_failed` or
+  `timeout`). Native containers are what is supported.
+
+The filter uses only `prctl(PR_SET_NO_NEW_PRIVS)`,
+`prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`, the `arch` and `nr` fields
+and the `ALLOW` and `ERRNO` actions, all of which gVisor implements, so it
+is expected to work on Cloud Run's first generation as on a regular
+kernel. `tests/worker_sandbox.rs` checks it on every Linux test run (CI's
+Linux job is x86_64).
 
 ## Security boundaries
 
