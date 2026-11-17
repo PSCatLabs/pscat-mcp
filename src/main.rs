@@ -127,6 +127,13 @@ fn run(
     fut: impl std::future::Future<Output = anyhow::Result<()>>,
 ) -> std::process::ExitCode {
     telemetry::init(log_format);
+    // Before any worker exists: a worker runs as the same user, and a
+    // dumpable server's memory would be open to it through /proc.
+    if let Err(e) = pscat_mcp::sandbox::harden_server() {
+        tracing::error!(error = %e, "cannot make the server non-dumpable");
+        eprintln!("pscat-mcp-server: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -11,6 +11,7 @@
 //! * [`backend`] — runs a job; [`backend::SubprocessBackend`] starts one
 //!   `render-worker` process per job and kills it at the deadline.
 //! * [`worker`] — the only code that executes PostScript (inside the child).
+//! * [`sandbox`] — the worker's system-call filter (Linux).
 //! * [`generate`] — tools whose input is not PostScript (LaTeX for
 //!   `chalkboard_math`, text for `handwrite`; the latter in [`handwrite`]):
 //!   checked in the server, turned into a program in the worker.
@@ -36,6 +37,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod pscat_extras;
 pub mod render;
+pub mod sandbox;
 pub mod sheet;
 pub mod telemetry;
 pub mod worker;
