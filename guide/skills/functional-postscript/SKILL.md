@@ -27,6 +27,14 @@ Collections are literal arrays `[...]`; callbacks are procedures `{...}`.
 | `target advice aop-around` | advice gets target as data, `exec` runs it | |
 | `target counter aop-count` | bumps `counter /Calls`, runs target | |
 | `target (label) aop-trace` | prints `enter label` / `leave label` | |
+| `value q fp-keep` | runs q on value, then pushes value again | `( x -- ... )` |
+| `array q fp-map-indexed` | new array | `( x i -- y )` |
+| `n fp-range` | `[0 ... n-1]` | |
+| `a b fp-zip` | array of `[x y]` pairs; equal lengths | |
+| `a b q fp-map2` | new array | `( x y -- z )` |
+| `array key fp-sort-by` / `array fp-sort` | stable sorted copy | key `( x -- number/string )` |
+| `key fp-field` | getter procedure `( dict -- value )` | |
+| `/name {decorator} aop-wrap-def` | re-points `name` in the current dictionary | |
 
 ## The pattern
 
@@ -62,6 +70,19 @@ showpage
 - `aop-after` runs only on normal return; there is no finally.
 - For a few fixed petals or a hot inner loop, a plain `for` is clearer and
   faster.
+- Make records dictionaries with named fields (`/key fp-field` reads one), not
+  positional arrays. A mark that consumes a record in several steps keeps it:
+  `{/stem load fp-keep blossom}`.
 
 Errors are `undefined` with the guard name; `--pstack-on-error` shows the
 stack.
+
+## Bending shapes (lib/warp.ps)
+
+To bend shapes (lens, swirl, ripple, polar, perspective), or to run an
+unmodified program so everything it paints is warped, load
+`(lib/warp.ps) run` after both libraries: `(file.ps) warp step wp-run`.
+Warps are `( x y -- x' y' )` quotations and compose with `fp-compose`. Inside a
+decorated scope, operator names refer to the decorated versions, so a decorator
+that needs the real operator must capture it with `bind` or
+`systemdict /name get`. Details: `docs/functional-postscript/WARP.md`.

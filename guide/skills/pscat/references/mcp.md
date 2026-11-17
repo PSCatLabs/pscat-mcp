@@ -1,7 +1,7 @@
 # The pscat MCP server in full
 
 Read this when the pscat MCP tools are connected and you need a job, a limit,
-`bands`, or the registration command. Back to [SKILL.md](../SKILL.md).
+`bands`, `gpu_preview`, or the registration command. Back to [SKILL.md](../SKILL.md).
 
 `pscat-mcp` (installed beside `pscat`) serves ten tools over stdio:
 `render_postscript` (source → PNG images inline, or SVG text, or a PDF
@@ -32,6 +32,41 @@ Both render tools take **`bands`** (1 to the server's `--max-bands`, default 4):
 [bands-profile.md](bands-profile.md)). PNG only; the `Lint:` block covers band 0 and the
 stitched page, and a job's `pages_done` stays 0 until it ends. The step and time limits
 apply to each band; the call's or job's wall-clock limit to the whole render.
+
+## GPU preview
+
+Both render tools take **`gpu_preview: true`** (`pscat --gpu-preview`): compiled
+`kernelimage` procedures run on the GPU in 32-bit floats, a fast approximate preview of a
+heavy kernel piece (Mandelbulb: about 0.8 s against 8 s on an M4). Not the CPU's exact
+pixels, so leave it off for the final render. A server whose `pscat` was built without the
+`gpu` cargo feature refuses it with a `gpu_unavailable` error (the tool description says
+which build you have). The call's limits still hold: the time and step limits are checked
+before each GPU dispatch (65536 pixels) and stop the render with `limit_exceeded` and the
+partial page, and a dispatch still running at the wall-clock limit is killed (`timeout`).
+GPU loop trips are capped at 2^20 per pixel instead of counted as steps, so a runaway loop
+that the CPU would stop with `limit_exceeded` gives a capped, often blank image on the GPU:
+if a preview comes back blank or flat, render once without `gpu_preview`. A `Warnings:`
+line names the GPU that ran, or says the kernel fell back to the CPU.
+
+## Showing the render to the user
+
+The PNG a render tool returns is for you, the model; the user usually cannot see
+it (the `pscat` skill's "Show the result to the user" has the per-host details).
+A render without `out_path` leaves no file anywhere, so the tool reply has no path
+to hand over. Pass `out_path` on the render you mean to show: the reply then ends
+with `wrote <absolute path>`, which is the PNG to send. `handwrite`,
+`chalkboard_math`, `review_sheet`, and `render_result` for a job started with an
+`out_path` do the same. The server's instructions and these tools' descriptions say so too.
+
+## Reading your own files and libraries
+
+Programs read files only in the server's working directory, the pscat data
+directories (`$PSCAT_HOME` and the per-user one, whose `lib/` is on the `lib/`
+search order) and each `--allow-read DIR`; the built-in `lib/` is always
+available. `--allow-read` is a flag of the server's command line with no
+environment variable, so another plugin's directory is not readable unless
+whoever registered the server adds it; copy the files into the project instead.
+`PSCAT_LIB` is read like any other path: outside these roots it is not found.
 
 ## Limits, `out_path` and registering
 

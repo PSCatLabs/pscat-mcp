@@ -108,7 +108,10 @@ one. Everything the deployment wires:
   2 GiB (`--memory=2Gi`). With 4 renders: about 3.2 GiB, more than that
   instance has, so a burst of heavy renders could get it killed for running
   out of memory. Lower
-  `PSCAT_MCP_MAX_MEMORY_BYTES` for smaller instances. A `review_sheet` is one
+  `PSCAT_MCP_MAX_MEMORY_BYTES` for smaller instances. PSCat holds clips,
+  shadings, Type 1 fonts and the PDF writer to that limit, so the 512 MiB
+  default (PSCat's own MCP preset is 1024 MiB) refuses some heavy clips
+  and large PDFs with `limit_exceeded`; raising it raises this figure too. A `review_sheet` is one
   render slot and fits the same figure at the default sheet size: while a
   cell runs, its worker holds the cell's interpreter (as a render does: its
   page and up to `max_memory` of growth), plus the sheet's canvas (4 bytes a

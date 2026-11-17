@@ -65,7 +65,7 @@ const PLUGIN_TOOLS: &[&str] = &[
 ];
 
 /// Arguments of the plugin's `render_postscript` that this server's may lack.
-const PLUGIN_RENDER_ARGUMENTS: &[&str] = &["out_path", "bands", "bbox"];
+const PLUGIN_RENDER_ARGUMENTS: &[&str] = &["out_path", "bands", "bbox", "gpu_preview"];
 
 /// Lines of the note for one file only, keyed by path under `guide/skills`.
 /// A test checks that every key is a vendored file.
@@ -830,7 +830,7 @@ mod tests {
         assert!(n.contains("`review_sheet`"));
         assert!(n.contains("`start_render`"));
         assert!(!n.contains("`render_postscript` are not"));
-        assert!(n.contains("no `out_path` or `bbox` argument"));
+        assert!(n.contains("no `out_path`, `bbox` or `gpu_preview` argument"));
         assert!(!n.contains("`pscat chalk` is"));
         assert_eq!(either(&["a", "b", "c"]), "`a`, `b` or `c`");
         assert_eq!(either(&["a"]), "`a`");
