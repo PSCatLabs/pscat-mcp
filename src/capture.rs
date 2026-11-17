@@ -13,6 +13,9 @@
 //!   `Mcp-Name`, `User-Agent`, `Host`) and only the **names** of every other
 //!   header;
 //! * for `Authorization`, only the scheme (`Bearer`), never the credential;
+//! * in every recorded value and in the body, the id of a stored-artifact
+//!   link (`pscat://render/<render_id>/...`, which `Mcp-Name` carries for a
+//!   `resources/read`) redacted;
 //! * the request body, cut at [`MAX_BODY_BYTES`];
 //! * the response status and content type (not the response body).
 //!
@@ -134,7 +137,9 @@ pub fn head_record(
                 .iter()
                 .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 .collect();
-            recorded.insert(lname, Value::String(values.join(", ")));
+            // `Mcp-Name` carries a `resources/read` URI: never a link.
+            let joined = crate::artifacts::redact_render_links(&values.join(", "));
+            recorded.insert(lname, Value::String(joined));
         } else {
             other.push(lname);
         }
@@ -182,7 +187,9 @@ pub async fn capture_layer(
     };
     let cut = bytes.len().min(MAX_BODY_BYTES);
     // Cut on a character boundary where possible.
-    let text = String::from_utf8_lossy(&bytes[..cut]).into_owned();
+    // A `resources/read` of a stored artifact names its link: never record
+    // it (see `crate::artifacts`).
+    let text = crate::artifacts::redact_render_links(&String::from_utf8_lossy(&bytes[..cut]));
     let obj = record.as_object_mut().expect("object");
     obj.insert("seq".into(), json!(seq));
     obj.insert("unix_ms".into(), json!(unix_ms));
@@ -226,6 +233,12 @@ mod tests {
         h.insert("x-api-key", "another-secret".parse().unwrap());
         h.insert("cookie", "sid=abc".parse().unwrap());
         h.insert("user-agent", "claude-code/9.9".parse().unwrap());
+        h.insert(
+            "mcp-name",
+            "pscat://render/0b9c2f7e-1a2b-4c3d-8e9f-001122334455/1"
+                .parse()
+                .unwrap(),
+        );
         let uri: http::Uri = "/mcp?access_token=in-the-query".parse().unwrap();
         let rec = head_record("POST", &uri, http::Version::HTTP_11, &h);
         let text = rec.to_string();
@@ -234,6 +247,7 @@ mod tests {
             "another-secret",
             "sid=abc",
             "in-the-query",
+            "0b9c2f7e-1a2b-4c3d-8e9f-001122334455",
         ] {
             assert!(!text.contains(secret), "{secret} leaked into {text}");
         }
@@ -245,6 +259,7 @@ mod tests {
             "application/json, text/event-stream"
         );
         assert_eq!(rec["headers"]["user-agent"], "claude-code/9.9");
+        assert_eq!(rec["headers"]["mcp-name"], "pscat://render/[redacted]/1");
         assert_eq!(rec["other_header_names"], json!(["cookie", "x-api-key"]));
     }
 

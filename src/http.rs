@@ -702,6 +702,7 @@ pub async fn serve_with_capture(
         auth = %auth.describe(),
         auth_methods = %auth.methods().join(","),
         async_jobs = jobs_service.jobs().enabled(),
+        artifact_links = jobs_service.artifacts().map_or("off", |a| a.name()),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
         "listening; MCP endpoint at /mcp, health at /healthz and /health"

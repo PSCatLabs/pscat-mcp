@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use clap::Args;
 
+use crate::artifacts::{Delivery, LinksBackend, RENDER_CHARGE_BYTES};
+
 /// The default size up to which SVG is returned as text, in bytes
 /// (40 KiB). A larger SVG is returned as a blob resource instead, up to the
 /// output limit.
@@ -664,6 +666,119 @@ impl JobsConfig {
     }
 }
 
+/// Artifact delivery (#139): the `delivery` argument and the store links
+/// point to (see `src/artifacts.rs`).
+#[derive(Debug, Clone, Args)]
+pub struct ArtifactConfig {
+    /// Where `delivery` `url` and `both` keep the output: `off` (no links:
+    /// those values are refused), `memory` (this process's memory, read with
+    /// `resources/read` of `pscat://render/<render_id>/<n>`; one instance
+    /// only, lost on restart) or `gcs` (Cloud Storage signed URLs: not
+    /// implemented yet, so the server refuses to start with it).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINKS", value_enum, default_value_t = LinksBackend::Off)]
+    pub artifact_links: LinksBackend,
+
+    /// The `delivery` used when a call gives none: `inline` (the bytes in
+    /// the result), `url`, `both` or `auto`. Anything but `inline` needs
+    /// links (`PSCAT_MCP_ARTIFACT_LINKS`).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_DELIVERY", value_enum, default_value_t = Delivery::Inline)]
+    pub artifact_delivery: Delivery,
+
+    /// For `delivery` `auto`: output over this many bytes (all artifacts
+    /// together, before base64) is returned as links, the rest inline.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES", default_value_t = DEFAULT_ARTIFACT_THRESHOLD_BYTES)]
+    pub artifact_threshold_bytes: usize,
+
+    /// How long a link works, in seconds. The memory backend drops the
+    /// bytes then.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_URL_TTL_SECS", default_value_t = 1800)]
+    pub artifact_url_ttl_secs: u64,
+
+    /// Bytes one principal may have stored at once (memory backend). Every
+    /// caller under the `none` auth method is the one principal
+    /// `anonymous`, so they share it. Must hold one largest output
+    /// (`--max-output-bytes`, plus 1 KiB) and be at most
+    /// `--job-results-budget-bytes`, which bounds every principal together.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_QUOTA_BYTES", default_value_t = DEFAULT_ARTIFACT_QUOTA_BYTES)]
+    pub artifact_quota_bytes: usize,
+}
+
+/// The default `auto` threshold: 1 MiB.
+pub const DEFAULT_ARTIFACT_THRESHOLD_BYTES: usize = 1024 * 1024;
+/// The default per-principal artifact quota: 32 MiB (four largest outputs
+/// at the default output limit).
+pub const DEFAULT_ARTIFACT_QUOTA_BYTES: usize = 32 * 1024 * 1024;
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        ArtifactConfig {
+            artifact_links: LinksBackend::Off,
+            artifact_delivery: Delivery::Inline,
+            artifact_threshold_bytes: DEFAULT_ARTIFACT_THRESHOLD_BYTES,
+            artifact_url_ttl_secs: 1800,
+            artifact_quota_bytes: DEFAULT_ARTIFACT_QUOTA_BYTES,
+        }
+    }
+}
+
+impl ArtifactConfig {
+    /// The same settings with the memory backend on.
+    pub fn memory(mut self) -> Self {
+        self.artifact_links = LinksBackend::Memory;
+        self
+    }
+
+    /// How long links work.
+    pub fn ttl(&self) -> Duration {
+        Duration::from_secs(self.artifact_url_ttl_secs)
+    }
+
+    /// Reject settings that cannot work with `limits` and `jobs` (whose
+    /// results budget the memory backend shares).
+    pub fn check(&self, limits: &LimitsConfig, jobs: &JobsConfig) -> Result<(), String> {
+        match self.artifact_links {
+            LinksBackend::Gcs => {
+                return Err(
+                    "PSCAT_MCP_ARTIFACT_LINKS=gcs (Cloud Storage signed URLs) is not implemented \
+                     yet (PSCatLabs/pscat-mcp#140); use off or memory"
+                        .into(),
+                );
+            }
+            LinksBackend::Off => {
+                if self.artifact_delivery != Delivery::Inline {
+                    return Err(format!(
+                        "PSCAT_MCP_ARTIFACT_DELIVERY={} needs links, but \
+                         PSCAT_MCP_ARTIFACT_LINKS is off; set PSCAT_MCP_ARTIFACT_LINKS=memory \
+                         or the delivery to inline",
+                        self.artifact_delivery.as_str()
+                    ));
+                }
+                return Ok(());
+            }
+            LinksBackend::Memory => {}
+        }
+        if self.artifact_url_ttl_secs == 0 {
+            return Err("artifact-url-ttl-secs must be positive".into());
+        }
+        let largest = limits.max_output_bytes.saturating_add(RENDER_CHARGE_BYTES);
+        if self.artifact_quota_bytes < largest {
+            return Err(format!(
+                "artifact-quota-bytes ({}) must hold one largest output ({largest} bytes: \
+                 max-output-bytes plus {RENDER_CHARGE_BYTES})",
+                self.artifact_quota_bytes
+            ));
+        }
+        if self.artifact_quota_bytes > jobs.job_results_budget_bytes {
+            return Err(format!(
+                "artifact-quota-bytes ({}) must not exceed job-results-budget-bytes ({}), the \
+                 budget stored artifacts share with async job results",
+                self.artifact_quota_bytes, jobs.job_results_budget_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The default step limit of an async job: PSCat's for untrusted programs
 /// (`pscat::limits::UNTRUSTED_MAX_STEPS`), the PSCat plugin's.
 pub const DEFAULT_JOB_MAX_STEPS: u64 = 25_000_000_000;
@@ -916,6 +1031,64 @@ impl AuthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_settings_are_checked_at_startup() {
+        let (l, j) = (LimitsConfig::default(), JobsConfig::default());
+        let check = |c: ArtifactConfig| c.check(&l, &j);
+        assert!(check(ArtifactConfig::default()).is_ok());
+        assert!(check(ArtifactConfig::default().memory()).is_ok());
+        let gcs = check(ArtifactConfig {
+            artifact_links: LinksBackend::Gcs,
+            ..ArtifactConfig::default()
+        })
+        .unwrap_err();
+        assert!(
+            gcs.contains("not implemented yet") && gcs.contains("#140"),
+            "{gcs}"
+        );
+        for d in [Delivery::Url, Delivery::Both, Delivery::Auto] {
+            let e = check(ArtifactConfig {
+                artifact_delivery: d,
+                ..ArtifactConfig::default()
+            })
+            .unwrap_err();
+            assert!(e.contains("PSCAT_MCP_ARTIFACT_LINKS is off"), "{e}");
+            assert!(
+                check(ArtifactConfig {
+                    artifact_delivery: d,
+                    ..ArtifactConfig::default().memory()
+                })
+                .is_ok()
+            );
+        }
+        let e = check(ArtifactConfig {
+            artifact_url_ttl_secs: 0,
+            ..ArtifactConfig::default().memory()
+        })
+        .unwrap_err();
+        assert!(e.contains("ttl"), "{e}");
+        let largest = l.max_output_bytes + RENDER_CHARGE_BYTES;
+        let e = check(ArtifactConfig {
+            artifact_quota_bytes: largest - 1,
+            ..ArtifactConfig::default().memory()
+        })
+        .unwrap_err();
+        assert!(e.contains("one largest output"), "{e}");
+        assert!(
+            check(ArtifactConfig {
+                artifact_quota_bytes: largest,
+                ..ArtifactConfig::default().memory()
+            })
+            .is_ok()
+        );
+        let e = check(ArtifactConfig {
+            artifact_quota_bytes: j.job_results_budget_bytes + 1,
+            ..ArtifactConfig::default().memory()
+        })
+        .unwrap_err();
+        assert!(e.contains("job-results-budget-bytes"), "{e}");
+    }
 
     #[test]
     fn interp_time_limit_sits_below_the_kill() {

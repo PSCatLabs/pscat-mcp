@@ -55,8 +55,8 @@ use rmcp::model::{
     CreateTaskResult, DetailedTask, Extensions, GetPromptRequestParams, GetPromptResponse,
     GetTaskParams, GetTaskResult, Implementation, JsonObject, ListPromptsResult,
     ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
-    ResourceContents, ServerCapabilities, ServerConfig, TASKS_EXTENSION_ID, Task, TaskPayload,
-    TaskStatus, UpdateTaskParams,
+    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerConfig,
+    TASKS_EXTENSION_ID, Task, TaskPayload, TaskStatus, UpdateTaskParams,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -65,6 +65,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::artifacts::{
+    ArtifactObject, Delivery, LinkScheme, RENDER_URI_PREFIX, StoredRender, parse_render_uri,
+};
 use crate::build_info::{RendererIdentity, SERVER_VERSION};
 use crate::catalog::{CatalogQuery, CatalogSlice};
 use crate::config::{MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX};
@@ -73,8 +76,8 @@ use crate::guide::{Guide, PackFaces, ServerFacts};
 use crate::handwrite::HandwriteParams;
 use crate::jobs::{JobResult, JobState, JobStatus, LOCAL_PRINCIPAL};
 use crate::render::{
-    ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, JobRequest, RenderError,
-    RenderOutput, RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
+    ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, InputDiagnostic, JobRequest,
+    RenderError, RenderOutput, RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
 };
 use crate::sheet::{
     MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
@@ -106,6 +109,16 @@ pub struct RenderArgs {
     /// the call fails with invalid_request. Default false.
     #[schemars(extend("default" = false))]
     pub halftone: Option<bool>,
+    /// How the output is returned: "inline" (the bytes in the result),
+    /// "url" (a link per artifact instead: a resource_link block, and
+    /// download_url and expires_at in structuredContent), "both" (the bytes
+    /// and the links) or "auto" (links when the output is over the server's
+    /// threshold, otherwise inline). url and both need links, which the
+    /// server operator turns on; without them they fail with
+    /// invalid_request. Default: the server's setting (inline unless
+    /// changed).
+    #[schemars(extend("enum" = ["inline", "url", "both", "auto"]))]
+    pub delivery: Option<String>,
 }
 
 impl RenderArgs {
@@ -208,6 +221,16 @@ pub struct ChalkboardArgs {
     /// dpi), `chalk` (color, strength, pressure, tilt, dust, width), `board`
     /// (or false) and `seed`. The arguments above are laid over it.
     pub config: Option<serde_json::Map<String, Value>>,
+    /// How the output is returned: "inline" (the bytes in the result),
+    /// "url" (a link per artifact instead: a resource_link block, and
+    /// download_url and expires_at in structuredContent), "both" (the bytes
+    /// and the links) or "auto" (links when the output is over the server's
+    /// threshold, otherwise inline). url and both need links, which the
+    /// server operator turns on; without them they fail with
+    /// invalid_request. Default: the server's setting (inline unless
+    /// changed).
+    #[schemars(extend("enum" = ["inline", "url", "both", "auto"]))]
+    pub delivery: Option<String>,
 }
 
 fn board_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -299,6 +322,16 @@ pub struct HandwriteArgs {
     pub seed: Option<i64>,
     /// Resolution in dots per inch, 9 to 1200. Default 72.
     pub dpi: Option<f64>,
+    /// How the output is returned: "inline" (the bytes in the result),
+    /// "url" (a link per artifact instead: a resource_link block, and
+    /// download_url and expires_at in structuredContent), "both" (the bytes
+    /// and the links) or "auto" (links when the output is over the server's
+    /// threshold, otherwise inline). url and both need links, which the
+    /// server operator turns on; without them they fail with
+    /// invalid_request. Default: the server's setting (inline unless
+    /// changed).
+    #[schemars(extend("enum" = ["inline", "url", "both", "auto"]))]
+    pub delivery: Option<String>,
 }
 
 /// `jitter` is a whole number: PSCat's handwriting font takes it with `mod`.
@@ -353,6 +386,16 @@ pub struct ReviewSheetArgs {
     pub labels: Option<bool>,
     /// Draw the pixel-size caption under each cell. Default true.
     pub sizes: Option<bool>,
+    /// How the output is returned: "inline" (the bytes in the result),
+    /// "url" (a link per artifact instead: a resource_link block, and
+    /// download_url and expires_at in structuredContent), "both" (the bytes
+    /// and the links) or "auto" (links when the output is over the server's
+    /// threshold, otherwise inline). url and both need links, which the
+    /// server operator turns on; without them they fail with
+    /// invalid_request. Default: the server's setting (inline unless
+    /// changed).
+    #[schemars(extend("enum" = ["inline", "url", "both", "auto"]))]
+    pub delivery: Option<String>,
 }
 
 /// The schema of a dpi list, written out where it is used rather than as a
@@ -476,8 +519,18 @@ pub struct ArtifactSummary {
     /// How the artifact's content block carries it: `image` (PNG),
     /// `text` (an embedded text resource: SVG up to `svg_blob_threshold_bytes`) or
     /// `blob` (an embedded base64 resource: PDF, and SVG over
-    /// `svg_blob_threshold_bytes`).
+    /// `svg_blob_threshold_bytes`), or `link` (only a `resource_link`
+    /// block: `delivery` `url`).
     pub returned_as: ReturnedAs,
+    /// With `delivery` `url` or `both` (or `auto` over the threshold): where
+    /// to fetch the artifact until `expires_at`. On this server's memory
+    /// store, the `pscat://render/<render_id>/<n>` resource, read with
+    /// `resources/read` by the same client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    /// When `download_url` stops working (RFC 3339, UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// The kind of content block an artifact is returned in.
@@ -490,6 +543,8 @@ pub enum ReturnedAs {
     Text,
     /// An embedded blob resource (base64).
     Blob,
+    /// Only a `resource_link` block; the bytes are at `download_url`.
+    Link,
 }
 
 /// `structuredContent` of `render_postscript`, for success and failure
@@ -523,6 +578,11 @@ pub struct RenderToolOutput {
     /// Time spent executing the program, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// With links (`delivery` `url`, `both`, or `auto` over the threshold):
+    /// the random id the call's artifacts are stored under. `artifacts`,
+    /// each with its `download_url` and `expires_at`, is the manifest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_id: Option<String>,
     /// The failure, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -570,6 +630,20 @@ pub struct SheetToolOutput {
     /// milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
+    /// With links: `image` (the PNG is inline too, `delivery` `both`) or
+    /// `link` (only a `resource_link` block, `delivery` `url`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_as: Option<ReturnedAs>,
+    /// With links: the random id the sheet is stored under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_id: Option<String>,
+    /// With links: where to fetch the sheet's PNG until `expires_at` (see
+    /// `render_postscript`'s `download_url`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    /// When `download_url` stops working (RFC 3339, UTC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     /// The failure, when `ok` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RenderError>,
@@ -738,6 +812,26 @@ pub struct RendererInfo {
     /// directory (`PSCAT_MCP_FONT_PACK_DIR`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_packs: Option<FontPackInfo>,
+    /// Artifact links (`delivery` `url`, `both`, `auto`), present only when
+    /// the operator turned them on (`PSCAT_MCP_ARTIFACT_LINKS`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_links: Option<ArtifactLinksInfo>,
+}
+
+/// Artifact links, in `get_renderer_info`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ArtifactLinksInfo {
+    /// Where links point: `memory` (`pscat://render/...` resources on this
+    /// server).
+    pub backend: String,
+    /// The delivery used when a call gives none.
+    pub default_delivery: String,
+    /// With `auto`, output over this many bytes is returned as links.
+    pub threshold_bytes: usize,
+    /// How long a link works, in seconds.
+    pub ttl_seconds: u64,
+    /// Bytes one client may have stored at once.
+    pub quota_bytes: usize,
 }
 
 /// The font packs the workers can use, in `get_renderer_info`.
@@ -929,6 +1023,36 @@ impl PscatMcp {
                 tool_router.remove_route(name);
             }
         }
+        if let Some(store) = service.artifacts() {
+            let c = service.artifact_config();
+            let note = format!(
+                " With delivery url or both, the output is also kept on this server for {} s (at \
+                 most {} bytes per client at once) and linked as \
+                 pscat://render/<render_id>/<n> resources, read with resources/read by the same \
+                 client; auto gives links when the output is over {} bytes. The default delivery \
+                 here is {}.",
+                store.ttl().as_secs(),
+                store.quota_bytes(),
+                c.artifact_threshold_bytes,
+                c.artifact_delivery.as_str()
+            );
+            for name in LINK_TOOLS {
+                if let Some(route) = tool_router.map.get_mut(name) {
+                    let base = route.attr.description.clone().unwrap_or_default();
+                    route.attr.description = Some(format!("{base}{note}").into());
+                }
+            }
+            if let Some(route) = tool_router.map.get_mut("start_render") {
+                let base = route.attr.description.clone().unwrap_or_default();
+                route.attr.description = Some(
+                    format!(
+                        "{base} A job's delivery is applied when render_result returns it; the \
+                         links stay the same on every fetch until they expire."
+                    )
+                    .into(),
+                );
+            }
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -952,6 +1076,7 @@ impl PscatMcp {
             max_prompt_argument_bytes: limits.max_prompt_argument_bytes,
             // Known now only when no pack directory is configured; otherwise
             // `guide()` reads the installed packs from the catalog first.
+            artifact_links_ttl_secs: service.artifacts().map(|a| a.ttl().as_secs()),
             pack_faces: if service.font_packs_configured() {
                 PackFaces::Configured { installed: None }
             } else {
@@ -1015,6 +1140,199 @@ impl PscatMcp {
             facts.pack_faces = PackFaces::Configured { installed };
         }
         facts
+    }
+
+    /// The delivery a call asked for (`arg`), or the operator default: a
+    /// value the server cannot serve is a structured `invalid_request`
+    /// (`error.input.code` `delivery`). `auto` with no artifact store is
+    /// `inline`.
+    fn resolve_delivery(&self, arg: Option<&str>) -> Result<Delivery, RenderError> {
+        let d = match arg {
+            None => self.service.artifact_config().artifact_delivery,
+            Some(name) => Delivery::parse(name).ok_or_else(|| {
+                let shown: String = name.chars().take(32).collect();
+                delivery_error(format!(
+                    "unknown delivery {shown:?}; the values are inline, url, both and auto"
+                ))
+            })?,
+        };
+        match (d, self.service.artifacts()) {
+            (Delivery::Url | Delivery::Both, None) => Err(delivery_error(format!(
+                "delivery {} needs links, and this server keeps no artifacts \
+                 (PSCAT_MCP_ARTIFACT_LINKS is off); use delivery inline",
+                d.as_str()
+            ))),
+            (Delivery::Auto, None) => Ok(Delivery::Inline),
+            _ => Ok(d),
+        }
+    }
+
+    /// Store `out`'s artifacts if `delivery` comes to links for its size,
+    /// for the principal `owner` gives. `None` when the result is inline.
+    /// The second value says whether the bytes go inline too (`both`).
+    async fn store_output(
+        &self,
+        out: &RenderOutput,
+        delivery: Delivery,
+        owner: impl FnOnce() -> Result<String, RenderError>,
+    ) -> Result<Option<(StoredRender, bool)>, RenderError> {
+        let total = out
+            .artifacts
+            .iter()
+            .fold(0usize, |n, a| n.saturating_add(a.byte_len));
+        let decided = delivery.decide(
+            total,
+            self.service.artifact_config().artifact_threshold_bytes,
+        );
+        if decided == Delivery::Inline {
+            return Ok(None);
+        }
+        let stored = self.put_output(out, &owner()?).await?;
+        Ok(Some((stored, decided.inline_bytes())))
+    }
+
+    /// Store `out`'s artifacts for `owner`.
+    async fn put_output(
+        &self,
+        out: &RenderOutput,
+        owner: &str,
+    ) -> Result<StoredRender, RenderError> {
+        let Some(store) = self.service.artifacts() else {
+            return Err(delivery_error(
+                "this server keeps no artifacts (PSCAT_MCP_ARTIFACT_LINKS is off); use delivery \
+                 inline"
+                    .into(),
+            ));
+        };
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mime = out.format.mime_type();
+        let mut objects = Vec::with_capacity(out.artifacts.len());
+        for a in &out.artifacts {
+            let bytes = b64.decode(&a.data_base64).map_err(|_| {
+                RenderError::new(
+                    ErrorCode::WorkerFailed,
+                    "the renderer returned an artifact that is not base64",
+                )
+            })?;
+            objects.push(ArtifactObject {
+                mime_type: mime.to_string(),
+                bytes: bytes.into(),
+            });
+        }
+        store.put(owner, objects).await
+    }
+
+    /// The result of a render tool for `out`, as `delivery` asks; a store
+    /// refusal is the tool's failure envelope (led by `lead`).
+    async fn deliver(
+        &self,
+        out: RenderOutput,
+        delivery: Delivery,
+        ext: &Extensions,
+        lead: &str,
+    ) -> CallToolResult {
+        let svg = self.service.limits().svg_blob_threshold_bytes();
+        match self
+            .store_output(&out, delivery, || principal(self.transport, ext))
+            .await
+        {
+            Ok(None) => render_success(out, svg),
+            Ok(Some((stored, inline))) => render_success_with(
+                out,
+                svg,
+                Some(Links {
+                    stored: &stored,
+                    inline,
+                }),
+            ),
+            Err(err) => failure_with(lead, err),
+        }
+    }
+
+    /// What a job's tool would have returned, with the delivery its call
+    /// asked for. Links are made the first time the result is fetched and
+    /// remembered on the job (`job_id`), so fetching it again gives the
+    /// same `render_id` until the links expire.
+    async fn job_result(
+        &self,
+        owner: &str,
+        job_id: Option<&str>,
+        result: JobResult,
+    ) -> CallToolResult {
+        let svg = self.service.limits().svg_blob_threshold_bytes();
+        let lead = failure_lead(&result.tool);
+        let out = match result.outcome {
+            Ok(out) => out,
+            Err(err) => return failure_with(lead, (*err).clone()),
+        };
+        let total = out
+            .artifacts
+            .iter()
+            .fold(0usize, |n, a| n.saturating_add(a.byte_len));
+        let decided = result.delivery.decide(
+            total,
+            self.service.artifact_config().artifact_threshold_bytes,
+        );
+        if decided == Delivery::Inline {
+            return render_success((*out).clone(), svg);
+        }
+        let now = std::time::SystemTime::now();
+        let stored = match result.stored.filter(|s| s.expires_at > now) {
+            Some(stored) => stored,
+            None => match self.put_output(&out, owner).await {
+                Ok(stored) => {
+                    if let Some(id) = job_id {
+                        self.service
+                            .jobs()
+                            .remember_links(owner, id, stored.clone());
+                    }
+                    stored
+                }
+                Err(err) => {
+                    // Not delivered: keep the result as unfetched, so it is
+                    // not dropped for room before the client gets it.
+                    if let Some(id) = job_id {
+                        self.service.jobs().unmark_fetched(owner, id);
+                    }
+                    return failure_with(lead, err);
+                }
+            },
+        };
+        render_success_with(
+            (*out).clone(),
+            svg,
+            Some(Links {
+                stored: &stored,
+                inline: decided.inline_bytes(),
+            }),
+        )
+    }
+
+    /// `resources/read` of a stored artifact. An unknown, expired or other
+    /// client's render is one not-found error that never echoes the URI.
+    async fn read_stored(
+        &self,
+        uri: &str,
+        ext: &Extensions,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let not_found = || {
+            ErrorData::resource_not_found(
+                "no such stored artifact: never stored for this client, or expired",
+                None,
+            )
+        };
+        let (Some(store), Some((id, n)), Ok(owner)) = (
+            self.service.artifacts(),
+            parse_render_uri(uri),
+            principal(self.transport, ext),
+        ) else {
+            return Err(not_found());
+        };
+        let artifact = store.read(&owner, id, n).await.ok_or_else(not_found)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&artifact.bytes);
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::blob(b64, uri.to_string()).with_mime_type(artifact.mime_type),
+        ]))
     }
 
     async fn renderer_info(&self) -> RendererInfo {
@@ -1108,6 +1426,16 @@ impl PscatMcp {
             }))
             .collect(),
             font_packs,
+            artifact_links: self.service.artifacts().map(|store| {
+                let c = self.service.artifact_config();
+                ArtifactLinksInfo {
+                    backend: store.name().to_string(),
+                    default_delivery: c.artifact_delivery.as_str().to_string(),
+                    threshold_bytes: c.artifact_threshold_bytes,
+                    ttl_seconds: store.ttl().as_secs(),
+                    quota_bytes: store.quota_bytes(),
+                }
+            }),
         }
     }
 }
@@ -1174,15 +1502,20 @@ impl PscatMcp {
     )]
     async fn render_postscript(
         &self,
-        Parameters(args): Parameters<RenderArgs>,
+        Parameters(mut args): Parameters<RenderArgs>,
         ct: CancellationToken,
+        ext: Extensions,
     ) -> CallToolResult {
+        let delivery = match self.resolve_delivery(args.delivery.take().as_deref()) {
+            Ok(d) => d,
+            Err(err) => return render_failure(err),
+        };
         let outcome = tokio::select! {
             r = self.service.render(args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
+            Ok(out) => self.deliver(out, delivery, &ext, "Render failed").await,
             Err(err) => render_failure(err),
         }
     }
@@ -1214,15 +1547,20 @@ impl PscatMcp {
     )]
     async fn chalkboard_math(
         &self,
-        Parameters(args): Parameters<ChalkboardArgs>,
+        Parameters(mut args): Parameters<ChalkboardArgs>,
         ct: CancellationToken,
+        ext: Extensions,
     ) -> CallToolResult {
+        let delivery = match self.resolve_delivery(args.delivery.take().as_deref()) {
+            Ok(d) => d,
+            Err(err) => return failure_with("Chalkboard failed", err),
+        };
         let outcome = tokio::select! {
             r = self.service.generate(args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
+            Ok(out) => self.deliver(out, delivery, &ext, "Chalkboard failed").await,
             Err(err) => failure_with("Chalkboard failed", err),
         }
     }
@@ -1256,15 +1594,20 @@ impl PscatMcp {
     )]
     async fn handwrite(
         &self,
-        Parameters(args): Parameters<HandwriteArgs>,
+        Parameters(mut args): Parameters<HandwriteArgs>,
         ct: CancellationToken,
+        ext: Extensions,
     ) -> CallToolResult {
+        let delivery = match self.resolve_delivery(args.delivery.take().as_deref()) {
+            Ok(d) => d,
+            Err(err) => return failure_with("Handwrite failed", err),
+        };
         let outcome = tokio::select! {
             r = self.service.generate(args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
-            Ok(out) => render_success(out, self.service.limits().svg_blob_threshold_bytes()),
+            Ok(out) => self.deliver(out, delivery, &ext, "Handwrite failed").await,
             Err(err) => failure_with("Handwrite failed", err),
         }
     }
@@ -1299,15 +1642,34 @@ impl PscatMcp {
     )]
     async fn review_sheet(
         &self,
-        Parameters(args): Parameters<ReviewSheetArgs>,
+        Parameters(mut args): Parameters<ReviewSheetArgs>,
         ct: CancellationToken,
+        ext: Extensions,
     ) -> CallToolResult {
+        let delivery = match self.resolve_delivery(args.delivery.take().as_deref()) {
+            Ok(d) => d,
+            Err(err) => return sheet_failure(err),
+        };
         let outcome = tokio::select! {
             r = self.service.generate(args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
-        match outcome {
-            Ok(out) => sheet_success(out),
+        let out = match outcome {
+            Ok(out) => out,
+            Err(err) => return sheet_failure(err),
+        };
+        match self
+            .store_output(&out, delivery, || principal(self.transport, &ext))
+            .await
+        {
+            Ok(None) => sheet_success(out),
+            Ok(Some((stored, inline))) => sheet_success_with(
+                out,
+                Some(Links {
+                    stored: &stored,
+                    inline,
+                }),
+            ),
             Err(err) => sheet_failure(err),
         }
     }
@@ -1427,12 +1789,24 @@ impl PscatMcp {
     )]
     async fn start_render(
         &self,
-        Parameters(args): Parameters<RenderArgs>,
+        Parameters(mut args): Parameters<RenderArgs>,
         ext: Extensions,
     ) -> CallToolResult {
+        let delivery = match self.resolve_delivery(args.delivery.take().as_deref()) {
+            Ok(d) => d,
+            Err(err) => return job_failure("Job not started", err),
+        };
         let started = principal(self.transport, &ext).and_then(|owner| {
-            self.service
-                .start_job(&owner, JobRequest::Render(args.into_request()))
+            let status = self
+                .service
+                .start_job(&owner, JobRequest::Render(args.into_request()))?;
+            // Applied when the result is fetched (`render_result`).
+            if delivery != Delivery::Inline {
+                self.service
+                    .jobs()
+                    .set_delivery(&owner, &status.job_id, delivery);
+            }
+            Ok(status)
         });
         match started {
             Ok(status) => job_success(
@@ -1499,10 +1873,12 @@ impl PscatMcp {
         Parameters(args): Parameters<JobIdArgs>,
         ext: Extensions,
     ) -> CallToolResult {
-        match principal(self.transport, &ext)
-            .and_then(|owner| self.service.jobs().result(&owner, &args.job_id))
-        {
-            Ok(result) => job_result(result, self.service.limits().svg_blob_threshold_bytes()),
+        let fetched = principal(self.transport, &ext).and_then(|owner| {
+            let result = self.service.jobs().result(&owner, &args.job_id)?;
+            Ok((owner, result))
+        });
+        match fetched {
+            Ok((owner, result)) => self.job_result(&owner, Some(&args.job_id), result).await,
             Err(err) => failure_with("No render result", err),
         }
     }
@@ -1579,23 +1955,47 @@ impl ServerHandler for PscatMcp {
         // without a principal) cannot own a task, so it takes the
         // synchronous path below.
         if wants_task
-            && let Some(job) = task_request(&request)
+            && let Some((job, delivery)) = task_request(&request)
             && let Ok(owner) = principal(self.transport, &context.extensions)
         {
+            let delivery = match self.resolve_delivery(delivery.as_deref()) {
+                Ok(d) => d,
+                Err(err) => {
+                    return Ok(CallToolResponse::Complete(failure_with(
+                        failure_lead(&tool),
+                        err,
+                    )));
+                }
+            };
             return Ok(
                 match self.service.call_or_task(&owner, job, &context.ct).await {
-                    TaskCall::Task(status) => CallToolResponse::Task(CreateTaskResult::new(
-                        task_of(&status, self.service.jobs().config()),
-                    )),
+                    TaskCall::Task(status) => {
+                        // Applied when the task's result is fetched.
+                        if delivery != Delivery::Inline {
+                            self.service
+                                .jobs()
+                                .set_delivery(&owner, &status.job_id, delivery);
+                        }
+                        CallToolResponse::Task(CreateTaskResult::new(task_of(
+                            &status,
+                            self.service.jobs().config(),
+                        )))
+                    }
                     // Finished before the threshold, or refused before a job
                     // exists: what the tool returns synchronously.
-                    TaskCall::Done(outcome) => CallToolResponse::Complete(job_result(
-                        JobResult {
-                            tool: tool.to_string(),
-                            outcome: outcome.map(Arc::new).map_err(Arc::new),
-                        },
-                        self.service.limits().svg_blob_threshold_bytes(),
-                    )),
+                    TaskCall::Done(outcome) => CallToolResponse::Complete(
+                        self.job_result(
+                            &owner,
+                            None,
+                            JobResult {
+                                tool: tool.to_string(),
+                                outcome: outcome.map(Arc::new).map_err(Arc::new),
+                                delivery,
+                                stored: None,
+                            },
+                        )
+                        .await,
+                    ),
                 },
             );
         }
@@ -1614,18 +2014,21 @@ impl ServerHandler for PscatMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, ErrorData> {
         let jobs = self.service.jobs();
-        let (status, result) = principal(self.transport, &context.extensions)
-            .and_then(|owner| jobs.status_and_result(&owner, &request.task_id))
+        let owner = principal(self.transport, &context.extensions)
+            .map_err(|_| unknown_task(&request.task_id))?;
+        let (status, result) = jobs
+            .status_and_result(&owner, &request.task_id)
             .map_err(|_| unknown_task(&request.task_id))?;
         let payload = match (status.state, result) {
             (JobState::Cancelled, _) => TaskPayload::Cancelled,
             // A render that failed is still a completed tool call, with
             // `isError: true` (SEP-2663: `failed` is for JSON-RPC errors).
             (_, Some(result)) => TaskPayload::Completed {
-                result: result_object(&job_result(
-                    result,
-                    self.service.limits().svg_blob_threshold_bytes(),
-                )),
+                result: result_object(
+                    &self
+                        .job_result(&owner, Some(&request.task_id), result)
+                        .await,
+                ),
             },
             _ => TaskPayload::Working,
         };
@@ -1692,8 +2095,14 @@ impl ServerHandler for PscatMcp {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
+        if request.uri.starts_with(RENDER_URI_PREFIX) {
+            return self
+                .read_stored(&request.uri, &context.extensions)
+                .await
+                .map(ReadResourceResponse::from);
+        }
         self.guide()
             .await
             .read(&request.uri)
@@ -1743,6 +2152,14 @@ pub async fn serve_stdio(service: Arc<RenderService>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The tools that take a `delivery` argument and can return links.
+const LINK_TOOLS: [&str; 4] = [
+    "render_postscript",
+    "chalkboard_math",
+    "handwrite",
+    "review_sheet",
+];
+
 /// The tools that exist only while async jobs are on.
 const JOB_TOOLS: [&str; 4] = [
     "start_render",
@@ -1791,7 +2208,7 @@ fn principal(transport: Transport, ext: &Extensions) -> Result<String, RenderErr
 /// The job a task-eligible `tools/call` asks for, or `None` when it is not
 /// eligible or its arguments do not parse (the synchronous path then gives
 /// the argument error its usual envelope).
-fn task_request(request: &CallToolRequestParams) -> Option<JobRequest> {
+fn task_request(request: &CallToolRequestParams) -> Option<(JobRequest, Option<String>)> {
     if !TASK_TOOLS.contains(&request.name.as_ref()) {
         return None;
     }
@@ -1799,13 +2216,16 @@ fn task_request(request: &CallToolRequestParams) -> Option<JobRequest> {
     match request.name.as_ref() {
         "render_postscript" => serde_json::from_value::<RenderArgs>(args)
             .ok()
-            .map(|a| JobRequest::Render(a.into_request())),
+            .map(|mut a| (a.delivery.take(), a))
+            .map(|(d, a)| (JobRequest::Render(a.into_request()), d)),
         "chalkboard_math" => serde_json::from_value::<ChalkboardArgs>(args)
             .ok()
-            .map(|a| JobRequest::Generate(a.into_request())),
+            .map(|mut a| (a.delivery.take(), a))
+            .map(|(d, a)| (JobRequest::Generate(a.into_request()), d)),
         "handwrite" => serde_json::from_value::<HandwriteArgs>(args)
             .ok()
-            .map(|a| JobRequest::Generate(a.into_request())),
+            .map(|mut a| (a.delivery.take(), a))
+            .map(|(d, a)| (JobRequest::Generate(a.into_request()), d)),
         _ => None,
     }
 }
@@ -1859,14 +2279,6 @@ fn result_object(result: &CallToolResult) -> JsonObject {
     }
 }
 
-/// What the job's tool would have returned.
-fn job_result(result: JobResult, svg_text_max: usize) -> CallToolResult {
-    match result.outcome {
-        Ok(out) => render_success((*out).clone(), svg_text_max),
-        Err(err) => failure_with(failure_lead(&result.tool), (*err).clone()),
-    }
-}
-
 /// The first words of a failed render tool's text.
 fn failure_lead(tool: &str) -> &'static str {
     match tool {
@@ -1913,6 +2325,19 @@ fn job_failure(lead: &str, err: RenderError) -> CallToolResult {
     )
 }
 
+/// A `delivery` the server cannot serve: `invalid_request`, with
+/// `error.input.code` `delivery`.
+fn delivery_error(message: String) -> RenderError {
+    let mut err = RenderError::new(ErrorCode::InvalidRequest, message);
+    err.input = Some(Box::new(InputDiagnostic {
+        code: "delivery".into(),
+        token: None,
+        limit_bytes: None,
+        reached_bytes: None,
+    }));
+    err
+}
+
 fn code_name(code: ErrorCode) -> String {
     match serde_json::to_value(code) {
         Ok(serde_json::Value::String(s)) => s,
@@ -1941,6 +2366,73 @@ fn render_uri(id: &uuid::Uuid, page: Option<usize>) -> String {
 /// it does a PDF (docs/LOCAL_TESTING.md, section 11). One result never
 /// mixes the two.
 fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
+    render_success_with(out, svg_text_max, None)
+}
+
+/// Links to a call's stored artifacts, and whether the bytes are inline too
+/// (`both`) or not (`url`).
+#[derive(Clone, Copy)]
+struct Links<'a> {
+    stored: &'a StoredRender,
+    inline: bool,
+}
+
+impl Links<'_> {
+    /// The `resource_link` block of artifact `i` (from 0).
+    fn block(&self, i: usize, mime: &str, bytes: usize, name: String) -> Option<ContentBlock> {
+        let link = self.stored.links.get(i)?;
+        Some(ContentBlock::resource_link(
+            Resource::new(link.uri.clone(), name)
+                .with_mime_type(mime)
+                .with_size(bytes as u64),
+        ))
+    }
+
+    /// The short text that names every link, for clients that show only
+    /// text.
+    fn text(&self, labels: &[(String, &str, usize)]) -> String {
+        let mut text = format!(
+            "\nLinks to the output (render_id {}), valid until {}:",
+            self.stored.render_id,
+            self.stored.expires_at_rfc3339()
+        );
+        for (link, (label, mime, bytes)) in self.stored.links.iter().zip(labels) {
+            text.push_str(&format!(
+                "\n{label}: {} ({mime}, {bytes} bytes)",
+                link.download_url
+            ));
+        }
+        if self
+            .stored
+            .links
+            .iter()
+            .any(|l| l.scheme == LinkScheme::Pscat)
+        {
+            text.push_str(
+                "\nThe pscat:// links are MCP resources on this server, read with resources/read.",
+            );
+        }
+        text
+    }
+}
+
+/// The label and resource name of an artifact: its page, or the document.
+fn artifact_label(page: Option<usize>) -> String {
+    match page {
+        Some(n) => format!("page {n}"),
+        None => "document".to_string(),
+    }
+}
+
+/// [`render_success`], with links when `links` is set: `url` gives a
+/// `resource_link` block per artifact in place of its bytes, `both` the
+/// bytes and the links. Without links the result is exactly
+/// [`render_success`]'s, byte for byte.
+fn render_success_with(
+    out: RenderOutput,
+    svg_text_max: usize,
+    links: Option<Links<'_>>,
+) -> CallToolResult {
     let mime = out.format.mime_type();
     let id = uuid::Uuid::new_v4();
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -1949,9 +2441,40 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
         .iter()
         .fold(0usize, |n, a| n.saturating_add(a.byte_len));
     let svg_as_text = svg_total <= svg_text_max;
+    let inline = links.is_none_or(|l| l.inline);
     let mut blocks = Vec::with_capacity(out.artifacts.len() + 1);
+    let mut link_blocks = Vec::new();
+    let mut labels = Vec::new();
     let mut summaries = Vec::with_capacity(out.artifacts.len());
-    for a in &out.artifacts {
+    for (i, a) in out.artifacts.iter().enumerate() {
+        let (download_url, expires_at) = match links {
+            Some(l) => {
+                let label = artifact_label(a.page);
+                link_blocks.extend(l.block(i, mime, a.byte_len, label.clone()));
+                labels.push((label, mime, a.byte_len));
+                (
+                    l.stored.links.get(i).map(|k| k.download_url.clone()),
+                    Some(l.stored.expires_at_rfc3339()),
+                )
+            }
+            None => (None, None),
+        };
+        if !inline {
+            summaries.push(ArtifactSummary {
+                page: a.page,
+                width_px: a.width_px,
+                height_px: a.height_px,
+                width_pt: a.width_pt,
+                height_pt: a.height_pt,
+                dpi: a.dpi,
+                bytes: a.byte_len,
+                mime_type: mime.to_string(),
+                returned_as: ReturnedAs::Link,
+                download_url,
+                expires_at,
+            });
+            continue;
+        }
         let uri = render_uri(&id, a.page);
         let blob =
             || ResourceContents::blob(a.data_base64.clone(), uri.clone()).with_mime_type(mime);
@@ -1987,16 +2510,22 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
             bytes: a.byte_len,
             mime_type: mime.to_string(),
             returned_as,
+            download_url,
+            expires_at,
         });
         blocks.push(block);
     }
+    blocks.append(&mut link_blocks);
     let renderer = RendererIdentity::current();
     let mut text = success_text(&out, &renderer);
-    if out.format == OutputFormat::Svg && !svg_as_text {
+    if inline && out.format == OutputFormat::Svg && !svg_as_text {
         text.push_str(&format!(
             "\nThe SVG is over {svg_text_max} bytes (PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES), so each page is a \
              blob resource (base64) rather than text."
         ));
+    }
+    if let Some(l) = links {
+        text.push_str(&l.text(&labels));
     }
     blocks.push(ContentBlock::text(text));
     let envelope = RenderToolOutput {
@@ -2009,6 +2538,7 @@ fn render_success(out: RenderOutput, svg_text_max: usize) -> CallToolResult {
         program_output_truncated: Some(out.program_output_truncated),
         steps_used: Some(out.steps_used),
         elapsed_ms: Some(out.elapsed_ms),
+        render_id: links.map(|l| l.stored.render_id.clone()),
         error: None,
         renderer,
     };
@@ -2066,6 +2596,7 @@ fn failure_with(lead: &str, err: RenderError) -> CallToolResult {
         program_output_truncated: None,
         steps_used: None,
         elapsed_ms: None,
+        render_id: None,
         error: Some(err),
         renderer: RendererIdentity::current(),
     };
@@ -2076,6 +2607,12 @@ fn failure_with(lead: &str, err: RenderError) -> CallToolResult {
 }
 
 fn sheet_success(out: RenderOutput) -> CallToolResult {
+    sheet_success_with(out, None)
+}
+
+/// [`sheet_success`], with a link to the stored sheet when `links` is set
+/// (see [`render_success_with`]).
+fn sheet_success_with(out: RenderOutput, links: Option<Links<'_>>) -> CallToolResult {
     let (Some(report), Some(png)) = (out.sheet, out.artifacts.first()) else {
         return sheet_failure(RenderError::new(
             ErrorCode::WorkerFailed,
@@ -2119,10 +2656,16 @@ fn sheet_success(out: RenderOutput) -> CallToolResult {
             }
         }
     }
-    let blocks = vec![
-        ContentBlock::image(png.data_base64.clone(), OutputFormat::Png.mime_type()),
-        ContentBlock::text(text),
-    ];
+    let png_mime = OutputFormat::Png.mime_type();
+    let mut blocks = Vec::with_capacity(3);
+    if links.is_none_or(|l| l.inline) {
+        blocks.push(ContentBlock::image(png.data_base64.clone(), png_mime));
+    }
+    if let Some(l) = links {
+        blocks.extend(l.block(0, png_mime, png.byte_len, "sheet".into()));
+        text.push_str(&l.text(&[("sheet".into(), png_mime, png.byte_len)]));
+    }
+    blocks.push(ContentBlock::text(text));
     let envelope = SheetToolOutput {
         ok: true,
         format: Some(OutputFormat::Png.name().to_string()),
@@ -2135,6 +2678,16 @@ fn sheet_success(out: RenderOutput) -> CallToolResult {
         steps_used: Some(out.steps_used),
         elapsed_ms: Some(out.elapsed_ms),
         wall_ms: Some(out.wall_ms),
+        returned_as: links.map(|l| {
+            if l.inline {
+                ReturnedAs::Image
+            } else {
+                ReturnedAs::Link
+            }
+        }),
+        render_id: links.map(|l| l.stored.render_id.clone()),
+        download_url: links.and_then(|l| l.stored.links.first().map(|k| k.download_url.clone())),
+        expires_at: links.map(|l| l.stored.expires_at_rfc3339()),
         error: None,
         renderer,
     };
@@ -2155,6 +2708,10 @@ fn sheet_failure(err: RenderError) -> CallToolResult {
         steps_used: None,
         elapsed_ms: None,
         wall_ms: None,
+        returned_as: None,
+        render_id: None,
+        download_url: None,
+        expires_at: None,
         error: Some(err),
         renderer: RendererIdentity::current(),
     };
@@ -2278,4 +2835,182 @@ fn validation_text(report: &ValidationReport) -> String {
         text.push_str(&report.program_output);
     }
     text
+}
+
+#[cfg(test)]
+mod inline_fixture_tests {
+    //! The inline results, frozen. `tests/data/inline-results.json` holds what
+    //! `render_success` and `sheet_success` returned before artifact delivery
+    //! (#139) existed; the inline path must keep returning exactly that.
+    //! Only the random `urn:pscat:render:<uuid>` and the PSCat version are
+    //! normalised. `PSCAT_MCP_BLESS=1` rewrites the file.
+
+    use super::*;
+    use crate::sheet::{SheetCellError, SheetReport};
+    use crate::worker::Artifact;
+
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/inline-results.json"
+    );
+
+    fn artifact(page: Option<usize>, bytes: &[u8], points: bool) -> Artifact {
+        Artifact {
+            page,
+            width_px: 40,
+            height_px: 30,
+            width_pt: points.then_some(20.0),
+            height_pt: points.then_some(15.0),
+            dpi: points.then_some(144.0),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            byte_len: bytes.len(),
+        }
+    }
+
+    fn output(format: OutputFormat, artifacts: Vec<Artifact>, stdout: &str) -> RenderOutput {
+        RenderOutput {
+            format,
+            page_count: artifacts.len(),
+            artifacts,
+            program_output: stdout.to_string(),
+            program_output_truncated: !stdout.is_empty(),
+            steps_used: 1234,
+            elapsed_ms: 56,
+            wall_ms: 78,
+            sheet: None,
+        }
+    }
+
+    /// Every inline result shape, by name.
+    pub(super) fn cases() -> Vec<(&'static str, RenderOutput)> {
+        let png = b"\x89PNG\r\n\x1a\nnot-really-a-png";
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        let sheet = RenderOutput {
+            sheet: Some(SheetReport {
+                width_px: 40,
+                height_px: 30,
+                failed_cells: 1,
+                cells: vec![
+                    crate::sheet::SheetCellReport {
+                        row: 0,
+                        column: 0,
+                        dpi: 72.0,
+                        zoom: 1,
+                        width_px: 10,
+                        height_px: 10,
+                        width_pt: Some(10.0),
+                        height_pt: Some(10.0),
+                        x: 1,
+                        y: 2,
+                        ok: true,
+                        error: None,
+                    },
+                    crate::sheet::SheetCellReport {
+                        row: 1,
+                        column: 0,
+                        dpi: 9.0,
+                        zoom: 4,
+                        width_px: 2,
+                        height_px: 2,
+                        width_pt: None,
+                        height_pt: None,
+                        x: 3,
+                        y: 4,
+                        ok: false,
+                        error: Some(SheetCellError {
+                            code: ErrorCode::LimitExceeded,
+                            limit: Some("steps".into()),
+                            message: "limitcheck".into(),
+                        }),
+                    },
+                ],
+            }),
+            ..output(OutputFormat::Png, vec![artifact(None, png, false)], "")
+        };
+        vec![
+            (
+                "png_one_page",
+                output(OutputFormat::Png, vec![artifact(Some(1), png, true)], ""),
+            ),
+            (
+                "png_two_pages_stdout",
+                output(
+                    OutputFormat::Png,
+                    vec![artifact(Some(1), png, true), artifact(Some(2), png, false)],
+                    "hello\n",
+                ),
+            ),
+            (
+                "svg_text",
+                output(
+                    OutputFormat::Svg,
+                    vec![artifact(Some(1), svg, true), artifact(Some(2), svg, true)],
+                    "",
+                ),
+            ),
+            (
+                "pdf",
+                output(
+                    OutputFormat::Pdf,
+                    vec![artifact(None, b"%PDF-1.7", true)],
+                    "",
+                ),
+            ),
+            ("sheet", sheet),
+        ]
+    }
+
+    /// The inline result for `name` (`svg_blob` is the SVG case over a
+    /// threshold of 8 bytes).
+    pub(super) fn inline(name: &str, out: RenderOutput) -> Value {
+        let result = match name {
+            "sheet" => sheet_success(out),
+            _ => render_success(out, 64 * 1024),
+        };
+        normalise(serde_json::to_value(result).unwrap())
+    }
+
+    pub(super) fn normalise(v: Value) -> Value {
+        let text = v.to_string();
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        const URN: &str = "urn:pscat:render:";
+        while let Some(i) = rest.find(URN) {
+            out.push_str(&rest[..i + URN.len()]);
+            out.push_str("UUID");
+            rest = &rest[i + URN.len() + 36..];
+        }
+        out.push_str(rest);
+        let version = RendererIdentity::current().version;
+        let out = out.replace(version, "VERSION");
+        let mut v: Value = serde_json::from_str(&out).unwrap();
+        // The pinned commit moves with every PSCat bump.
+        if let Some(r) = v.pointer_mut("/structuredContent/renderer") {
+            *r = Value::String("RENDERER".into());
+        }
+        v
+    }
+
+    pub(super) fn all_inline() -> serde_json::Map<String, Value> {
+        let mut map = serde_json::Map::new();
+        for (name, out) in cases() {
+            if name == "svg_text" {
+                let blob = normalise(serde_json::to_value(render_success(out.clone(), 8)).unwrap());
+                map.insert("svg_blob".into(), blob);
+            }
+            map.insert(name.into(), inline(name, out));
+        }
+        map
+    }
+
+    #[test]
+    fn inline_results_match_the_frozen_fixture() {
+        let now = Value::Object(all_inline());
+        if std::env::var_os("PSCAT_MCP_BLESS").is_some() {
+            std::fs::write(FIXTURE, serde_json::to_string_pretty(&now).unwrap() + "\n").unwrap();
+        }
+        let frozen: Value =
+            serde_json::from_str(&std::fs::read_to_string(FIXTURE).expect("the fixture")).unwrap();
+        assert_eq!(now, frozen);
+    }
 }

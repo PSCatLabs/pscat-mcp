@@ -126,6 +126,8 @@ one. Everything the deployment wires:
   With async jobs on (`PSCAT_MCP_ASYNC_JOBS`, see below), add
   `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES` (128 MiB by default): job results
   waiting to be fetched live in the server process, not in a worker.
+  The same holds with in-memory artifact links
+  (`PSCAT_MCP_ARTIFACT_LINKS=memory`), which share that budget.
 * **CPU.** One vCPU per concurrent render. Rendering is CPU-bound and
   single-threaded. **Set `PSCAT_MCP_MAX_CONCURRENT_RENDERS` explicitly, equal
   to the service's `--cpu`.** Unset, it defaults to min(CPUs the process
@@ -175,6 +177,12 @@ up to the memory limit each, beside the synchronous ones; results add up to
 result by default, so lower it when several tokens share the service). A hosted design (a shared job and
 result store, and a place the render gets CPU, such as a Cloud Run Job) is
 tracked in the `pscat-cloud` brief, not here.
+
+In-memory artifact links (`PSCAT_MCP_ARTIFACT_LINKS=memory`, the README's
+"Artifact links") have the same limits: a `pscat://render/...` link made on
+one instance is "resource not found" on any other, and a restart loses every
+link. Use them on a single instance; Cloud Storage signed URLs (#140) are the
+backend meant for Cloud Run.
 
 ## Font packs
 

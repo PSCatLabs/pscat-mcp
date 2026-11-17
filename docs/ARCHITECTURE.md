@@ -16,7 +16,9 @@ boundaries are, and where to extend it.
     body limit, Host/Origin    ▼           ▼
                          mcp.rs  (rmcp #[tool] handlers: translate args/results only;
                                   PNG → image block, PDF → blob resource, SVG → text
-                                  resources up to PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES, else blobs)
+                                  resources up to PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES, else blobs;
+                                  with `delivery` url/both, resource_link blocks to an
+                                  artifacts.rs store instead or as well)
                                │
                                ▼
                          render.rs  RenderService
@@ -452,6 +454,94 @@ extension queued and running are `working`; done and failed are both
 `cancelled`. A task's `ttlMs` is the job deadline plus the result TTL, its
 `pollIntervalMs` 1000.
 
+## Artifact delivery
+
+`src/artifacts.rs` (issue #139, part 1 of #98). ChatGPT does not show its
+model an inline `image` block (#138), so the render tools can return links.
+
+**The argument.** `delivery` on `render_postscript`, `chalkboard_math`,
+`handwrite`, `review_sheet` and `start_render`: `inline`, `url`, `both`,
+`auto`. It is a plain string with an `enum` in the schema (no `$ref`), read
+in the handler before the render; an unknown value, or `url`/`both` with no
+store, is `invalid_request` with `error.input.code` `delivery`, before any
+worker starts. With no argument the operator default applies
+(`PSCAT_MCP_ARTIFACT_DELIVERY`); `ArtifactConfig::check` refuses to start
+with a default other than `inline` when links are off, and with
+`PSCAT_MCP_ARTIFACT_LINKS=gcs`. `auto` is decided after the render, on the
+artifacts' total size against `PSCAT_MCP_ARTIFACT_THRESHOLD_BYTES`; with no
+store it is `inline`.
+
+**Inline is untouched.** `render_success` and `sheet_success` are the
+`*_with(.., None)` forms of the builders; every field added for links is an
+`Option` skipped when absent, so an inline result is the same JSON as before
+#139. `tests/data/inline-results.json`, written by the unmodified builders,
+pins it (a unit test in `mcp.rs`), and `tests/artifacts.rs` compares live
+results with and without a store.
+
+**With links.** One `ArtifactStore::put` per call stores every artifact
+under one random `render_id` (UUID v4, from the OS CSPRNG through `uuid`) and
+returns a link per artifact and an expiry. The result then carries each link
+three times, because clients differ in what they pass to the model: a
+`resource_link` block, `download_url` and `expires_at` on each `artifacts`
+entry (the manifest; `render_id` at the top level; `returned_as` `link` when
+the bytes are not inline) and a text line. Diagnostics (the envelope's sizes,
+page count, stdout, a sheet's cells, any error) stay inline. A failed render
+stores nothing; a store refusal is the tool's failure envelope.
+
+**The trait.** `ArtifactStore` has `put` (async, boxed future: a cloud
+backend uploads), `read` (bytes for `resources/read`; a signed-URL backend,
+which serves nothing itself, keeps the default `None`), `ttl` and
+`quota_bytes`. Each `ArtifactLink` has a `uri` (the `resource_link`), a
+`download_url` and a `LinkScheme` (`Pscat` or `Https`). Cloud Storage
+(#140) is meant to implement it with an upload in `put` and a signed URL per
+object; only the server process would hold storage credentials, never the
+worker.
+
+**The memory backend.** `MemoryArtifactStore` keeps the decoded bytes in the
+`JobStore`'s ledger (`put_artifacts`, `read_artifact`), so stored output and
+async-job results share one memory bound, `PSCAT_MCP_JOB_RESULTS_BUDGET_BYTES`,
+also when async jobs are off. A stored render is charged its bytes plus
+1 KiB, is never evicted for room (a link handed out keeps working until its
+TTL, `PSCAT_MCP_ARTIFACT_URL_TTL_SECS`), and counts as held when a job
+reserves; a `put` may drop already-fetched job results, as a job's insert
+does. Each principal may hold `PSCAT_MCP_ARTIFACT_QUOTA_BYTES`; over it,
+`results_budget_exceeded` with `error.input.code` `artifact_quota_bytes`,
+and the budget full is `results_budget_bytes`. Expiry runs on an injectable
+monotonic clock (`MemoryArtifactStore::with_clock`); expired renders are
+swept on every store or job access. `resources/read` of
+`pscat://render/<render_id>/<n>` looks the render up by id *and* owner (the
+principal, as for jobs), so another principal's id, an expired one and an
+unknown one are one JSON-RPC "resource not found" whose message does not
+repeat the URI. Render URIs are not listed by `resources/list`.
+
+Its limits are the async jobs': one process, lost on restart, invisible to
+other instances. Under the `none` auth method (and
+`--allow-unauthenticated`) every caller is the one principal `anonymous`:
+they share one quota, and any of them can read any link. Unlike async jobs,
+links are not refused with `none`: the quota and the shared budget bound
+what anonymous callers can hold, and an operator who turns on both accepts a
+shared space. Over stdio there is one principal, the local user.
+
+**Async jobs and Tasks.** `start_render` resolves `delivery` like the other
+tools (a refusal comes before a job is accepted) and records it on the job
+(`JobStore::set_delivery`); it is applied when the result is fetched.
+`render_result` and `tasks/get` store the result the first time and remember
+the `StoredRender` on the job (`remember_links`), so a second fetch returns
+the same `render_id` without charging the quota again; once those links have
+expired the next fetch stores it again. A Tasks call that finishes before the
+threshold applies the delivery to its synchronous result. Applying at fetch
+time, rather than refusing `delivery` on `start_render`, keeps an operator
+default of `url` working for jobs too.
+
+**Logs.** No log line holds a link, a `render_id` or artifact bytes: the
+tool layer logs no result, the store logs nothing, the not-found error does
+not echo the URI, and capture mode records request bodies with every
+`pscat://render/<id>` (also JSON-escaped) redacted (`redact_render_links`).
+rmcp itself logs whole requests and responses at DEBUG under
+`rmcp::service`, which the default filter holds at WARN; raising it with
+`RUST_LOG` logs links like it logs PostScript sources. That matters more for
+signed URLs (#140), which are bearer capabilities.
+
 ## Agent guidance (prompts and resources)
 
 `src/guide.rs` serves the PSCat plugin's skills (issue #39). It runs no
@@ -595,6 +685,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Async jobs running | job semaphore, below the render slots; then a shared render slot, no queue timeout | half the slots |
 | Async jobs held | per principal and in all (unfinished), `server_busy` | 4, 16 |
 | Async job results | byte budget (largest result reserved while a job runs), TTL after it finishes | 128 MiB, 1 h |
+| Stored artifacts (memory links) | per-principal quota; the async job results budget, shared; TTL after storing | 32 MiB, 128 MiB, 30 min |
 
 PSCat has **no operators for processes, network or environment access**
 (see PSCat's `SECURITY.md`). The worker's environment is cleared anyway
@@ -681,7 +772,8 @@ Known gaps:
   default; set `PSCAT_MCP_ALLOWED_HOSTS` for a deployment) and `Origin`
   validation.
 * **Logging**: PostScript source is never logged, only its byte length;
-  tokens are never logged. The one exception is the opt-in capture mode
+  tokens are never logged, nor are artifact links, render ids or artifact
+  bytes (see [Artifact delivery](#artifact-delivery)). The one exception is the opt-in capture mode
   (`--capture-file`), which records request bodies and tokens never, and is
   refused unless the bind address is loopback.
   The default filter holds rmcp's `rmcp::service` target to WARN, so its
@@ -690,7 +782,9 @@ Known gaps:
 * **Statelessness**: Streamable HTTP runs without sessions
   (`legacy_session_mode = false`, JSON responses), so any instance can serve
   any request and nothing is stored between requests, except async jobs
-  when `--async-jobs` turns them on (see [Async jobs](#async-jobs)).
+  when `--async-jobs` turns them on (see [Async jobs](#async-jobs)) and
+  stored artifacts when `PSCAT_MCP_ARTIFACT_LINKS=memory` turns them on (see
+  [Artifact delivery](#artifact-delivery)).
 
 ### Auth methods
 
@@ -874,9 +968,9 @@ The choice stays with the owner; recording it here is part of that decision.
   made from several renders follows `review_sheet`.
 * **Another backend** (a pool, a remote sandbox, a test double): implement
   `backend::RenderBackend`. Dropping the returned future must stop the job.
-* **Artifact storage**: none is configured, so output larger than
-  `PSCAT_MCP_MAX_OUTPUT_BYTES` fails with `output_too_large` instead of
-  returning a link. A storage provider (e.g. GCS with signed URLs) would sit
-  between `RenderService` and `mcp.rs`, returning MCP `resource_link`
-  content only for objects it actually stored.
+* **Artifact storage**: implement `artifacts::ArtifactStore` (see
+  [Artifact delivery](#artifact-delivery)) and build it in
+  `RenderService::with_artifacts`; the memory backend is the one there is.
+  Output larger than `PSCAT_MCP_MAX_OUTPUT_BYTES` still fails with
+  `output_too_large`: links do not raise the output limit.
 * **Authentication**: implement `auth::AuthMethod` and list it in `PSCAT_MCP_AUTH` (see [Auth methods](#auth-methods)).

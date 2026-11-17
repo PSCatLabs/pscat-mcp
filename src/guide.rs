@@ -157,6 +157,9 @@ pub struct ServerFacts {
     pub max_prompt_argument_bytes: usize,
     /// Which font-pack faces are reachable (see [`PackFaces`]).
     pub pack_faces: PackFaces,
+    /// How long artifact links work, in seconds, when the operator turned
+    /// them on (`delivery` `url` and `both`).
+    pub artifact_links_ttl_secs: Option<u64>,
 }
 
 impl ServerFacts {
@@ -502,11 +505,19 @@ fn note(path: &str, facts: &ServerFacts) -> String {
             let _ = write!(last, " `{command}` is the `{tool}` tool.");
         }
     }
-    lines.push(
-        "- Pages come back inline in the tool result. There is no `out_path`, nothing is \
-         saved, and there is no file path to show the user."
-            .to_string(),
-    );
+    match facts.artifact_links_ttl_secs {
+        None => lines.push(
+            "- Pages come back inline in the tool result. There is no `out_path`, nothing is \
+             saved, and there is no file path to show the user."
+                .to_string(),
+        ),
+        Some(ttl) => lines.push(format!(
+            "- Pages come back inline in the tool result, or, with the `delivery` argument \
+             (`url`, `both`, `auto`), as links that work for {ttl} s (`pscat://render/...` \
+             resources on this server, read with `resources/read`). There is no `out_path` and \
+             no file path to show the user."
+        )),
+    }
     lines.push(
         "- A program can read only PSCat's built-in `lib/` (for example `(lib/artkit.ps) \
          run`). Every other file, including the user's files and the repository's \
@@ -751,6 +762,7 @@ mod tests {
             job_timeout_ms: None,
             max_prompt_argument_bytes: MAX_PROMPT_ARGUMENT_BYTES,
             pack_faces: PackFaces::NotConfigured,
+            artifact_links_ttl_secs: None,
         }
     }
 

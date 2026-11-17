@@ -60,7 +60,9 @@ Don't use a newer local clone of PSCat.
   stack overflow or a hang there takes down every user. The server may
   do bounded arithmetic on arguments (a `plan` step); nothing that
   parses or runs them.
-* **Inline output only.** No filesystem writes and no `out_path`.
+* **No files.** No filesystem writes and no `out_path`. Output is inline,
+  or, with `delivery`, a link to the artifact store (`src/artifacts.rs`),
+  which holds only bytes a worker already produced.
 * **Errors use the structured envelope** (`structuredContent.error.code`)
   with the existing error codes where they fit. `error.input.code` names
   the budget or input that failed.
