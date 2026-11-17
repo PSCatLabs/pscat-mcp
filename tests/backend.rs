@@ -459,6 +459,18 @@ async fn a_pdf_too_big_for_the_memory_limit_is_a_memory_limit_hit() {
     let err = refused.ps_error.expect("ps error");
     assert_eq!(err.name, "limitexceeded", "{err:?}");
     assert_eq!(err.limit.as_deref(), Some("memory"), "{err:?}");
+    // The PDF writer refused it, not the program: the same program as a
+    // PNG fits in the same limit.
+    assert!(err.report.contains("writing the PDF"), "{err:?}");
+    let png = run(
+        PDF_OF_NULS,
+        InterpLimits {
+            max_memory_bytes: Some(16 * 1024 * 1024),
+            ..limits()
+        },
+    )
+    .await;
+    assert_eq!(png.failure, None, "{:?}", png.ps_error);
 
     let written = run_job(pdf(128)).await;
     assert!(

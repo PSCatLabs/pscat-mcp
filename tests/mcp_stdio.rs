@@ -528,6 +528,8 @@ async fn a_pdf_over_the_memory_limit_is_limit_exceeded() {
     let s = structured(&r);
     assert_eq!(error_code(&r), "limit_exceeded", "{s}");
     assert_eq!(s["error"]["postscript"]["limit"], "memory", "{s}");
+    let report = s["error"]["postscript"]["report"].as_str().unwrap();
+    assert!(report.contains("writing the PDF"), "{s}");
     client.cancel().await.ok();
 }
 
