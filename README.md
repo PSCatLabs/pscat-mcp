@@ -505,7 +505,16 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PORT` / `PSCAT_MCP_BIND` | `8080` / `127.0.0.1` | listen address (the image sets `0.0.0.0`) |
 | `PSCAT_MCP_AUTH_TOKENS` / `PSCAT_MCP_AUTH_TOKEN_FILE` | — | accepted bearer tokens (comma list / one per line) |
 | `PSCAT_MCP_ALLOW_UNAUTHENTICATED` | `false` | no auth; **refused unless bound to loopback** |
-| `PSCAT_MCP_AUTH` | unset | `--auth`: the auth methods accepted on `/mcp`, a comma list tried in turn (a request passes if any accepts it): `bearer` (the tokens above) and `none` (no authentication, **staging only**, with the guard rails below). `oauth` is planned and refuses to start for now, as do an empty, unknown or repeated list. Unset: bearer tokens, or `PSCAT_MCP_ALLOW_UNAUTHENTICATED` on loopback, as before; `none` is never on by default. When set, `PSCAT_MCP_ALLOW_UNAUTHENTICATED` is ignored (and still refused off loopback). See [Authentication](#authentication) |
+| `PSCAT_MCP_AUTH` | unset | `--auth`: the auth methods accepted on `/mcp`, a comma list tried in turn (a request passes if any accepts it): `bearer` (the tokens above), `oauth` (the `PSCAT_MCP_OAUTH_*` settings below) and `none` (no authentication, **staging only**, with the guard rails below). An empty, unknown or repeated list is refused. Unset: bearer tokens, or `PSCAT_MCP_ALLOW_UNAUTHENTICATED` on loopback, as before; `none` is never on by default. When set, `PSCAT_MCP_ALLOW_UNAUTHENTICATED` is ignored (and still refused off loopback). See [Authentication](#authentication) |
+| `PSCAT_MCP_OAUTH_ISSUER` | — | `oauth`: the authorization server's issuer URL (`https`); tokens' `iss` must equal it exactly, trailing `/` included. Required for `oauth` |
+| `PSCAT_MCP_OAUTH_RESOURCE` | — | `oauth`: this server's public URL as clients connect to it, e.g. `https://mcp.example.com/mcp` (RFC 8707 resource); tokens' `aud` must contain it. Required for `oauth` |
+| `PSCAT_MCP_OAUTH_ALLOWED_USERS` / `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | — | `oauth`: who may use the server, `sub:<subject>` or `email:<address>` entries (comma list / one per line, `#` comments). Email entries match only when the token says `email_verified: true`. At least one entry is required for `oauth` |
+| `PSCAT_MCP_OAUTH_SCOPES` | empty | `oauth`: scopes every token must carry (comma list), also published in the metadata and the challenge. Empty: no scope check |
+| `PSCAT_MCP_OAUTH_JWKS_URL` | discovered | `oauth`: the issuer's JWKS URL. Unset: read from the issuer's metadata (RFC 8414, then OpenID Connect discovery) |
+| `PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS` | 5000 | `oauth`: timeout of one JWKS or discovery fetch, and of a whole key lookup |
+| `PSCAT_MCP_OAUTH_JWKS_TTL_SECS` | 600 | `oauth`: how long fetched keys are used before they are fetched again |
+| `PSCAT_MCP_OAUTH_JWKS_REFETCH_SECS` | 30 | `oauth`: least time between two JWKS fetch attempts (an unknown `kid`, an expired cache or a failing issuer) |
+| `PSCAT_MCP_OAUTH_LEEWAY_SECS` | 60 | `oauth`: clock-skew leeway for `exp` and `nbf` |
 | `PSCAT_MCP_AUTH_NONE_UNTIL` | unset | with `none`: an RFC 3339 time (`2026-12-01T00:00:00Z`) after which anonymous requests get `403 unauthenticated_access_expired`. A time that has passed at startup does not stop the server: `none` is disabled (a warning is logged) and the other methods keep working; a malformed time still refuses to start |
 | `PSCAT_MCP_AUTH_NONE_ALLOW_CIDRS` | unset (any source) | with `none`: comma list of source CIDRs allowed to make anonymous requests (`203.0.113.0/24,2001:db8::/32`; a bare address is one host); others get `403 source_not_allowed` |
 | `PSCAT_MCP_AUTH_NONE_RATE_LIMIT` / `PSCAT_MCP_AUTH_NONE_RATE_WINDOW_SECS` | 60 / 60 | with `none`: anonymous requests one client address may make per window (a fixed window; IPv6 clients per `/64`), before `429 rate_limited` with `Retry-After`. This is on top of the render concurrency cap, per server instance |
@@ -547,9 +556,12 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 
 ## Authentication
 
-The HTTP server will not start without at least one bearer token, unless
+With `PSCAT_MCP_AUTH` unset (or listing `bearer`), the HTTP server will
+not start without at least one bearer token, unless
 `PSCAT_MCP_ALLOW_UNAUTHENTICATED=true` is set **and** the bind address is
-loopback. Authentication uses only the request headers and runs before rmcp
+loopback (with `PSCAT_MCP_AUTH` unset). An `oauth`-only server needs no
+token, but its own settings (below), and a `none` server needs none
+(staging only, below). Authentication uses only the request headers and runs before rmcp
 sees the request, so an unauthenticated request cannot reach a render. A
 rejected request's body is read and discarded (up to 8 MiB and 5 s, as for
 an oversized one), so a client still uploading gets the `401` rather than a
@@ -559,17 +571,90 @@ logged. Mount tokens as a file (`PSCAT_MCP_AUTH_TOKEN_FILE`) rather than
 passing them on the command line.
 
 **Several methods side by side.** `PSCAT_MCP_AUTH` (`--auth`) lists the
-auth methods `/mcp` accepts, such as `bearer` or, once implemented,
-`bearer,oauth`. Each method is tried in turn and a request passes if any of
-them accepts it. A method that finds no credential of its kind passes the
-request on to the next one. The no-auth mode (`none`) is consulted
-only when no other method found a credential, so a wrong token is never
-let in as anonymous. A refused request gets `401` with a JSON body
-(`error`, `message`) and a `WWW-Authenticate` header that names every
-accepted scheme, for bearer tokens `Bearer realm="pscat-mcp"`. Startup
-refuses an empty or unknown list. Until it is implemented, it also
-refuses `oauth` (OAuth 2.1, issue #119). With `PSCAT_MCP_AUTH` unset, the
-server behaves as described above.
+auth methods `/mcp` accepts, such as `bearer`, `oauth` or `bearer,oauth`.
+Each method is tried in turn and a request passes if any of them accepts it.
+A method that finds no credential of its kind passes the request on to the
+next one. The no-auth mode (`none`) is consulted only when no other
+method found a credential, so a wrong token is never let in as anonymous. A
+refused request gets `401` (or `403` or `429`, below) with a JSON body (`error`,
+`message`) and a `WWW-Authenticate` header that names every accepted scheme,
+for bearer tokens `Bearer realm="pscat-mcp"`. Startup refuses an empty or
+unknown list. With `PSCAT_MCP_AUTH` unset, the server behaves as described
+above.
+
+**OAuth (`oauth`).** For clients that cannot send a fixed header, such as
+ChatGPT's connectors, the server is an OAuth 2.1 *resource server* as the MCP
+authorization spec describes. It holds no passwords and runs no login page:
+an external authorization server (an identity provider, which this project
+has deliberately not chosen; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#oauth-resource-server)) signs
+users in and issues JWT access tokens, and the server only checks them.
+
+* A request without a token gets `401` with
+  `WWW-Authenticate: Bearer realm="pscat-mcp", resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`
+  (plus `scope="…"` when `PSCAT_MCP_OAUTH_SCOPES` is set). The origin and
+  path come from `PSCAT_MCP_OAUTH_RESOURCE`, never from the request.
+* `GET /.well-known/oauth-protected-resource/mcp` and
+  `GET /.well-known/oauth-protected-resource` (RFC 9728) are served without
+  authentication, only with `oauth` enabled. They name the resource, the
+  issuer (`authorization_servers`) and the scopes.
+* A token is accepted when its signature verifies against the issuer's JWKS
+  (asymmetric algorithms only: RS/PS 256 to 512, ES256, ES384, EdDSA;
+  `none` and `HS*` are refused, and the header's `kid` must name a key), its
+  `iss` is the issuer, its `aud` contains the resource URL, it is within
+  `exp` and `nbf` (with leeway), it carries every configured scope, and its
+  user is on the allowlist. A bad, expired or foreign token gets `401` with
+  `error="invalid_token"`. A valid token without a required scope gets
+  `403` with `error="insufficient_scope"`. A user who signs in but is not
+  on the allowlist gets `403` `not_allowed`, with no `error` parameter, so a
+  client does not start a new consent loop that cannot help. Being able to
+  sign in at the issuer is never enough by itself.
+* **Email allowlist entries need the email in the access token.** An entry
+  `email:<address>` matches only when the access token carries `email` and
+  `email_verified: true` (a JSON boolean). Many providers put those claims
+  in the ID token only; then use `sub:<subject>` entries, or have the
+  provider add the claims to access tokens.
+* With `bearer,oauth`, a static token is accepted by `bearer` without the
+  issuer being contacted, and a JWT by `oauth`. Both use the `Bearer`
+  scheme, so the challenge is one merged header,
+  `Bearer realm="pscat-mcp", resource_metadata="…"`. A token both reject
+  gets `401` `invalid_token` (bearer's wording, `invalid bearer token`,
+  since it is first in the list) with `error="invalid_token"` in the
+  challenge. A JWT of a user who is not allowed gets `403`, which outranks
+  bearer's `401`.
+* The JWKS is fetched over HTTPS on the first token that needs it, cached,
+  and fetched again at most once per `PSCAT_MCP_OAUTH_JWKS_REFETCH_SECS`
+  (an unknown `kid`, an expired cache or a failing issuer), each fetch
+  bounded by `PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS` and 256 KiB. If the issuer is
+  unreachable, keys already fetched stay in use; tokens with a key not yet
+  seen get `401`. Requests without a JWT never wait for the issuer, and an
+  issuer outage does not stop the server from starting.
+* The principal of a request is `oauth:` plus 128 bits of a SHA-256 over
+  issuer and subject, so jobs belong to the user, and no subject or email
+  reaches the logs or job records.
+
+**Connecting ChatGPT.** With developer mode on in ChatGPT, add a connector
+(an app) with the server URL, `PSCAT_MCP_OAUTH_RESOURCE` (such as
+`https://mcp.example.com/mcp`), and authentication **OAuth**. ChatGPT reads
+the metadata, registers itself with the issuer (Dynamic Client
+Registration; whether a manually entered client ID and secret work instead
+has not been checked) and opens the provider's sign-in page. ChatGPT cannot send a static bearer header, so
+OAuth is the way to connect it to a server that requires authentication.
+Menu names change; OpenAI's developer-mode documentation has the current
+steps.
+
+**Connecting claude.ai.** Add a custom connector (Settings, Connectors) with
+the same URL. Claude discovers the issuer from the metadata, registers
+itself or uses the OAuth client ID and secret given in the connector's
+advanced settings, and signs the user in (the steps follow Anthropic's
+custom-connector documentation and have not been tried against this
+server). Claude Code and scripts can keep
+using bearer tokens beside it (`PSCAT_MCP_AUTH=bearer,oauth`).
+
+Either way the provider must issue the access token with the audience set
+to `PSCAT_MCP_OAUTH_RESOURCE` (RFC 8707's `resource` parameter, which MCP
+clients send). An end-to-end sign-in from ChatGPT or claude.ai has not been
+tried yet: it needs a chosen identity provider and a deployment.
 
 **No authentication, for staging (`none`).** `PSCAT_MCP_AUTH=none` (or
 `bearer,none`) lets a request that carries no credential in as the
@@ -578,9 +663,9 @@ loud warning at startup. **It exposes render CPU time and quota to anyone
 who can reach the URL**, so use it only for a staging deployment.
 
 Why it exists: ChatGPT's custom MCP connector can't send a fixed
-`Authorization` header. It offers only OAuth or "No authentication". Until
-OAuth is in (issue #119), `none` is the stopgap for trying ChatGPT against a
-staging service. Claude, scripts and CI keep using bearer tokens beside it:
+`Authorization` header. It offers only OAuth or "No authentication". `none` is
+the stopgap for trying ChatGPT against a staging service before an identity
+provider for `oauth` is set up. Claude, scripts and CI keep using bearer tokens beside it:
 `bearer,none` admits a valid token as the token's principal, a request with
 no `Authorization` header as anonymous, and a wrong or malformed token as
 `401`, never as anonymous.
@@ -625,19 +710,19 @@ rejection logs only its `reason` (`source_not_allowed`, `rate_limited`,
 `unauthenticated_access_expired`), never a client address.
 
 **Log fields.** The startup lines carry `auth_methods`, the enabled methods
-(for example `bearer`). Each `/mcp` request's span carries `auth_method`, the
-method that accepted it (`bearer`, or `none`: under
-`--allow-unauthenticated` or the explicit `none` mode), so the request's
-response line can be counted per method. A refused request logs
+(for example `bearer,oauth`). Each `/mcp` request's span carries
+`auth_method`, the method that accepted it (`bearer`, `oauth`, or `none`:
+under `--allow-unauthenticated` or the explicit `none` mode), so the
+request's response line can be counted per method. A refused request logs
 `rejected unauthenticated request` with `reason` (`missing_credentials`,
-`malformed_credentials`, `invalid_token`, or from `none`: `source_not_allowed`,
-`rate_limited`, `unauthenticated_access_expired`) and `rejected_by`, the methods that rejected a credential
-(empty when none was presented). Credentials are never logged.
-
-OAuth (the MCP authorization spec) plugs in as another method, an
-`auth::AuthMethod`, beside the bearer tokens. The server will also serve
-protected-resource metadata. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#adding-oauth-later).
+`malformed_credentials`, `invalid_token`, from `oauth` `insufficient_scope`
+or `not_allowed`, from `none` `source_not_allowed`, `rate_limited` or
+`unauthenticated_access_expired`) and `rejected_by`,
+the methods that rejected a credential (empty when none was presented).
+`oauth` also logs `oauth: token rejected` with a fixed `reason` (such as
+`expired`, `wrong_audience`, `bad_signature`, `unknown_kid`,
+`jwks_unavailable` or `not_allowed`), and a warning when a JWKS fetch fails.
+Credentials, subjects and email addresses are never logged.
 
 ## Security model
 
@@ -810,7 +895,8 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
 | `tests/logging.rs` | the default log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, and with `RUST_LOG` raising `rmcp` to INFO the same session logs both (so the first check cannot pass for want of the line); over HTTP the same line is absent by default and present with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
-| `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth`, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
+| `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth` without its settings, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
+| `tests/oauth.rs` | the `oauth` method against a local mock authorization server: valid RS256 and ES256 tokens, an audience array and a verified email are accepted; expired, without `exp`, not yet valid, wrong or missing audience, wrong issuer, bad signature, tampered payload, an ES256 header on the RSA key, an HS256 token signed with the public key, `alg: none`, an unknown `kid`, no `sub`, a non-JWT and an oversized token get `401 invalid_token`; a user not on the allowlist (or with an unverified email) gets `403 not_allowed` without an `error` parameter; missing scopes get `403 insufficient_scope`; no PostScript runs for any refused request; `bearer,oauth` accepts a static token without contacting the issuer and a JWT, and answers garbage with one merged challenge; the Protected Resource Metadata is served at both well-known paths without auth (the `resource_metadata` URL of a real 401 included), independent of `Host`, and not at all without `oauth`; a hung issuer bounds JWT requests by the JWKS timeout with one fetch between them while requests without a JWT (static token, no header, garbage; `oauth` first or alone) go straight through; a known key past its TTL is used without waiting while the issuer hangs; unknown `kid`s trigger one JWKS fetch, and a rotated key is picked up; discovery (RFC 8414, OpenID Connect fallback, explicit JWKS URL, a mismatched issuer refused); the binary refuses an incomplete or unsafe configuration without echoing allowlist entries, and its logs carry `auth_method=oauth` and fixed reasons but never a subject, email or token |
 | `tests/auth_none.rs` | the explicit no-auth mode and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an invalid time, a bad CIDR, a zero limit, async jobs or Tasks with `none`); an already expired time starting with `none` disabled (`bearer,none`: a token is `200`, no header is `403 unauthenticated_access_expired`, the startup log warns and `auth_methods` lists only `bearer`; `none` alone: every request is `403`); and, in-process with an injected clock, the refusal after the expiry of a running server |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
 | `tests/eval_replay.rs` + `evals/server/fixtures/` | replay of recorded client traffic against the in-process server: what Claude Code and the rmcp client really sent (headers, `initialize`/`server/discover`, `tools/list`, `tools/call`) plus synthesized cases, each marked real or synthesized; asserts 2xx and valid JSON-RPC. The `Accept: application/json`-only fixture (#17) is an ordinary passing case. Also tests capture mode: no token, query string or unlisted header value reaches the file |

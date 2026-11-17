@@ -33,8 +33,9 @@ FROM ${RUST_IMAGE} AS builder
 WORKDIR /app
 
 # The slim Rust image already has gcc, libc6-dev and ca-certificates, which
-# is all the dependency tree needs (no OpenSSL / pkg-config: there is no TLS
-# client in the server). Cargo fetches the pscat git dependency with its
+# is all the dependency tree needs (no OpenSSL / pkg-config: the one TLS
+# client, for the OAuth issuer's JWKS, is rustls on ring with compiled-in
+# roots). Cargo fetches the pscat git dependency with its
 # built-in libgit2, so the git CLI is not required either.
 ENV CARGO_TERM_COLOR=never \
     CARGO_NET_RETRY=5
