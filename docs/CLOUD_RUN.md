@@ -479,15 +479,14 @@ The code and limit are never taken from the program: a PostScript error's name
 or offending command, its message and any program output stay out of the
 logs.
 
-The default log filter is `info,rmcp::service=warn`. At INFO, rmcp logs a line
-per request, "Service initialized as server", with a Debug dump of the
-`initialize` parameters it holds for the peer. Over stdio those are the
-client's own (`clientInfo.name`, `version`, capabilities): client-chosen free
-text, which the logging contract above does not cover. Over this stateless
-HTTP server rmcp 3.9 fills in defaults rather than the client's values, so the
-line is noise there, but the filter holds back the same line on both
-transports, and the same target's other INFO lines (a notification's or a
-cancellation's text, "serve finished"). `RUST_LOG` replaces the default
-completely: `RUST_LOG=info` or `rmcp=info` brings the line back, and with it
-any client-supplied strings it carries, so leave it unset in a deployment
-unless debugging.
+The default log filter is `info`, and every `rmcp` target is held to WARN
+and ERROR whatever `RUST_LOG` says. At INFO, rmcp logs a line per request,
+"Service initialized as server", with a Debug dump of the `initialize`
+parameters it holds for the peer, and at DEBUG and TRACE it logs whole
+requests and results. Over stdio the parameters are the client's own
+(`clientInfo.name`, `version`, capabilities): client-chosen free text, which
+the logging contract above does not cover; results carry artifact links. The
+clamp holds back all of it on both transports, also the same crate's other
+INFO lines (a notification's or a cancellation's text, "serve finished").
+`RUST_LOG` replaces the default filter for our own `pscat_mcp` targets only:
+`RUST_LOG=trace` or `rmcp=trace` does not bring rmcp's dumps back.
