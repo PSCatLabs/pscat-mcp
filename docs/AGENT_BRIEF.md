@@ -21,7 +21,8 @@ first. The main code:
   protocol;
 * `src/generate.rs`, `src/sheet.rs`: generator jobs (`chalkboard_math`,
   `handwrite`, `review_sheet`);
-* `src/http.rs`, `src/auth.rs`: the HTTP transport and bearer auth;
+* `src/http.rs`, `src/auth.rs`, `src/oauth.rs`: the HTTP transport, the
+  auth methods (bearer tokens) and the OAuth resource server;
 * `src/guide.rs`: MCP prompts and resources from `guide/`;
 * `src/pscat_extras.rs`: every call into PSCat's `#[doc(hidden)]` APIs.
 
