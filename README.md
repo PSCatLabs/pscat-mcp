@@ -814,13 +814,21 @@ untrusted code. Each render or validation:
    an empty environment, cwd `/`, its own process group, and rlimits: CPU
    time, no file writes (`RLIMIT_FSIZE=0`), 64 file descriptors, no core
    dumps, and on Linux an address-space cap;
-3. runs under **PSCat's own limits**: steps, time and heap growth (exact per
+3. on Linux, runs under a **seccomp filter** the worker installs before it
+   reads its job: it cannot create a socket of any kind (so it cannot
+   reach the network or a cloud metadata server), use io_uring, `ptrace`
+   or `process_vm_*` another process, take another process's descriptors
+   (`pidfd_getfd`) or load BPF; those calls fail with `EPERM`. A worker
+   that cannot install the filter refuses the job (`worker_failed`). The
+   server makes itself non-dumpable, so the worker cannot read or write the
+   server's memory through `/proc` either;
+4. runs under **PSCat's own limits**: steps, time and heap growth (exact per
    process via PSCat's counting allocator), plus a pixel cap on
    `setpagedevice`; file reads are confined to PSCat's built-in `lib/` (also
    with a font-pack directory configured), and there are no write roots;
-4. is **SIGKILLed** at the wall-clock deadline, or when the client cancels
+5. is **SIGKILLed** at the wall-clock deadline, or when the client cancels
    or disconnects, even if it is stuck inside a single long operator;
-5. has its output size, page count and stdout capped.
+6. has its output size, page count and stdout capped.
 
 Artifact links (`delivery` `url`/`both`, off by default) change none of
 this: the store only ever receives the finished bytes a worker returned, and
@@ -876,8 +884,22 @@ control is enforced by PSCat and which by the server.
   `limit_exceeded` (`limit: memory`) where the plugin draws it; raising the
   limit needs a larger instance (see `docs/CLOUD_RUN.md`).
 * **Worker network namespace.** The worker shares the host's or container's
-  network namespace. PSCat cannot use it, but for public deployment add a
-  kernel sandbox (gVisor, which Cloud Run provides, or seccomp).
+  network namespace, and on Cloud Run the metadata server
+  (169.254.169.254, which hands out the service account's token) is
+  reachable from it. gVisor (Cloud Run's first generation) does not block
+  that. PostScript has no network operators, and on Linux the worker's
+  seccomp filter refuses every socket, so even code running in the worker
+  through an interpreter bug cannot open a connection. Seccomp cannot
+  filter `/proc/<pid>/mem` by path, so on Linux the server also makes
+  itself non-dumpable at startup (`PR_SET_DUMPABLE` 0): a worker, which
+  runs as the same user, cannot open the server's memory (or `environ`,
+  `fd`) to read a token, and the server never writes a core dump. None of
+  this applies on macOS (development only).
+* **The server process is not filtered.** The server needs the network,
+  so code execution in the server itself (not the worker) would reach the
+  metadata server and the service account's token. Untrusted input is
+  never processed in the server, which keeps that surface to the HTTP,
+  MCP and auth code.
 * **Survival after a server kill.** If the server is SIGKILLed itself, a
   running worker lives until its CPU or time limit, a few seconds.
 * **Fonts.** The fonts compiled into PSCat are available (base-35
@@ -985,6 +1007,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | Suite | Covers |
 |---|---|
 | `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, a generated page held to its plan (a `handwrite` note's height laid out in the worker within a pixel budget, a note over the budget refused before it is drawn, a page that misses the plan a bad job), deadline kill and no surviving process, cancel kills the worker, `halftone` in the worker job, PSCat step and memory limits (a PDF too big for the memory limit refused while it is written), file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd, the worker's art catalog, a `review_sheet` composed in one job and its exact size checked against the budget before any cell runs |
+| `tests/worker_sandbox.rs` | Linux only: a child that installs the worker's seccomp filter gets `EPERM` from `socket` (IPv4, IPv6, Unix, netlink, packet), `socketpair`, `connect` to 169.254.169.254, `bind`, `listen`, `accept`, `io_uring_setup`, `ptrace`, `process_vm_readv` and `pidfd_getfd` (and `PermissionDenied` from std's TCP and UDP), while pipes, files, a 64 MiB allocation and a new thread (which inherits the filter) still work; a child of a process that ran the server's `harden_server` cannot open its parent's `/proc/<pid>/mem` (`EACCES`), nor can the parent of a real `serve-stdio` open the server's; a real `render-worker` started by the backend carries one more seccomp filter than its parent (`Seccomp_filters`, as a container runtime may have installed one already) and `NoNewPrivs: 1`, and holds no socket. Every other suite renders through real workers, so on Linux it runs under the filter too |
 | `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list (one `EXPECTED_TOOLS` table), annotations and schemas, the art catalog (index, kind pages and named entries with size ceilings, argument errors, no server paths, load lines usable in a render), PNG image content with pixel checks, `halftone` (pure black-and-white pixels, tone kept, every page, refused for SVG/PDF), SVG/PDF resources, PostScript errors without images, a PDF over the memory limit as `limit_exceeded` (`memory`), pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
 | `tests/svg_cap.rs` | how SVG is returned, over stdio: up to `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES` a text resource, over it a blob resource holding the same SVG byte for byte (`returned_as` in `structuredContent`, every key checked against the output schema, the text summary naming the limit), every page counted together and never mixed, exactly at the limit still text, 0 for every SVG a blob, PNG and PDF unaffected, an SVG over the output cap `output_too_large` with `error.input.code` `output_bytes` and its whole size, the limit in `get_renderer_info` and the tool descriptions, its default pulled down by a small output cap, a limit above the output cap refused at startup, the deprecated alias working with a startup warning, and both names set together refused at startup |
 | `tests/chalkboard.rs` | `chalkboard_math` over stdio: the tool's schema matches the plugin's arguments, a default 1600×800 px (800×400 pt) board (dark slate, bright chalk, same image twice), the size reported in points and pixels, `board: false` transparent and an RGB board, PDF inline, SVG as text with the limit raised and as a blob by default, and over the output cap `output_too_large` with board advice, the LaTeX size limit, an unsupported command as `postscript_error` naming it, a stray `$` as `unclosed_math_delimiter`, the check pass's `CKPROBLEM` lines kept out of every reply, bad board configs and the pixel limit before execution, argument type errors with the envelope, and pathological LaTeX (10,000 nested `\frac`, 50,000 nested braces, an `\underbrace` chain) ending in a structured error while the server keeps serving |

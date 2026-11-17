@@ -298,9 +298,23 @@ impl WorkerResult {
     }
 }
 
-/// Entry point of the `render-worker` subcommand: read one job from stdin,
+/// Exit code of a worker that could not install its system-call filter.
+pub const EXIT_NO_SANDBOX: i32 = 4;
+
+/// Entry point of the `render-worker` subcommand: install the system-call
+/// filter ([`crate::sandbox`], Linux), then read one job from stdin and
 /// write one result to stdout. Returns the process exit code.
+///
+/// Without the filter the job is not read: the worker writes one line to
+/// stderr and exits with [`EXIT_NO_SANDBOX`], which the server reports as
+/// `worker_failed` with that line.
 pub fn run_stdio(max_job_bytes: usize) -> i32 {
+    // First, while the worker has one thread and before any untrusted byte
+    // is read.
+    if let Err(e) = crate::sandbox::install() {
+        eprintln!("render worker: refusing to run without its seccomp filter: {e}");
+        return EXIT_NO_SANDBOX;
+    }
     let mut input = Vec::new();
     let read = std::io::stdin()
         .lock()

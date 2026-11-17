@@ -330,10 +330,26 @@ per-client label is ever emitted at INFO, as the next section promises.
 ## Sandbox
 
 Use the **first-generation execution environment** (gVisor) for public
-traffic. It adds a kernel-level sandbox around the worker processes, beyond
-the rlimits and PSCat's own confinement. Second-generation instances run on
-a regular Linux kernel, where the worker's `RLIMIT_AS` applies but nothing
-else isolates its system calls.
+traffic. gVisor runs the container's system calls in its own user-space
+kernel, so a kernel bug reached from a worker hits gVisor, not the host's
+kernel. It does **not** cut the container off the network: the metadata
+server (169.254.169.254), which hands out the service account's access
+token, is reachable from every process in the instance, on either
+generation.
+
+What keeps the render worker away from it is the worker's own seccomp
+filter: on Linux every worker refuses to create a socket of any kind, and
+cannot use io_uring or reach into another process with `ptrace`,
+`process_vm_*` or `pidfd_getfd` (see "The worker's system-call filter" in
+[`ARCHITECTURE.md`](ARCHITECTURE.md)). It uses only seccomp features
+gVisor implements, so it applies on both generations; a worker that cannot
+install it fails the render with `worker_failed` rather than running
+unfiltered, so a deployment where it does not work shows at the first
+render. The server also makes itself non-dumpable at startup, so a
+worker cannot read the server's memory (and a token in it) through
+`/proc`. The server process is not filtered (it
+needs the network), so give the service account only what the server
+needs. On the second generation the worker's `RLIMIT_AS` also applies.
 
 ## Logging and metrics
 
