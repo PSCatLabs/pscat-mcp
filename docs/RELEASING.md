@@ -9,7 +9,7 @@ pscat-mcp ships a release after every PSCat release. A release contains:
 ## Where the PSCat version comes from
 
 ```toml
-pscat = { git = "https://github.com/PSCatLabs/pscat", tag = "v0.7.0-rc.4", default-features = false }
+pscat = { git = "https://github.com/PSCatLabs/pscat", tag = "v0.7.0-rc.5", default-features = false }
 ```
 
 This line is the only place the version is chosen.

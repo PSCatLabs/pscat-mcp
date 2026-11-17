@@ -426,6 +426,62 @@ async fn memory_limit_is_enforced_by_the_worker_binary() {
     assert_eq!(err.limit.as_deref(), Some("memory"), "{err:?}");
 }
 
+/// 8 MiB of NUL bytes in a pdfmark array object (PSCat's own #1107 test):
+/// the program fits in 16 MiB, and each byte is four in the file
+/// (`\000`), so the PDF is 32 MiB.
+const PDF_OF_NULS: &str = "/s 1048576 string def \
+    [ /_objdef {x} /type /array /OBJ pdfmark \
+    1 1 8 { pop [ {x} s /APPEND pdfmark } for showpage";
+
+/// Writing a PDF is held to the memory limit (PSCat #1107): a document too
+/// big for it is a memory limit hit, not a crash or an encoder failure.
+/// With room it is written, and then meets the output cap as before.
+#[tokio::test]
+async fn a_pdf_too_big_for_the_memory_limit_is_a_memory_limit_hit() {
+    let pdf = |mib: usize| {
+        job(
+            PDF_OF_NULS,
+            OutputFormat::Pdf,
+            Some((100, 100)),
+            InterpLimits {
+                max_memory_bytes: Some(mib * 1024 * 1024),
+                ..limits()
+            },
+        )
+    };
+    let refused = run_job(pdf(16)).await;
+    assert_eq!(
+        refused.failure,
+        Some(WorkerFailure::PostScript),
+        "{refused:?}"
+    );
+    assert!(refused.artifacts.is_empty());
+    let err = refused.ps_error.expect("ps error");
+    assert_eq!(err.name, "limitexceeded", "{err:?}");
+    assert_eq!(err.limit.as_deref(), Some("memory"), "{err:?}");
+    // The PDF writer refused it, not the program: the same program as a
+    // PNG fits in the same limit.
+    assert!(err.report.contains("writing the PDF"), "{err:?}");
+    let png = run(
+        PDF_OF_NULS,
+        InterpLimits {
+            max_memory_bytes: Some(16 * 1024 * 1024),
+            ..limits()
+        },
+    )
+    .await;
+    assert_eq!(png.failure, None, "{:?}", png.ps_error);
+
+    let written = run_job(pdf(128)).await;
+    assert!(
+        matches!(
+            written.failure,
+            Some(WorkerFailure::OutputTooLarge { bytes, .. }) if bytes > 32 * 1024 * 1024
+        ),
+        "{written:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_missing_executable_is_a_spawn_error() {
     let backend = SubprocessBackend::new(

@@ -26,6 +26,8 @@
 //!   `pscat::pdf::scan_document_info` with `Gfx::set_pdf_info`
 //!   ([`set_transparent_background`], [`set_pdf_info_from_source`]), which a
 //!   generated board needs the way `pscat chalk` uses them.
+//! * `pscat::pdf::PdfWriteError` ([`pdf_document`]), the refusal of
+//!   `Interp::pdf_document_limited` when a PDF would pass the memory limit.
 //! * `pscat::contact_sheet` ([`SheetLayout`], [`sheet_text`], [`SheetImage`],
 //!   [`SheetCanvas`]) and `pscat::png::encode`, the layout, label strips,
 //!   zoom, hairline frames and PNG behind `pscat sheet` and the plugin's
@@ -189,6 +191,28 @@ pub fn set_pdf_info_from_source(interp: &mut pscat::Interp, source: &[u8]) {
     interp.gfx_mut().set_pdf_info(title, author);
 }
 
+/// Why [`pdf_document`] gave no document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PdfFailure {
+    /// Writing it would take the heap past the interpreter's
+    /// `Limits::max_memory` (plus PSCat's write margin of 16 MiB).
+    Memory,
+    /// Anything else: PDF recording was not enabled, or the writer failed.
+    Other(String),
+}
+
+/// The whole PDF document, held to the interpreter's memory limit
+/// (`Interp::pdf_document_limited`, PSCat #1107). The error type lives in
+/// `pscat::pdf`, which is hidden.
+pub fn pdf_document(interp: &pscat::Interp) -> Result<Vec<u8>, PdfFailure> {
+    match interp.pdf_document_limited() {
+        None => Err(PdfFailure::Other("PDF recording was not enabled".into())),
+        Some(Ok(pdf)) => Ok(pdf),
+        Some(Err(pscat::pdf::PdfWriteError::Memory)) => Err(PdfFailure::Memory),
+        Some(Err(e)) => Err(PdfFailure::Other(e.to_string())),
+    }
+}
+
 /// The chalk colours a board can be written in (`pscat::chalk::CHALK_COLORS`).
 pub const CHALK_COLORS: [&str; 6] = pscat::chalk::CHALK_COLORS;
 
@@ -243,7 +267,23 @@ impl From<pscat::chalk::ChalkError> for ChalkFailure {
                 Some(token.clone()).filter(|t| !t.is_empty()),
                 e.to_string(),
             ),
+            // Every problem one check pass found (PSCat #1080), with the
+            // first one's code and token. PSCat's hint after an unsupported
+            // command again points at its CLI.
+            ChalkError::Problems(ps) => (
+                false,
+                ps.first()
+                    .map(|p| p.token.clone())
+                    .filter(|t| !t.is_empty()),
+                e.to_string().replace(
+                    "(`pscat chalk --help` lists the supported subset)",
+                    "(the supported subset is PSCat mathkit's: fractions, roots, sums, \
+                     integrals, Greek letters, matrices, cases, accents)",
+                ),
+            ),
             ChalkError::Render(_) => (false, None, e.to_string()),
+            // `ChalkError` is `#[non_exhaustive]` (PSCat #1152).
+            _ => (false, None, e.to_string()),
         };
         ChalkFailure {
             invalid_input,

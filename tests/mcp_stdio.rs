@@ -505,6 +505,34 @@ async fn renders_svg_and_pdf_as_embedded_resources() {
     client.cancel().await.ok();
 }
 
+/// A PDF that writing would take past the memory limit (PSCat #1107) is
+/// `limit_exceeded` with `limit: memory`, like any other memory limit hit.
+#[tokio::test]
+async fn a_pdf_over_the_memory_limit_is_limit_exceeded() {
+    let client = common::start_stdio(
+        env!("CARGO_BIN_EXE_pscat-mcp-server"),
+        &[("PSCAT_MCP_MAX_MEMORY_BYTES", "16777216")],
+    )
+    .await;
+    // 8 MiB of NUL bytes in a pdfmark object: a 32 MiB PDF.
+    let source = "/s 1048576 string def [ /_objdef {x} /type /array /OBJ pdfmark \
+                  1 1 8 { pop [ {x} s /APPEND pdfmark } for showpage";
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": source, "format": "pdf", "width": 100, "height": 100}),
+    )
+    .await;
+    assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+    assert!(resources(&r).is_empty());
+    let s = structured(&r);
+    assert_eq!(error_code(&r), "limit_exceeded", "{s}");
+    assert_eq!(s["error"]["postscript"]["limit"], "memory", "{s}");
+    let report = s["error"]["postscript"]["report"].as_str().unwrap();
+    assert!(report.contains("writing the PDF"), "{s}");
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn postscript_errors_are_tool_errors_without_images() {
     let client = start().await;

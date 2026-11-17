@@ -31,7 +31,7 @@ use crate::sheet::{SheetBudget, SheetReport};
 
 /// Output format the worker can produce. These are the three formats PSCat's
 /// library supports (`Page::to_png`, `Interp::svg_pages`,
-/// `Interp::pdf_document`).
+/// `Interp::pdf_document_limited`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
@@ -442,7 +442,15 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
     result.elapsed_ms = started.elapsed().as_millis() as u64 + spent.elapsed_ms;
     result.steps_used = interp.steps_used() + spent.steps;
 
-    let stdout = interp.captured_stdout();
+    let mut stdout = std::borrow::Cow::Borrowed(interp.captured_stdout());
+    if let Some((GenerateJob::ChalkboardMath(_), _)) = &generated {
+        // A board's check pass prints a line per TeX problem it found
+        // (PSCat #1167); they are internal, and the error names the problem.
+        stdout = std::borrow::Cow::Owned(strip_lines_with_prefix(
+            &stdout,
+            pscat::chalkboard::PROBLEM_LINE_PREFIX.as_bytes(),
+        ));
+    }
     let cap = job.limits.max_program_output_bytes;
     result.program_output_truncated = stdout.len() > cap;
     result.program_output = String::from_utf8_lossy(&stdout[..stdout.len().min(cap)]).into_owned();
@@ -499,9 +507,40 @@ pub fn execute(job: &WorkerJob) -> WorkerResult {
             result.artifacts = artifacts;
             result.page_count = pages;
         }
-        Err(failure) => result.failure = Some(failure),
+        Err(failure) => {
+            // The only PostScript failure `encode` gives is a PDF refused at
+            // the memory limit: reported like any other memory limit hit.
+            if failure == WorkerFailure::PostScript {
+                result.ps_error = Some(pdf_memory_diagnostic(job.limits.max_memory_bytes));
+            }
+            result.failure = Some(failure);
+        }
     }
     result
+}
+
+/// `out` without the lines that start with `prefix` (each with its newline).
+fn strip_lines_with_prefix(out: &[u8], prefix: &[u8]) -> Vec<u8> {
+    out.split_inclusive(|&b| b == b'\n')
+        .filter(|line| !line.starts_with(prefix))
+        .flatten()
+        .copied()
+        .collect()
+}
+
+/// The diagnostic of a PDF that writing would take past the memory limit
+/// (PSCat #1107): `limit_exceeded` with `limit: memory`, as a program that
+/// passed it while running.
+fn pdf_memory_diagnostic(max_memory_bytes: Option<usize>) -> PsDiagnostic {
+    let cap = max_memory_bytes.map_or_else(String::new, |b| format!(" of {b} bytes"));
+    PsDiagnostic {
+        name: "limitexceeded".into(),
+        limit: Some(pscat::Limit::Memory.name().into()),
+        report: format!(
+            "limitexceeded: memory (writing the PDF would pass the memory limit{cap}; the \
+             program itself finished)"
+        ),
+    }
 }
 
 /// The job the render pass runs: `job` with the page the generator chose
@@ -728,8 +767,13 @@ fn encode(
             }
         }
         OutputFormat::Pdf => {
-            let pdf = interp.pdf_document().ok_or_else(|| WorkerFailure::Encode {
-                message: "PDF recording was not enabled".into(),
+            // Held to the memory limit: a document too big for it is refused
+            // before the allocation that would pass it.
+            let pdf = crate::pscat_extras::pdf_document(interp).map_err(|e| match e {
+                crate::pscat_extras::PdfFailure::Memory => WorkerFailure::PostScript,
+                crate::pscat_extras::PdfFailure::Other(message) => {
+                    WorkerFailure::Encode { message }
+                }
             })?;
             check(pdf.len())?;
             let (w, h) = pages.first().map_or((0, 0), |p| (p.width(), p.height()));
@@ -752,6 +796,27 @@ fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_whole_lines_with_the_prefix_are_stripped() {
+        let p = pscat::chalkboard::PROBLEM_LINE_PREFIX.as_bytes();
+        let out = b"CKPROBLEM\t0\t1\t1\tunsupported-command\t\\aleph\nkept\n\
+                    x CKPROBLEM\t1\nCKPROBLEMS\nCKPROBLEM\tlast";
+        assert_eq!(
+            strip_lines_with_prefix(out, p),
+            b"kept\nx CKPROBLEM\t1\nCKPROBLEMS\n".to_vec()
+        );
+        assert_eq!(strip_lines_with_prefix(b"", p), b"".to_vec());
+        assert_eq!(strip_lines_with_prefix(b"a\nb", p), b"a\nb".to_vec());
+    }
+
+    #[test]
+    fn a_pdf_over_the_memory_limit_is_a_memory_limit_hit() {
+        let d = pdf_memory_diagnostic(Some(1024));
+        assert_eq!(d.name, "limitexceeded");
+        assert_eq!(d.limit.as_deref(), Some("memory"));
+        assert!(d.report.contains("1024 bytes"), "{}", d.report);
+    }
 
     #[test]
     fn points_come_from_pixels_and_dpi() {
