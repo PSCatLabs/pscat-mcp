@@ -164,7 +164,7 @@ signatures).
 
 | Environment variable | Value | Notes |
 |---|---|---|
-| `PSCAT_MCP_AUTH` | `bearer,oauth` | **Never `none`, alone or in a list.** `oauth` and `none` on one URL stop the clients from ever starting sign-in (they would run anonymously). The server does not refuse that combination yet (tracked in #153), so this is a deployment rule. `bearer` keeps CI, scripts and `Authorization`-header clients working. |
+| `PSCAT_MCP_AUTH` | `bearer,oauth` | **Never `none`, alone or in a list.** `oauth` and `none` on one URL stop the clients from ever starting sign-in (they would run anonymously). The server refuses to start with both (#153); keep it out of the deployment config anyway. `bearer` keeps CI, scripts and `Authorization`-header clients working. |
 | `PSCAT_MCP_AUTH_TOKEN_FILE` | existing bearer-token file | `bearer` needs at least one token; unchanged. |
 | `PSCAT_MCP_OAUTH_ISSUER` | `https://<authkit-domain>` | Copied from the metadata `issuer` (2.1). Exact; a trailing `/` makes every token `wrong_issuer`. |
 | `PSCAT_MCP_OAUTH_RESOURCE` | `https://mcp.example.com/mcp` | The resource URL of section 1, byte for byte the Resource Indicator. |
