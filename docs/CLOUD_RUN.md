@@ -58,8 +58,11 @@ This document lists what that deployment must get right for this image.
 Optional: `PSCAT_MCP_AUTH=oauth` or `bearer,oauth` makes `/mcp` accept JWT
 access tokens from an external authorization server (see the README's
 "Authentication" section and docs/ARCHITECTURE.md, "OAuth resource
-server"). The identity provider is not chosen yet, so nothing here names
-one. Everything the deployment wires:
+server"). The owner chose WorkOS AuthKit as the identity provider; the
+numbered runbook for both the AuthKit dashboard and this deployment, with the
+exact values of every setting below, the staging-then-production order and the
+sign-in failure modes, is [`docs/OAUTH_WORKOS.md`](OAUTH_WORKOS.md). Everything
+the deployment wires:
 
 | Setting | Kind | Value |
 |---|---|---|
@@ -92,8 +95,10 @@ one. Everything the deployment wires:
 * **Startup does not contact the provider**: an outage cannot crash-loop the
   service; it only makes JWTs with keys not yet fetched fail.
 * **What is not done yet**: no ChatGPT or claude.ai connector has signed in
-  against a deployment. That acceptance check needs a chosen identity
-  provider and a staging deployment.
+  against a deployment. That acceptance check (#119) needs AuthKit configured
+  and a staging deployment: follow [`docs/OAUTH_WORKOS.md`](OAUTH_WORKOS.md).
+  `scripts/oauth-check.py` checks a real access token against this server's
+  rules first.
 
 ## Sizing
 

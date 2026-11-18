@@ -1113,8 +1113,10 @@ client ──401 + resource_metadata──► GET /.well-known/oauth-protected-r
 * **Privacy.** The principal is `oauth:` plus a hash, rejections log a fixed
   `reason`, and no subject, email or token is logged.
 
-**The identity provider is deliberately undecided.** The method is
-provider-agnostic: any standards-based issuer works, given its issuer URL
+**The identity provider.** The hosted deployment uses WorkOS AuthKit
+(owner decision of 2026-11-17, [`AUTH_STRATEGY.md`](AUTH_STRATEGY.md), issue
+#136; setup and failure modes in [`OAUTH_WORKOS.md`](OAUTH_WORKOS.md)), but
+the method is provider-agnostic: any standards-based issuer works, given its issuer URL
 (and OpenID Connect or RFC 8414 discovery, or an explicit JWKS URL). The
 tests use a local mock authorization server. A provider for MCP clients
 such as ChatGPT and claude.ai must support:

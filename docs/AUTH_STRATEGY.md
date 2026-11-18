@@ -4,9 +4,14 @@ Research note for issue #136. Sources read on 2026-11-17 unless a row says
 otherwise. Bracketed IDs such as [A1] refer to the [Sources](#sources) table.
 Nothing here changes code; the follow-up tickets are at the end.
 
-**Status: proposal.** The recommendation below awaits the owner's approval;
-until then nothing in it is decided. The follow-up tickets are suggestions, not
-filed issues.
+**Status: approved by the owner on 2026-11-17, with changes.** WorkOS AuthKit
+is chosen as the identity provider (Auth0 stays the fallback only if AuthKit
+fails a live test). `none` is deprecated once OAuth is accepted: there is no
+public no-auth production service. Production is `bearer,oauth`, with the
+allowlist by `email:`. The rest of this note is the reasoning behind that
+decision and is left as written; where it proposes a public `none` service,
+the owner's decision above wins. Follow-up tickets are tracked as noted under
+the table at the end.
 
 ## Summary and recommendation
 
@@ -362,7 +367,7 @@ is live. Use E only if CI must not hold a long-lived secret. Skip B and C.
 
 | # | Repo | Ticket | Why | Priority |
 |---|---|---|---|---|
-| T1 | pscat-mcp | Warn or refuse `oauth` together with `none` on one server; update the README and CLOUD_RUN.md `none` wording (today "staging only") to allow a separate production public service | with both, OAuth sign-in is never triggered (finding 1) | high |
+| T1 (tracked in #153) | pscat-mcp | Warn or refuse `oauth` together with `none` on one server; update the README and CLOUD_RUN.md `none` wording (today "staging only") to allow a separate production public service | with both, OAuth sign-in is never triggered (finding 1) | high |
 | T2 | pscat-mcp | Lazy auth gate: answer `401` + challenge for `tools/call` without a credential, let `initialize`/`tools/list` through. The 2026-07-28 `Mcp-Method` header names the method, not the tool, and older clients do not send it, so the gate must parse the JSON-RPC body | one URL for anonymous browsing plus sign-in [A3] | low |
 | T3 | pscat-mcp | Per-method limit profiles (timeout, steps, memory, pixels, output) | anonymous vs signed-in limits on one service | medium |
 | T4 | pscat-mcp | Cap concurrent anonymous renders, per address and in total | the request-rate limit does not bound CPU | medium |
@@ -379,6 +384,10 @@ is live. Use E only if CI must not hold a long-lived secret. Skip B and C.
 | T15 | pscat | Per-client setup page (#1136) from Q5 | users of every client | medium |
 | T16 | pscat | ChatGPT package (#1253) points at the OAuth URL | ChatGPT cannot send a header | medium |
 | T17 | pscat | Grok bots (#1142) through the xAI API with a named bearer token | the only verified Grok path | low |
+
+Tracked after the owner's decision: T1 in #153; the deprecation and removal
+of `none` in #154; the WorkOS AuthKit setup guide and the token checker script
+(`docs/OAUTH_WORKOS.md`, `scripts/oauth-check.py`) in #152.
 
 ## Sources
 

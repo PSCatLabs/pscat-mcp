@@ -83,3 +83,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I -m unittest discover -s evals/server -t evals/server -v
+
+  # Offline unit tests of the helper scripts (scripts/oauth-check.py): synthetic
+  # tokens, a loopback server at most, no network, no credential.
+  script-offline:
+    name: script offline tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -I -m unittest discover -s scripts/tests -t scripts/tests -v
