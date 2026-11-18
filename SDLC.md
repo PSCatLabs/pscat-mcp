@@ -45,6 +45,12 @@ this file is the rule here.
    python3 -I -m unittest discover -s evals/server -t evals/server
    ```
 
+   When `scripts/` changes, also run its offline tests:
+
+   ```bash
+   python3 -I -m unittest discover -s scripts/tests -t scripts/tests
+   ```
+
    Run new timing-sensitive tests several times.
 6. **Open the PR** with `Closes #N`, or `Refs #N` for partial or related
    work. GitHub closes an issue on any closing keyword, even in a sentence
@@ -105,7 +111,8 @@ A branch doesn't have to be up to date with `main` to merge.
 **Never rename or remove a required check's job.** GitHub matches
 required checks by name, so a renamed job leaves the old check pending
 and blocks every PR. Adding jobs is fine. `agent eval offline tests` and
-`server eval offline tests` run on every PR but aren't required.
+`server eval offline tests` and `script offline tests` run on every PR but
+aren't required.
 
 ## Who merges
 

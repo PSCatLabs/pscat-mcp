@@ -1004,8 +1004,11 @@ An empty, unknown or repeated list is refused at startup.
 
 #### No-auth mode (`none`)
 
-`none` is `auth::NoAuth`, the fallback method named `none` with the
-principal `anonymous`. Plain (`NoAuth::default()`), it admits everything:
+`none` is deprecated (it goes away once OAuth is accepted in ChatGPT) and is
+refused at startup together with `oauth`, because the fallback would answer a
+request with no credential as anonymous, so a client would never get the `401`
+that starts OAuth sign-in. `none` is `auth::NoAuth`, the fallback method named
+`none` with the principal `anonymous`. Plain (`NoAuth::default()`), it admits everything:
 the loopback `--allow-unauthenticated` mode. With `PSCAT_MCP_AUTH=…,none` it
 is built as `NoAuth::guarded(NoneGuard)`; `auth_none` holds the guard rails
 and their settings (`NoneAuthConfig`, flattened into `config::AuthConfig`),
@@ -1113,8 +1116,10 @@ client ──401 + resource_metadata──► GET /.well-known/oauth-protected-r
 * **Privacy.** The principal is `oauth:` plus a hash, rejections log a fixed
   `reason`, and no subject, email or token is logged.
 
-**The identity provider is deliberately undecided.** The method is
-provider-agnostic: any standards-based issuer works, given its issuer URL
+**The identity provider.** The hosted deployment uses WorkOS AuthKit
+(owner decision of 2026-11-17, [`AUTH_STRATEGY.md`](AUTH_STRATEGY.md), issue
+#136; setup and failure modes in [`OAUTH_WORKOS.md`](OAUTH_WORKOS.md)), but
+the method is provider-agnostic: any standards-based issuer works, given its issuer URL
 (and OpenID Connect or RFC 8414 discovery, or an explicit JWKS URL). The
 tests use a local mock authorization server. A provider for MCP clients
 such as ChatGPT and claude.ai must support:
