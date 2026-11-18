@@ -1004,8 +1004,11 @@ An empty, unknown or repeated list is refused at startup.
 
 #### No-auth mode (`none`)
 
-`none` is `auth::NoAuth`, the fallback method named `none` with the
-principal `anonymous`. Plain (`NoAuth::default()`), it admits everything:
+`none` is deprecated (it goes away once OAuth is accepted in ChatGPT) and is
+refused at startup together with `oauth`, because the fallback would answer a
+request with no credential as anonymous, so a client would never get the `401`
+that starts OAuth sign-in. `none` is `auth::NoAuth`, the fallback method named
+`none` with the principal `anonymous`. Plain (`NoAuth::default()`), it admits everything:
 the loopback `--allow-unauthenticated` mode. With `PSCAT_MCP_AUTH=…,none` it
 is built as `NoAuth::guarded(NoneGuard)`; `auth_none` holds the guard rails
 and their settings (`NoneAuthConfig`, flattened into `config::AuthConfig`),

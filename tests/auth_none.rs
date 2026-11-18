@@ -717,6 +717,48 @@ fn startup_refusals() {
     // `bearer` alone with async jobs is fine to configure (not started here).
 }
 
+/// `oauth` and `none` are never enabled together: a request with no
+/// credential would be answered as anonymous, so a client would never get the
+/// `401` that starts OAuth sign-in. The other pairs still start (#153).
+#[tokio::test(flavor = "multi_thread")]
+async fn oauth_and_none_refuse_to_start_together() {
+    let oauth = [
+        ("PSCAT_MCP_OAUTH_ISSUER", "https://issuer.example.test/"),
+        ("PSCAT_MCP_OAUTH_RESOURCE", "https://mcp.example.test/mcp"),
+        ("PSCAT_MCP_OAUTH_ALLOWED_USERS", "sub:abc"),
+    ];
+    for list in ["bearer,oauth,none", "oauth,none", "none,oauth"] {
+        let mut env = vec![("PSCAT_MCP_AUTH", list), ("PSCAT_MCP_AUTH_TOKENS", TOKEN)];
+        env.extend(oauth);
+        let stderr = refused(&env);
+        assert!(
+            stderr.contains("`oauth` and `none`")
+                && stderr.contains("cannot be combined")
+                && stderr.contains("never get a 401")
+                && stderr.contains("Remove `none`"),
+            "{list}: {stderr}"
+        );
+        // The refusal names the pair even when the oauth settings are missing.
+        let stderr = refused(&[("PSCAT_MCP_AUTH", list), ("PSCAT_MCP_AUTH_TOKENS", TOKEN)]);
+        assert!(stderr.contains("`oauth` and `none`"), "{list}: {stderr}");
+    }
+    // The pairs that are allowed still start.
+    let mut env = vec![
+        ("PSCAT_MCP_AUTH", "bearer,none"),
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+    ];
+    let srv = Server::start(&env).await;
+    assert_eq!(enabled_methods(&srv), "bearer,none");
+    drop(srv);
+    env = vec![
+        ("PSCAT_MCP_AUTH", "bearer,oauth"),
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+    ];
+    env.extend(oauth);
+    let srv = Server::start(&env).await;
+    assert_eq!(enabled_methods(&srv), "bearer,oauth");
+}
+
 /// The startup log lines of `srv`, once the `auth_methods` line is in.
 fn enabled_methods(srv: &Server) -> String {
     let lines = srv.lines();
