@@ -367,7 +367,7 @@ is live. Use E only if CI must not hold a long-lived secret. Skip B and C.
 
 | # | Repo | Ticket | Why | Priority |
 |---|---|---|---|---|
-| T1 (tracked in #153) | pscat-mcp | Warn or refuse `oauth` together with `none` on one server; update the README and CLOUD_RUN.md `none` wording (today "staging only") to allow a separate production public service | with both, OAuth sign-in is never triggered (finding 1) | high |
+| T1 (done in #153) | pscat-mcp | Warn or refuse `oauth` together with `none` on one server; update the README and CLOUD_RUN.md `none` wording (today "staging only") to allow a separate production public service | with both, OAuth sign-in is never triggered (finding 1) | high |
 | T2 | pscat-mcp | Lazy auth gate: answer `401` + challenge for `tools/call` without a credential, let `initialize`/`tools/list` through. The 2026-07-28 `Mcp-Method` header names the method, not the tool, and older clients do not send it, so the gate must parse the JSON-RPC body | one URL for anonymous browsing plus sign-in [A3] | low |
 | T3 | pscat-mcp | Per-method limit profiles (timeout, steps, memory, pixels, output) | anonymous vs signed-in limits on one service | medium |
 | T4 | pscat-mcp | Cap concurrent anonymous renders, per address and in total | the request-rate limit does not bound CPU | medium |

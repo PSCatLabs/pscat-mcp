@@ -51,7 +51,7 @@ This document lists what that deployment must get right for this image.
 | `PSCAT_MCP_AUTH_TOKEN_FILE=/secrets/tokens` with a Secret Manager volume | required when `PSCAT_MCP_AUTH` is unset or lists `bearer`: the server then refuses to start without a token; a file keeps it out of `env` listings. An `oauth`-only deployment needs no token (see "OAuth" below), nor does the staging `none` mode below |
 | `PSCAT_MCP_ALLOWED_HOSTS=<service>.run.app,<custom domain>` | the default allows only loopback hosts, so every `/mcp` request would get 403 (the server logs a warning at startup). `*` is acceptable only when a load balancer already validates `Host` |
 | `PSCAT_MCP_MAX_CONCURRENT_RENDERS=<the service's --cpu>` (for example `2` with `--cpu=2`) | the default is min(CPUs the process sees, 4), and on the first-generation environment (gVisor) that count can exceed what the service is granted: `--cpu=2` was observed to get 4 slots. Set it explicitly; see "Sizing" |
-| Cloud Run ingress / IAM | the bearer token (or OAuth, see below) is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth (or, for staging only, the `none` mode below) |
+| Cloud Run ingress / IAM | the bearer token (or OAuth, see below) is the application's own check. Cloud Run IAM (`roles/run.invoker`) can be layered in front for service-to-service callers, but MCP clients such as ChatGPT or Claude cannot mint Google ID tokens, so public MCP access needs `--allow-unauthenticated` at the Cloud Run level plus this server's token or OAuth (or, for staging only, the deprecated `none` mode below) |
 
 ## OAuth (ChatGPT and claude.ai connectors)
 
@@ -328,12 +328,19 @@ to it by default.
 
 ## No authentication for staging
 
-**Staging only.** `PSCAT_MCP_AUTH=none` (or `bearer,none`) lets a request with
-no credential render as the principal `anonymous`. Anyone who has the URL
+**Staging only, and deprecated.** `PSCAT_MCP_AUTH=none` (or `bearer,none`) lets
+a request with no credential render as the principal `anonymous`. Anyone who has the URL
 can then spend the service's render CPU time and quota, within the resource
 limits and the guard rails below, and the service is billed for it. It is
 never on by default and logs a warning at startup. Do not enable it on a
 production service.
+
+`none` is deprecated: it goes away once OAuth is accepted in ChatGPT (tracked
+in #154), and it is still available until then. It can never be combined with
+`oauth`: the server refuses to start with `oauth,none` or `bearer,oauth,none`,
+because a request with no credential would be answered as anonymous, so
+clients would never get a `401` and never start OAuth sign-in. Use `bearer,none`
+(a staging service) or `bearer,oauth` (a service with sign-in), not both.
 
 **Why.** ChatGPT's custom MCP connector can't send a fixed `Authorization`
 header: it offers only OAuth or "No authentication". `none` is the stopgap

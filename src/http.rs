@@ -135,7 +135,10 @@ pub fn authenticator(http: &HttpConfig) -> anyhow::Result<Arc<dyn Authenticator>
 ///   unknown list is refused. `bearer` needs at least one token; `oauth`
 ///   needs its issuer, resource and allowlist ([`OauthAuth::from_config`]).
 ///   `none` is the explicit
-///   no-auth mode (issue #120, [`crate::auth_none`]): it is refused together
+///   no-auth mode (issue #120, [`crate::auth_none`]), deprecated (it goes
+///   away once OAuth is accepted in ChatGPT, issue #154). It is refused
+///   together with `oauth` (a request with no credential would be answered as
+///   anonymous, so a client never gets the 401 that starts OAuth sign-in) and
 ///   with async jobs (every anonymous caller is one principal, so one could
 ///   read or cancel another's jobs; Tasks need async jobs, so are covered),
 ///   (an expired `PSCAT_MCP_AUTH_NONE_UNTIL` is not refused: `none` is
@@ -169,6 +172,14 @@ pub fn authenticator_with(
         warn_unused_none_settings(auth);
         return authenticator(http);
     };
+    if kinds.contains(&AuthMethodKind::None) && kinds.contains(&AuthMethodKind::Oauth) {
+        anyhow::bail!(
+            "refusing to start: auth methods `oauth` and `none` (PSCAT_MCP_AUTH / --auth) cannot \
+             be combined: with both, a request with no credential is answered as anonymous, so \
+             clients never get a 401 and never start OAuth sign-in. Remove `none` (`none` is \
+             deprecated and will be removed once OAuth is accepted in ChatGPT)"
+        );
+    }
     if kinds.contains(&AuthMethodKind::None) {
         if http.async_jobs {
             anyhow::bail!(
@@ -228,7 +239,8 @@ pub fn authenticator_with(
                     guard = %guard.summary(),
                     "auth method `none` is ENABLED: /mcp accepts requests with NO credentials \
                      from anyone who can reach this server, who can then spend its render CPU \
-                     time and quota. For staging only; never leave it on in production"
+                     time and quota. For staging only, and deprecated; never leave it on in \
+                     production"
                 );
                 methods.push(Box::new(NoAuth::guarded(guard)));
             }
