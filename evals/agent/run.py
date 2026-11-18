@@ -52,6 +52,12 @@ REDACTED = "<redacted-token>"
 # guard's allowlist: tuning knobs for what the client does with a tool result
 # (issue #64). Each takes a positive integer.
 CLIENT_ENV_ALLOWED = ("MAX_MCP_OUTPUT_TOKENS",)
+# The only variables a case may set in the SERVER's environment (its
+# `server_env`), with the values each takes. They go into the MCP config's
+# `env` of the stdio server, never into the agent child's environment (that
+# stays guard.child_env). No secret and no `gcs` (it needs a bucket and
+# credentials): the memory store is what a harness can drive.
+SERVER_ENV_ALLOWED = {"PSCAT_MCP_ARTIFACT_LINKS": ("off", "memory")}
 
 
 # --------------------------------------------------------------------------
@@ -100,12 +106,37 @@ def load_cases() -> list[dict]:
         case.setdefault("id", path.stem)
         case.setdefault("transports", ["stdio", "http"])
         case.setdefault("tags", [])
+        try:
+            check_case_server_env(case)
+        except ValueError as e:
+            sys.exit(f"{path.name}: {e}")
         cases.append(case)
     ids = [c["id"] for c in cases]
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:
         sys.exit(f"duplicate case ids: {sorted(dupes)}")
     return cases
+
+
+def check_case_server_env(case: dict) -> dict[str, str]:
+    """A case's `server_env`: only SERVER_ENV_ALLOWED names with an allowed
+    value, and only on a case that runs over stdio alone (the HTTP server is
+    one process shared by every case). Raises ValueError, so a bad case file
+    is refused by --list, --test and every run before a session starts."""
+    env = case.get("server_env")
+    if env is None:
+        return {}
+    if not isinstance(env, dict) or not env:
+        raise ValueError("server_env must be a non-empty object")
+    for name, value in env.items():
+        allowed = SERVER_ENV_ALLOWED.get(name)
+        if allowed is None:
+            raise ValueError(f"server_env: {name!r} is not one of {', '.join(SERVER_ENV_ALLOWED)}")
+        if value not in allowed:
+            raise ValueError(f"server_env: {name} must be one of {', '.join(allowed)}, not {value!r}")
+    if "http" in case.get("transports", ["stdio", "http"]):
+        raise ValueError('server_env needs "transports": ["stdio"]')
+    return dict(env)
 
 
 # --------------------------------------------------------------------------
@@ -303,8 +334,11 @@ class HttpServer:
         shutil.rmtree(self.secret_dir, ignore_errors=True)
 
 
-def stdio_config(binary: Path) -> dict:
-    return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": str(binary), "args": ["serve-stdio"]}}}
+def stdio_config(binary: Path, server_env: dict[str, str] | None = None) -> dict:
+    entry = {"type": "stdio", "command": str(binary), "args": ["serve-stdio"]}
+    if server_env:
+        entry["env"] = dict(server_env)  # the server's variables, not the agent's
+    return {"mcpServers": {SERVER_NAME: entry}}
 
 
 def parse_client_env(items: list[str] | None) -> dict[str, str]:
@@ -376,7 +410,14 @@ def claude_argv(claude: str, model: str, max_turns: int, config: Path, effort: s
     return argv
 
 
-def codex_argv(codex: str, model: str | None, workdir: Path, binary: Path, http: HttpServer | None) -> list[str]:
+def codex_argv(
+    codex: str,
+    model: str | None,
+    workdir: Path,
+    binary: Path,
+    http: HttpServer | None,
+    server_env: dict[str, str] | None = None,
+) -> list[str]:
     argv = [
         codex,
         "exec",
@@ -399,6 +440,8 @@ def codex_argv(codex: str, model: str | None, workdir: Path, binary: Path, http:
         argv += ["-c", f"{key}.url={json.dumps(http.url)}", "-c", f'{key}.bearer_token_env_var="PSCAT_EVAL_TOKEN"']
     else:
         argv += ["-c", f"{key}.command={json.dumps(str(binary))}", "-c", f'{key}.args=["serve-stdio"]']
+        for name, value in (server_env or {}).items():
+            argv += ["-c", f"{key}.env.{name}={json.dumps(value)}"]
     argv.append("-")  # prompt on stdin
     return argv
 
@@ -888,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
             for chk in res.get("checks", []):
                 if not chk["ok"]:
                     print(f"    FAIL {chk['name']}: {chk['detail']}")
+            print_observations(res)
             if res.get("skip_agent"):
                 print(f"    skipping the remaining {a} runs")
                 skipped_agents.add(a)
@@ -927,6 +971,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 POST_CHECK = "server logged a POST /mcp per tool call"
+
+
+def observations_record(checks: list) -> list[dict]:
+    """Observations as stored in a run record: what a case only measures
+    (its `observe`). They never decide a verdict or enter a baseline."""
+    return [{"name": c.name, "seen": c.ok, "detail": c.detail} for c in checks]
+
+
+def print_observations(record: dict) -> None:
+    for o in record.get("observations") or []:
+        detail = f" ({o['detail']})" if o.get("detail") else ""
+        print(f"    observed {'yes' if o['seen'] else 'no '}  {o['name']}{detail}")
 
 
 def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | None = None) -> int:
@@ -993,7 +1049,9 @@ def recheck(run_dir: Path, cases: list[dict], binary: Path, baseline: dict | Non
             num_turns=t.num_turns,
             status=status,
             checks=[{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+            observations=observations_record(tx.evaluate_observations(case, t, SERVER_NAME, dict(ctx0))),
         )
+        print_observations(record)
         results.append(record)
     rows = summarize(results)
     print()
@@ -1020,13 +1078,18 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
     out_path = run_dir / "transcripts" / f"{name}.jsonl"
     err_path = run_dir / "transcripts" / f"{name}.stderr"
     record = {"case": case["id"], "agent": agent, "transport": transport, "transcript": str(out_path.relative_to(run_dir))}
+    server_env = check_case_server_env(case) if transport == "stdio" else {}
+    if server_env:
+        record["server_env"] = server_env
     started = time.monotonic()
     posts_before = http.post_count() if (http and transport == "http") else 0
     sg: guard.StreamGuard | None = None
     try:
         if agent == "claude":
             config = secret_dir / f"mcp-{transport}.json"
-            write_private_json(config, http.mcp_config() if transport == "http" else stdio_config(binary))
+            write_private_json(
+                config, http.mcp_config() if transport == "http" else stdio_config(binary, server_env)
+            )
             argv = claude_argv(claude, args.model, max_turns, config, args.effort)
             env = guard.child_env(os.environ, parse_client_env(args.claude_env))
             sg = guard.StreamGuard(SERVER_NAME, args.model)
@@ -1037,7 +1100,9 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
                 sg.finish()
             t = tx.parse_claude_stream(lines)
         else:
-            argv = codex_argv(codex, args.codex_model, workdir, binary, http if transport == "http" else None)
+            argv = codex_argv(
+                codex, args.codex_model, workdir, binary, http if transport == "http" else None, server_env
+            )
             extra = {"PSCAT_EVAL_TOKEN": http.token} if (http and transport == "http") else {}
             for k in ("CODEX_HOME",):
                 if k in os.environ:
@@ -1076,6 +1141,7 @@ def run_one(case, agent, transport, binary, http, args, claude, codex, ctx0, sec
     checks = tx.evaluate_case(case, t, SERVER_NAME, ctx, transport)
     record["checks"] = [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks]
     record["status"] = "pass" if all(c.ok for c in checks) else "fail"
+    record["observations"] = observations_record(tx.evaluate_observations(case, t, SERVER_NAME, ctx))
     return record
 
 

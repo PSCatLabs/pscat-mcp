@@ -1,0 +1,170 @@
+{
+  "id": "artifact-links",
+  "title": "Artifact links: PNG and a large SVG with delivery url; what the client shows and whether the agent can read the links",
+  "origin": "issue #155, step 1 of #98: what a client does with the links delivery url/both returns",
+  "transports": [
+    "stdio"
+  ],
+  "server_env": {
+    "PSCAT_MCP_ARTIFACT_LINKS": "memory"
+  },
+  "max_turns": 10,
+  "prompt": "Using the pscat-render tools, make these two render_postscript calls, each with the argument delivery set to \"url\":\n\n1. A PNG, 800 x 500 points, of this program:\n0.1 0.3 0.7 setrgbcolor 0 0 800 500 rectfill 1 0.8 0 setrgbcolor 400 250 150 0 360 arc fill\n\n2. An SVG, 400 x 300 points, of this program:\n0 1 13000 {dup 37 mul 400 mod exch 53 mul 300 mod 3 3 rectfill} for\n\nThen report, separately for each call, exactly what the tool result contained: the kinds of content you received (text, image, resource, link) and the fields of the structured result (render_id, returned_as, download_url, expires_at). Quote every link exactly as it appears.\n\nThen try to read the content behind each link with any tool you have, other than the render tools themselves, for example a tool that reads an MCP resource by its URI. If you have no such tool, say so. For each link, say whether you could read the content and what you saw. Do not guess or invent anything: if you could not read a link, say that, and do not describe content you did not receive.\n",
+  "expect": {
+    "tools_required": [
+      "render_postscript"
+    ],
+    "calls": [
+      {
+        "tool": "render_postscript",
+        "where": {
+          "delivery": "url",
+          "format": {
+            "in": [
+              "png",
+              null
+            ]
+          },
+          "source": {
+            "contains": "arc"
+          }
+        },
+        "which": "first",
+        "args": {
+          "width": 800,
+          "height": 500
+        },
+        "result": {
+          "is_error": false,
+          "structured": {
+            "ok": true,
+            "render_id": {
+              "regex": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "artifacts.0.download_url": {
+              "regex": "^pscat://render/[0-9a-f-]{36}/1$"
+            },
+            "artifacts.0.expires_at": {
+              "regex": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"
+            },
+            "artifacts.0.returned_as": "link"
+          }
+        }
+      },
+      {
+        "tool": "render_postscript",
+        "where": {
+          "delivery": "url",
+          "format": "svg",
+          "source": {
+            "contains": "13000"
+          }
+        },
+        "which": "first",
+        "args": {
+          "width": 400,
+          "height": 300
+        },
+        "result": {
+          "is_error": false,
+          "structured": {
+            "ok": true,
+            "render_id": {
+              "regex": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "artifacts.0.download_url": {
+              "regex": "^pscat://render/[0-9a-f-]{36}/1$"
+            },
+            "artifacts.0.expires_at": {
+              "regex": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"
+            },
+            "artifacts.0.returned_as": "link",
+            "artifacts.0.bytes": {
+              "min": 1000000
+            }
+          }
+        }
+      }
+    ],
+    "answer": {
+      "all": [
+        "png",
+        "svg"
+      ]
+    }
+  },
+  "observe": [
+    {
+      "name": "a resource_link block reached the model (both calls)",
+      "expect": {
+        "calls": [
+          {
+            "tool": "render_postscript",
+            "where": {
+              "delivery": "url"
+            },
+            "which": "all",
+            "result": {
+              "content_types": [
+                "resource_link"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "the 'Links to the output' text reached the model (both calls)",
+      "expect": {
+        "calls": [
+          {
+            "tool": "render_postscript",
+            "where": {
+              "delivery": "url"
+            },
+            "which": "all",
+            "result": {
+              "text_contains": [
+                "Links to the output"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a pscat://render link is in the result text the model saw (both calls)",
+      "expect": {
+        "calls": [
+          {
+            "tool": "render_postscript",
+            "where": {
+              "delivery": "url"
+            },
+            "which": "all",
+            "result": {
+              "text_contains": [
+                "pscat://render/"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "the answer quotes a pscat://render link",
+      "expect": {
+        "answer": {
+          "regex": [
+            "pscat://render/[0-9a-f-]{8}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "the agent called a tool outside pscat-render (a read attempt)",
+      "outside_calls": true
+    }
+  ],
+  "notes": "MEASURES, does not judge: the checks in expect cover only what the server returned (the call, the manifest in structuredContent); everything about what the client did with the links is under observe, which is recorded per run (run record 'observations') and never fails a run or enters a baseline. In this harness the agent has only the pscat-render tools (--tools= removes Claude Code's resource-reading tool), so it cannot read a pscat:// link; the case records what the client showed the model and what the agent said. Read the transcript (docs/LOCAL_TESTING.md, 'Artifact link evals'). Runs against the memory store: the harness sets PSCAT_MCP_ARTIFACT_LINKS=memory in the server's environment (server_env)."
+}
