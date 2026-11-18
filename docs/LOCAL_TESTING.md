@@ -653,7 +653,25 @@ first prompt in section 5.
   `prompts/get` over stdio (no model involved) and sends it, then the case's
   `prompt`, as the user's message. `91-guide-prompt-chart.json` uses it.
   The agent still has only the `pscat-render` tools, so Claude Code's
-  `ReadMcpResourceTool` isn't available, and no case reads a resource.
+  `ReadMcpResourceTool` isn't available: no case can read a resource, and
+  the artifact-link cases below record that instead.
+* **`server_env`** sets variables in the *server's* environment for one
+  case, as the MCP config's `env` for the stdio server (and, for Codex, as
+  `-c mcp_servers.pscat-render.env.NAME=...`). Only
+  `PSCAT_MCP_ARTIFACT_LINKS` with `off` or `memory` is accepted (no `gcs`,
+  no secret, no other name), and only on a case whose `transports` is
+  `["stdio"]`, because the HTTP server is one process shared by every case.
+  A bad `server_env` is refused when the cases are loaded (`--list`,
+  `--test`, any run). The agent child's own environment is unchanged: it
+  stays the guard's allowlist. The values are recorded in the run record
+  (`server_env`). Neither the Claude Code nor the Codex merge of this `env`
+  with the environment it passes on has been seen in a live run.
+* **`observe`** lists what a case only measures: items with a `name` and an
+  `expect` (the same vocabulary as the case's `expect`) or
+  `outside_calls: true` (the agent called a tool other than the server's).
+  Each is recorded as `observed yes` or `observed no` in the run's output
+  and in `summary.json` (`observations`), and never affects the verdict, the
+  rows or a baseline. Unlike a check in `expect`, a case can't fail on it.
 * **Checks on every run.** The agent finished (it didn't hit
   `--max-turns`), there were no permission denials, every call went to
   `pscat-render`, and the turn count is at most `max_turns`.
@@ -670,6 +688,87 @@ A large result takes other forms, shown in
 [section 11](#11-what-clients-do-with-large-tool-results). An error result
 reaches the model as its text only, with no `structuredContent`, so a check
 on an error reads `text_contains`, not `structured`.
+
+### Artifact link evals
+
+Two cases measure what a client does with the links that `delivery: "url"`
+and `"both"` return (issue #98, step 1; #155): `artifact-links` and
+`artifact-links-both`. They run over stdio only, against the server's memory
+store (the harness sets `PSCAT_MCP_ARTIFACT_LINKS=memory` for the server),
+so the links are `pscat://render/<render_id>/<n>`, MCP resources. The agent
+renders an 800 x 500 PNG and a large SVG (about 1 MB), reports what each
+result contained, tries to read each link with any tool beyond the render
+tools, and says whether the content was readable.
+
+**Only the owner runs them**: they spend the Max subscription, like every
+live eval. An agent never runs them.
+
+```bash
+cargo build --release
+scripts/agent-eval.sh --dry-run --case artifact-links --case artifact-links-both   # guard pre-flight, no model
+scripts/agent-eval.sh --case artifact-links --transport stdio                      # delivery url
+scripts/agent-eval.sh --case artifact-links-both --transport stdio                 # delivery both
+```
+
+Each is one session. The new cases have no baseline row: `--compare` lists
+them as `unbaselined`, and the committed baseline stays valid. Refresh it
+(section 9, "Baseline and comparing runs") only after live runs of them,
+if you want them in it.
+
+**What the run checks, and what it only measures.** The case fails only if
+what the *server* returned is wrong: `render_postscript` called with the
+delivery, an error-free result, and a `structuredContent` with a `render_id`
+(a UUID), `artifacts.0.download_url` (`pscat://render/<id>/1`), `expires_at`
+and `returned_as` (`link` for `url`; `image` for the PNG and `blob` for the
+SVG with `both`). Whether the link was shown, read or ignored is not
+checked: it is under `observe`, printed per run as `observed yes/no` and
+recorded in `summary.json`.
+
+**In this harness the agent cannot read a link.** `--tools=` removes Claude
+Code's own resource-reading tool (`ReadMcpResourceTool`) and the guard
+refuses any tool outside `pscat-render`, so over this harness "was the
+resource fetched?" is structurally no, and a run in which the agent called
+one would fail the generic "only pscat-render tools" check and the guard.
+The runs therefore measure what the client *showed the model* and what the
+agent said when it had no way to fetch the link. Reading a link with the
+client's resource tool needs an opt-in for that one tool, with a change to
+the guard's isolation check, which is the owner's decision (#155).
+
+**Reading a transcript** (`evals/agent-runs/<time>/transcripts/*.jsonl`,
+the `tool_result` of each `render_postscript` call, then the last assistant
+message):
+
+| Question | Where to look | Observation line |
+|---|---|---|
+| Was the link shown to the model? | the `tool_result` content: a `resource_link` block or a text block `[Resource ...]`, the text `Links to the output (render_id ...)`, or only the JSON of `structuredContent` (which includes `download_url`) | `a resource_link block reached the model`, `the 'Links to the output' text reached the model`, `a pscat://render link is in the result text the model saw` |
+| Did the agent report it? | the final answer quotes `pscat://render/...` exactly, and the `render_id` and `returned_as` values | `the answer quotes a pscat://render link` |
+| Was it fetched? | any `tool_use` other than `render_postscript` (none can succeed here) | `the agent called a tool outside pscat-render` |
+| Was it ignored? | the answer does not mention the link, or says the result was an image, or invents content for it | read the answer; it was told not to invent anything |
+| With `both`: did the inline content still arrive? | the `tool_result` has an `image` block for the PNG and a `Binary content (image/svg+xml, ... ) saved to ...svg` block for the SVG | `the PNG's image block reached the model`, `the SVG's blob resource reached the model` |
+
+Fill one row per client you try (Claude Code here; the other clients with
+[`PLATFORM_PROMPTS.md`](PLATFORM_PROMPTS.md), where the links are `https`):
+
+| Client and version | Link type | Shown to the model? | Fetched? | Ignored? | Notes |
+|---|---|---|---|---|---|
+| Claude Code, `delivery: "url"` | `pscat://` (memory) | | no (no tool in this harness) | | |
+| Claude Code, `delivery: "both"` | `pscat://` (memory) | | no (no tool in this harness) | | |
+| Claude Code, in a normal session with its resource tool | `pscat://` (memory) | | | | by hand, see below |
+
+To try the resource tool by hand, start the server with memory links in a
+normal Claude Code session, for example
+`claude mcp add pscat-links --env PSCAT_MCP_ARTIFACT_LINKS=memory -- target/release/pscat-mcp-server serve-stdio`,
+ask for a render with `delivery: "url"`, then ask it to read the link with
+its MCP resource tool, and record what it did (remove the server after:
+section 8).
+
+**`https` signed links need a server with `gcs` enabled and cannot be
+driven by this harness.** The harness runs the server itself over stdio or a
+loopback HTTP server, and `gcs` needs a bucket, a Google runtime account and
+a client that can send a bearer token (`gcs` is refused with the `none` auth
+method). For claude.ai, Claude Desktop and ChatGPT against such a server,
+paste the prompt in [`PLATFORM_PROMPTS.md`](PLATFORM_PROMPTS.md) and fill in
+the table it asks for.
 
 ## 10. Server-layer evals
 
@@ -1055,6 +1154,8 @@ step 6, the ChatGPT check, cannot be run until OAuth exists.
    query; that is expected.)
 6. In ChatGPT (the owner): a PNG and a large SVG rendered with
    `delivery: "url"` are shown or downloadable through the link.
+   The prompt to paste, for this and the other platforms, is
+   [`PLATFORM_PROMPTS.md`](PLATFORM_PROMPTS.md).
 
 Record (steps 1 to 5: pscat-cloud, a throwaway Cloud Run first-generation
 service in `us-central1` running the runtime service account with

@@ -532,3 +532,25 @@ def evaluate_case(case: dict, t: Transcript, server: str, ctx: dict, transport: 
         if best is None or sum(c.ok for c in got) > sum(c.ok for c in best):
             best = got
     return checks + (best or [])
+
+
+def evaluate_observations(case: dict, t: Transcript, server: str, ctx: dict) -> list[Check]:
+    """What a case only measures, from its `observe` list. Each item has a
+    `name` and either an `expect` (the vocabulary of `expect`) or
+    `outside_calls: true` (the agent called something other than the server's
+    tools, such as a client tool that reads a resource). A Check here means
+    "seen": `ok` is True when the observation held, and `detail` says why not.
+    Nothing here decides a verdict: evaluate_case never reads `observe`, so a
+    case can record what a client does without failing on it."""
+    out: list[Check] = []
+    for item in expand(case.get("observe") or [], ctx):
+        name = item["name"]
+        if item.get("outside_calls"):
+            outside = sorted({c.name for c in t.calls if c.server != server})
+            out.append(Check(name, bool(outside), ", ".join(outside) if outside else "no such call"))
+            continue
+        got = evaluate_expect(item["expect"], t, server)
+        failed = [c for c in got if not c.ok]
+        detail = "; ".join(f"{c.name}: {c.detail}" if c.detail else c.name for c in failed[:2])
+        out.append(Check(name, bool(got) and not failed, detail[:200]))
+    return out
