@@ -685,8 +685,13 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 ## Authentication
 
 Which methods to run for which MCP client (ChatGPT, Claude, Codex and
-others) is discussed in [`docs/AUTH_STRATEGY.md`](docs/AUTH_STRATEGY.md), a
-proposal awaiting approval.
+others) is discussed in [`docs/AUTH_STRATEGY.md`](docs/AUTH_STRATEGY.md),
+approved by the owner on 2026-11-17: WorkOS AuthKit is the identity provider
+and production runs `bearer,oauth`. The step-by-step AuthKit setup, the
+settings this server needs and the sign-in failure modes are in
+[`docs/OAUTH_WORKOS.md`](docs/OAUTH_WORKOS.md); `scripts/oauth-check.py`
+checks an access token against this server's rules before a client is
+involved.
 
 With `PSCAT_MCP_AUTH` unset (or listing `bearer`), the HTTP server will
 not start without at least one bearer token, unless
@@ -717,8 +722,9 @@ above.
 **OAuth (`oauth`).** For clients that cannot send a fixed header, such as
 ChatGPT's connectors, the server is an OAuth 2.1 *resource server* as the MCP
 authorization spec describes. It holds no passwords and runs no login page:
-an external authorization server (an identity provider, which this project
-has deliberately not chosen; see
+an external authorization server (an identity provider; the server works with
+any standards-based issuer, and WorkOS AuthKit is the one chosen for the
+hosted deployment, see [docs/OAUTH_WORKOS.md](docs/OAUTH_WORKOS.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#oauth-resource-server)) signs
 users in and issues JWT access tokens, and the server only checks them.
 
@@ -786,7 +792,8 @@ using bearer tokens beside it (`PSCAT_MCP_AUTH=bearer,oauth`).
 Either way the provider must issue the access token with the audience set
 to `PSCAT_MCP_OAUTH_RESOURCE` (RFC 8707's `resource` parameter, which MCP
 clients send). An end-to-end sign-in from ChatGPT or claude.ai has not been
-tried yet: it needs a chosen identity provider and a deployment.
+tried yet: it needs AuthKit configured and a deployment
+([`docs/OAUTH_WORKOS.md`](docs/OAUTH_WORKOS.md)).
 
 **No authentication, for staging (`none`).** `PSCAT_MCP_AUTH=none` (or
 `bearer,none`) lets a request that carries no credential in as the
@@ -1079,6 +1086,7 @@ scripts/container-smoke.sh    # needs Docker
 scripts/container-eval.sh     # server-layer evals against the image; needs Docker
 scripts/agent-eval.sh --test  # offline unit tests of the agent evals
 python3 -I -m unittest discover -s evals/server -t evals/server   # recorder tests
+python3 -I -m unittest discover -s scripts/tests -t scripts/tests   # scripts/oauth-check.py tests
 ```
 
 GitHub Actions runs these on every pull request and push to `main`:
@@ -1088,7 +1096,8 @@ GitHub Actions runs these on every pull request and push to `main`:
   * the test suite on Linux and macOS;
   * a `cargo check` with the minimum Rust version in `Cargo.toml`;
   * the agent evals' offline unit tests (no model);
-  * the offline unit tests of the server evals' recorder.
+  * the offline unit tests of the server evals' recorder;
+  * the offline unit tests of `scripts/oauth-check.py`.
 * `.github/workflows/container.yml`: the amd64 image, the smoke test, and
   the server-layer evals against that image.
 
@@ -1110,6 +1119,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/artifacts_gcs.rs` | the Cloud Storage store (#140) against a local fake of the metadata server, IAM Credentials and Cloud Storage (no Google endpoint is called; the fake IAM signs a blob as its SHA-256, so the test recomputes the signature): the exact upload (path, `uploadType=multipart&ifGenerationMatch=0`, bearer token, metadata `name`, `contentType`, `contentDisposition`, the bytes) and the exact signed URL for a fixed injected time, built independently in the test, with `expires_at`; a three-page manifest under one `render_id`; the token cached, fetched once by concurrent calls, refreshed 300 s before expiry or at half a short life; the signer from the metadata server once, or the configured one with no fetch; the per-principal quota within the TTL; the metadata server down, Storage 412 and 500, IAM 403, each endpoint hanging past the timeout and nothing listening all `storage_unavailable` with no URL, token, bucket or body in the message; the start-up checks (bucket required, prefix, TTL over 7 days, signer, endpoint overrides, `none` refused); through the tools, `url` links in all three places for `render_postscript`, `handwrite` and `review_sheet`, `resources/read` serving nothing, `inline` uploading nothing, a failed upload or signing an error for `url` and an inline result with `delivery_note` for `both`, `auto` and a `start_render` job, the quota refusing `url` and `both` alike, the tool description; and, through the binary over HTTP at the default filter and `pscat_mcp=trace`, no signature, credential, token, response body or render id in the logs, one WARN line with codes only, and the capture file recording a signed URL sent back in a tool argument and in `Mcp-Name` with its query redacted. Unit tests in `src/gcs.rs` check the canonical request and string-to-sign against Google's conformance vectors |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth` without its settings, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
+| `scripts/tests/test_oauth_check.py` | `scripts/oauth-check.py` (offline, no model, no server): synthetic unsigned tokens against the checklist that mirrors `src/oauth.rs` (shape, `alg`/`crit`/`kid`, the `kid` and key fit in a JWKS, `iss`, `aud` as string or array, `exp`/`nbf` with leeway, `sub`, scopes, `email_verified` as a JSON boolean, `sub:`/`email:` allowlist entries); JWKS discovery against a loopback server; exit codes; the token and its signature never appear in the output, and a token on the command line is rejected without being echoed |
 | `tests/oauth.rs` | the `oauth` method against a local mock authorization server: valid RS256 and ES256 tokens, an audience array and a verified email are accepted; expired, without `exp`, not yet valid, wrong or missing audience, wrong issuer, bad signature, tampered payload, an ES256 header on the RSA key, an HS256 token signed with the public key, `alg: none`, an unknown `kid`, no `sub`, a non-JWT and an oversized token get `401 invalid_token`; a user not on the allowlist (or with an unverified email) gets `403 not_allowed` without an `error` parameter; missing scopes get `403 insufficient_scope`; no PostScript runs for any refused request; `bearer,oauth` accepts a static token without contacting the issuer and a JWT, and answers garbage with one merged challenge; the Protected Resource Metadata is served at both well-known paths without auth (the `resource_metadata` URL of a real 401 included), independent of `Host`, and not at all without `oauth`; a hung issuer bounds JWT requests by the JWKS timeout with one fetch between them while requests without a JWT (static token, no header, garbage; `oauth` first or alone) go straight through; a known key past its TTL is used without waiting while the issuer hangs; unknown `kid`s trigger one JWKS fetch, and a rotated key is picked up; discovery (RFC 8414, OpenID Connect fallback, explicit JWKS URL, a mismatched issuer refused); the binary refuses an incomplete or unsafe configuration without echoing allowlist entries, and its logs carry `auth_method=oauth` and fixed reasons but never a subject, email or token |
 | `tests/auth_none.rs` | the explicit no-auth mode (deprecated) and its guard rails, mostly through the real binary over HTTP: `none` alone admits an anonymous request, logged as `auth_method=none` with a startup warning and no client address in the logs; `bearer,none` admits no header as anonymous and a valid token as bearer, and a wrong or malformed token is `401` (in either list order, never anonymous); without `none`, nothing is anonymous and the `PSCAT_MCP_AUTH_NONE_*` settings alone change nothing; only an explicit `none` runs off loopback; the CIDR allowlist (`403 source_not_allowed`, no bare `401`); the rate limit (`429` with `Retry-After`, repeated, a valid token never counted); a forged `X-Forwarded-For` can neither escape the allowlist nor reset or spend another client's limit, with and without a trusted hop; the startup refusals (an invalid time, a bad CIDR, a zero limit, async jobs, Tasks or memory artifact links with `none`; `oauth,none`, `none,oauth` and `bearer,oauth,none` refused while `bearer,none` and `bearer,oauth` start); an already expired time starting with `none` disabled (`bearer,none`: a token is `200`, no header is `403 unauthenticated_access_expired`, the startup log warns and `auth_methods` lists only `bearer`; `none` alone: every request is `403`); and, in-process with an injected clock, the refusal after the expiry of a running server |
 | `tests/eval_server.rs` + `evals/server/scenarios/` | server-layer evals, no model: JSON scenario files (the agent evals' format) run with the rmcp client over stdio, over HTTP with a bearer token, over HTTP with async jobs on (`PSCAT_MCP_ASYNC_JOBS=true`, so scenario 66 runs there too) and, with `scripts/container-eval.sh`, in the container image. Steps call a tool or send another request (`resources/read`, `prompts/get`, ...). Exact assertions on `isError` and the error code, JSON-RPC errors, content block and MIME types, PNG size and pixel samples, SVG and PDF signatures, `structuredContent` fields, elapsed-time bounds and the number of renders executed: the first prompt in LOCAL_TESTING, every scenario in `examples/agent-scenarios.md`, and every error code (`timeout`, `limit_exceeded`, `server_busy`, ...) except `cancelled` (`tests/mcp_cancel.rs`) and `storage_unavailable` (`tests/artifacts_gcs.rs`, which needs a fake of the Google APIs). Prints a table and writes JSON and JUnit to `target/eval/`. See [Server-layer evals](docs/LOCAL_TESTING.md#10-server-layer-evals) |
