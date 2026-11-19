@@ -616,7 +616,10 @@ impl RenderService {
     /// A service running jobs on `backend` under `limits`.
     pub fn new(backend: Arc<dyn RenderBackend>, limits: LimitsConfig) -> Self {
         let slots = Arc::new(Semaphore::new(limits.concurrency()));
-        let per_principal = Arc::new(PrincipalSlots::new(limits.renders_per_principal()));
+        let per_principal = Arc::new(PrincipalSlots::new(
+            limits.renders_per_principal(),
+            limits.renders_per_principal_all_methods(),
+        ));
         RenderService {
             per_principal,
             jobs: Arc::new(JobStore::new(JobsConfig::default(), &limits)),
@@ -867,11 +870,9 @@ impl RenderService {
                     .running_permit()
                     .await
                     .ok_or_else(shutting_down)?;
-                let principal = match service.per_principal.cap {
-                    Some(_) if owner != LOCAL_PRINCIPAL => {
-                        Some(service.per_principal.acquire(&owner).await)
-                    }
-                    _ => None,
+                let principal = match service.per_principal.cap_for(&owner) {
+                    Some(_) => Some(service.per_principal.acquire(&owner).await),
+                    None => None,
                 };
                 let global = service
                     .slots
@@ -1247,10 +1248,9 @@ impl RenderService {
     async fn slot(&self, owner: Option<&str>) -> Result<Slot, RenderError> {
         let waited = Instant::now();
         let until = tokio::time::Instant::from_std(waited + self.limits.queue_timeout());
-        // The one local user of stdio is not limited.
-        let owner = owner.filter(|o| *o != LOCAL_PRINCIPAL);
-        let principal = match (owner, self.per_principal.cap) {
-            (Some(owner), Some(cap)) => Some(
+        let capped = owner.and_then(|o| Some((o, self.per_principal.cap_for(o)?)));
+        let principal = match capped {
+            Some((owner, cap)) => Some(
                 tokio::time::timeout_at(until, self.per_principal.acquire(owner))
                     .await
                     .map_err(|_| {
@@ -1281,7 +1281,7 @@ impl RenderService {
                         err
                     })?,
             ),
-            _ => None,
+            None => None,
         };
         let global = tokio::time::timeout_at(until, self.slots.clone().acquire_owned())
             .await
@@ -1397,15 +1397,31 @@ pub(crate) struct Slot {
 /// set of principals rendering right now, however many sign in over time.
 pub(crate) struct PrincipalSlots {
     cap: Option<usize>,
+    /// Whether every method's principals are capped (an explicit setting),
+    /// or only OAuth users (the default).
+    all_methods: bool,
     held: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
 
 impl PrincipalSlots {
-    fn new(cap: Option<usize>) -> Self {
+    fn new(cap: Option<usize>, all_methods: bool) -> Self {
         PrincipalSlots {
             cap,
+            all_methods,
             held: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The cap that applies to `owner`, if any: none for stdio's one local
+    /// user; by default only OAuth users (`oauth:` ids) are capped, so a
+    /// shared bearer token and `none`'s one `anonymous` principal are not;
+    /// with an explicit setting every other principal is.
+    fn cap_for(&self, owner: &str) -> Option<usize> {
+        let cap = self.cap?;
+        if owner == LOCAL_PRINCIPAL {
+            return None;
+        }
+        (self.all_methods || owner.starts_with("oauth:")).then_some(cap)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Semaphore>>> {
@@ -2121,9 +2137,12 @@ mod tests {
 
         // A holds its one share; its second call waits out the queue
         // timeout without taking the free slot, and is refused as busy.
-        let a1 = spawn("token#0", "a1");
+        let a1 = spawn("oauth:aaaa", "a1");
         wait_for("a1 to start", || started() == 1).await;
-        let err = svc.render_as(Some("token#0"), req("a2")).await.unwrap_err();
+        let err = svc
+            .render_as(Some("oauth:aaaa"), req("a2"))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::ServerBusy, "{err}");
         assert_eq!(
             err.input.as_ref().map(|i| i.code.as_str()),
@@ -2139,12 +2158,12 @@ mod tests {
         // A's render ends: A gets a slot again.
         backend.gate("a1").add_permits(1);
         a1.await.unwrap().unwrap_err(); // no artifacts: worker_failed
-        let a3 = spawn("token#0", "a3");
+        let a3 = spawn("oauth:aaaa", "a3");
         wait_for("a3 to start", || started() == 3).await;
         // A's render is cancelled (the call dropped): A gets a slot again.
         a3.abort();
         assert!(a3.await.unwrap_err().is_cancelled());
-        let a4 = spawn("token#0", "a4");
+        let a4 = spawn("oauth:aaaa", "a4");
         wait_for("a4 to start", || started() == 4).await;
 
         // Every share freed, the map is empty again.
@@ -2166,12 +2185,71 @@ mod tests {
         let _ = (l1.await, l2.await);
     }
 
+    #[test]
+    fn the_default_cap_is_for_oauth_users_and_an_explicit_one_for_all() {
+        let slots = |cap: Option<usize>| {
+            let l = LimitsConfig {
+                max_concurrent_renders: Some(2),
+                max_renders_per_principal: cap,
+                ..LimitsConfig::default()
+            };
+            PrincipalSlots::new(
+                l.renders_per_principal(),
+                l.renders_per_principal_all_methods(),
+            )
+        };
+        // Default: only OAuth users; a shared bearer token, `none`'s one
+        // `anonymous` and stdio's local user are not capped.
+        let d = slots(None);
+        assert_eq!(d.cap_for("oauth:0123abcd"), Some(1));
+        for id in ["token#0", "anonymous", LOCAL_PRINCIPAL] {
+            assert_eq!(d.cap_for(id), None, "{id}");
+        }
+        // Explicit: every principal but stdio's.
+        let e = slots(Some(1));
+        for id in ["oauth:0123abcd", "token#0", "anonymous"] {
+            assert_eq!(e.cap_for(id), Some(1), "{id}");
+        }
+        assert_eq!(e.cap_for(LOCAL_PRINCIPAL), None);
+        // 0: off for all.
+        assert_eq!(slots(Some(0)).cap_for("oauth:0123abcd"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bearer_token_takes_every_slot_by_default() {
+        let backend = Arc::new(Gated::default());
+        let limits = LimitsConfig {
+            max_concurrent_renders: Some(2),
+            queue_timeout_ms: 200,
+            ..LimitsConfig::default()
+        };
+        let svc = Arc::new(RenderService::new(backend.clone(), limits));
+        let calls: Vec<_> = ["t1", "t2"]
+            .into_iter()
+            .map(|src| {
+                let svc = svc.clone();
+                tokio::spawn(async move { svc.render_as(Some("token#0"), req(src)).await })
+            })
+            .collect();
+        wait_for("both renders to start", || {
+            backend.started.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        assert_eq!(svc.per_principal.tracked(), 0);
+        for c in calls {
+            c.abort();
+            let _ = c.await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_waiting_job_takes_its_share_and_gives_it_back() {
         let backend = Arc::new(Gated::default());
         let limits = LimitsConfig {
             max_concurrent_renders: Some(4),
             queue_timeout_ms: 200,
+            // Explicit, so the plain owner `p` is capped too.
+            max_renders_per_principal: Some(2),
             ..LimitsConfig::default()
         };
         let jobs = JobsConfig {

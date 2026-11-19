@@ -334,7 +334,8 @@ impl LimitsConfig {
 
     /// Render slots one principal may hold at once, or `None` when there
     /// is no such limit: turned off (0), or at or above the slot count. The
-    /// default is half the slots, rounded up, at least 1.
+    /// default is half the slots, rounded up, at least 1. Whom it applies
+    /// to is [`Self::renders_per_principal_all_methods`].
     pub fn renders_per_principal(&self) -> Option<usize> {
         let slots = self.concurrency();
         let cap = match self.max_renders_per_principal {
@@ -343,6 +344,15 @@ impl LimitsConfig {
             None => slots.div_ceil(2).max(1),
         };
         (cap < slots).then_some(cap)
+    }
+
+    /// Whether the per-principal cap applies to every auth method's
+    /// principals (the setting given explicitly, above 0) or, by default,
+    /// only to OAuth users (`oauth:` ids): a bearer token is often shared
+    /// by several clients (CI, scripts, a developer's agent), so it is
+    /// capped only on request. stdio's local user is never capped.
+    pub fn renders_per_principal_all_methods(&self) -> bool {
+        self.max_renders_per_principal.is_some_and(|n| n > 0)
     }
 
     /// Queue wait before `server_busy`.
@@ -1583,6 +1593,10 @@ mod tests {
         assert_eq!(with(4, Some(4)).renders_per_principal(), None);
         assert_eq!(with(4, Some(9)).renders_per_principal(), None);
         assert_eq!(with(4, Some(3)).renders_per_principal(), Some(3));
+        // By default only OAuth users; an explicit value caps every method.
+        assert!(!with(2, None).renders_per_principal_all_methods());
+        assert!(!with(2, Some(0)).renders_per_principal_all_methods());
+        assert!(with(2, Some(1)).renders_per_principal_all_methods());
     }
 
     #[test]

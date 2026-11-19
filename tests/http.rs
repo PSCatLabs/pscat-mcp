@@ -630,9 +630,6 @@ impl RenderBackend for CountingBackend {
 async fn concurrent_renders_are_isolated_and_bounded() {
     let limits = LimitsConfig {
         max_concurrent_renders: Some(2),
-        // One token sends every call: the per-principal cap (issue #160,
-        // tested on its own below) would hold it to one slot.
-        max_renders_per_principal: Some(0),
         ..LimitsConfig::default()
     };
     let max = Arc::new(AtomicUsize::new(0));
@@ -763,7 +760,8 @@ async fn full_queue_returns_server_busy() {
     .await;
 }
 
-/// The per-principal cap (issue #160): with 2 slots each token may hold 1.
+/// The per-principal cap (issue #160), set explicitly so that it covers
+/// bearer tokens: with 2 slots each token may hold 1.
 /// The first token's never-ending render holds its share, so its second
 /// call is refused as `server_busy` while the free slot stays free, and the
 /// other token's call takes it. Once the first render is cancelled (its
@@ -778,6 +776,8 @@ async fn one_token_cannot_take_every_slot() {
         render_timeout_ms: 60_000,
         interp_time_limit_ms: Some(0),
         max_steps: 0,
+        // Explicit: by default only OAuth users are capped.
+        max_renders_per_principal: Some(1),
         ..LimitsConfig::default()
     };
     assert_eq!(limits.renders_per_principal(), Some(1));

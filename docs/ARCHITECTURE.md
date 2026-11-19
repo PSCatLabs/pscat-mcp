@@ -775,7 +775,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Pages returned | worker | 10 |
 | Program stdout returned | worker (truncates) | 16 KiB |
 | Concurrent renders | server semaphore, queue timeout → `server_busy` | min(CPUs, 4) |
-| Renders per principal | one semaphore per principal holding or waiting for a slot, taken before the shared slot within the same queue timeout → `server_busy`, `error.input.code` `renders_per_principal`; async jobs wait for it without a timeout; stdio's local user is exempt; 0 turns it off | half the slots, rounded up |
+| Renders per principal | one semaphore per principal holding or waiting for a slot, taken before the shared slot within the same queue timeout → `server_busy`, `error.input.code` `renders_per_principal`; async jobs wait for it without a timeout; stdio's local user is exempt. Unset, only OAuth users (`oauth:` ids) are capped, since bearer tokens are often shared; set explicitly, every principal is (all of `none`'s anonymous callers are one, `anonymous`); 0 turns it off | half the slots, rounded up (OAuth users only) |
 | Client cancel / disconnect | dropping the future kills the worker (`kill_on_drop`) | — |
 | Async job deadline | server: SIGKILL of the worker; PSCat's time limit and `RLIMIT_CPU` follow it | 10 min |
 | Async job steps | PSCat `Limits::max_steps` | 25·10⁹ |

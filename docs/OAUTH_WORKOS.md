@@ -218,9 +218,11 @@ holds no personal data, so an env var is fine for it).
 * Startup logs a WARN (`the OAuth allowlist has verified:*`), and the
   `listening` line's `auth` summary says `any verified email (verified:*)`.
   Like every entry, it is read once at startup.
-* Cost: any such user can spend render time. One user holds at most
-  `PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL` render slots at once (by default
-  half, so one of two), so one user cannot block the others, but only
+* Cost: any such user can spend render time. By default one OAuth user
+  holds at most half the render slots (one of two), so one user cannot
+  block the others; bearer tokens are not capped unless
+  `PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL` is set explicitly, which caps every
+  method. Only
   `--max-instances` and a budget alert bound the total
   ([`AUTH_STRATEGY.md`](AUTH_STRATEGY.md), Q2).
 
