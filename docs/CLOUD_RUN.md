@@ -319,6 +319,7 @@ old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
    ```bash
    openssl rand -base64 48 | tr -d '\n' | \
      gcloud secrets create pscat-link-secret --project PROJECT --data-file=-
+   # Version 1. Mount explicit versions, never `latest`: see rotation below.
    gcloud secrets add-iam-policy-binding pscat-link-secret --project PROJECT \
      --member serviceAccount:SA --role roles/secretmanager.secretAccessor
    ```
@@ -328,7 +329,7 @@ old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
 
    ```bash
    gcloud run services update SERVICE --region REGION \
-     --update-secrets /secrets/link/secret=pscat-link-secret:latest \
+     --update-secrets /secrets/link/secret=pscat-link-secret:1 \
      --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE=/secrets/link/secret,PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=https://HOST
    ```
 
@@ -337,15 +338,19 @@ old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
    with a new revision, as for the allowlist. Every instance reads the same
    secret, so a link made by one instance opens on any other.
 
-3. **Rotation.** Add a new version, mount the old one as the previous
-   secret, deploy, and drop it once links made before have expired (at
-   most `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` later):
+3. **Rotation.** Add a new version (say `2`), deploy with it as the
+   current secret and the old one (`1`) as the previous, and drop the
+   previous once links made before have expired (at most
+   `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` later). Pin version numbers: with
+   `latest`, an instance of the old revision that starts after the new
+   version is added would read it as its only secret, and links made by its
+   still-running siblings would get `403` there.
 
    ```bash
    openssl rand -base64 48 | tr -d '\n' | \
      gcloud secrets versions add pscat-link-secret --project PROJECT --data-file=-
    gcloud run services update SERVICE --region REGION \
-     --update-secrets /secrets/link/secret=pscat-link-secret:latest,/secrets/link-previous/secret=pscat-link-secret:OLD_VERSION \
+     --update-secrets /secrets/link/secret=pscat-link-secret:2,/secrets/link-previous/secret=pscat-link-secret:1 \
      --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE=/secrets/link-previous/secret
    ```
 
@@ -357,7 +362,13 @@ the capability. A refused link (wrong token, path or expiry) costs nothing
 but a hash; a valid one costs one IAM `signBlob` call on the instance that
 answers it, so the IAM quota is what someone holding valid links can spend
 by opening them over and over. There is no per-IP rate limit on it. The
-request logs show the path as `/a/[redacted]`, never the query.
+server's own logs show the path as `/a/[redacted]`, never the query.
+**Cloud Run's request log** (`run.googleapis.com/requests`), and any proxy
+or load balancer in front, is outside the server: it most likely records the
+full URL, query included, so it would hold working links for their TTL
+(verify on staging, `LOCAL_TESTING.md`, "Short-link check"). Restrict who
+can read those logs, or add a log exclusion for `httpRequest.requestUrl`
+containing `/a/`.
 
 ## Font packs
 

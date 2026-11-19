@@ -387,7 +387,10 @@ sooner, with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
   method `405`, each with a fixed short body. A refused link costs no IAM
   call. The request span logs the path as `/a/[redacted]`; no line logs the
   query, the token or the `render_id` (one DEBUG line has the outcome), and
-  a signing failure is one WARN line with codes only.
+  a signing failure is one WARN line with codes only. That covers the
+  server's own logs: a platform request log in front (Cloud Run's) or a
+  proxy most likely records the full URL, query included; see
+  [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#short-links).
 * **The origin** is `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` (`https://host[:port]`,
   no path), by default the origin of `PSCAT_MCP_OAUTH_RESOURCE` when that is
   an `https` URL. `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`, or no origin at
@@ -730,7 +733,7 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_ARTIFACT_BUCKET` | unset | `gcs`: the bucket objects are uploaded to; required with `gcs` |
 | `PSCAT_MCP_ARTIFACT_PREFIX` | `renders/` | `gcs`: the object name prefix (objects are `<prefix><render_id>/<n>.<ext>`): letters, digits, `.`, `_`, `-` and `/`, ending in `/`, with no leading `/`, empty segment or `..` |
 | `PSCAT_MCP_ARTIFACT_SIGNER` | the metadata server's default account | `gcs`: the service account whose Google-managed key signs the URLs, through IAM Credentials `signBlob`; the runtime account needs the Token Creator role on it |
-| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | the origin of `PSCAT_MCP_OAUTH_RESOURCE` when that is `https`, else none | `gcs`, `serve-http`: the server's `https` origin (`https://host[:port]`, no path); links are then [short links](#short-links) on it that redirect to a signed URL minted when opened, and need `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. `direct`, or no origin: the links are the V4 signed URLs |
+| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | the origin of `PSCAT_MCP_OAUTH_RESOURCE` when that is `https` (even with `oauth` not in `PSCAT_MCP_AUTH`), else none | `gcs`, `serve-http`: the server's `https` origin (`https://host[:port]`, no path); links are then [short links](#short-links) on it that redirect to a signed URL minted when opened, and need `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. `direct`, or no origin: the links are the V4 signed URLs |
 | `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` | unset | short links: a file with the secret their tokens are made with, at least 32 bytes (a trailing newline aside), read once at startup, never logged; the same on every instance (a mounted Secret Manager secret). Required with a public origin |
 | `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` | unset | short links: a file with the previous secret, still accepted after a rotation |
 | `PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS` | 10000 | `gcs`: the timeout of each call to the metadata server, IAM Credentials or Cloud Storage |

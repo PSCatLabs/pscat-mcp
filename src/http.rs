@@ -180,7 +180,8 @@ pub fn authenticator_with(
     {
         tracing::warn!(
             "PSCAT_MCP_OAUTH_* settings are given but `oauth` is not in PSCAT_MCP_AUTH; they are \
-             ignored"
+             ignored (except PSCAT_MCP_OAUTH_RESOURCE as the default public origin of gcs short \
+             links)"
         );
     }
     let Some(kinds) = kinds else {

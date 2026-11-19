@@ -1200,10 +1200,15 @@ the result below when it is.
 4. A link a model copied into its answer (ChatGPT, with `utm_source`
    appended), opened from the chat: the PNG downloads.
 5. One token character changed: `403 forbidden`. After the TTL: `410`.
-6. Search the logs of the window for the render id, the token, `e=` and
-   `utm_source`: expect no match; the request lines show `/a/[redacted]`.
+6. Search the service's own stdout/stderr logs of the window for the
+   render id, the token, `e=` and `utm_source`: expect no match; the
+   request lines show `/a/[redacted]`.
+7. Look at Cloud Run's request log (`run.googleapis.com/requests`) for the
+   same window and record whether `httpRequest.requestUrl` holds the full
+   link with its query. If it does, add the log exclusion described in
+   [`CLOUD_RUN.md`](CLOUD_RUN.md#short-links) or restrict access to it.
 
 | Item | Result |
 |---|---|
 | Date, revision | not run |
-| Steps 1 to 6 | not run |
+| Steps 1 to 7 | not run |
