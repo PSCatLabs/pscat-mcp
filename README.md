@@ -309,7 +309,8 @@ result has the same shape as with memory links: `render_id`, a
 `download_url` and `expires_at` on each `artifacts` entry, a
 `resource_link` block per artifact, and a short text block, except that every
 link is the `https://storage.googleapis.com/<bucket>/<object>?X-Goog-...`
-signed URL itself. `resources/read` serves nothing for them.
+signed URL itself, or, with a public origin, a short link on this server
+(see [Short links](#short-links)). `resources/read` serves nothing for them.
 
 * **Uploads** are one `multipart` JSON-API upload per object with
   `ifGenerationMatch=0`, so an existing object is never overwritten, and
@@ -347,6 +348,61 @@ signed URL itself. `resources/read` serves nothing for them.
   `PSCAT_MCP_ALLOW_UNAUTHENTICATED` (loopback only) `gcs` still starts, and
   every local caller shares the one `anonymous` quota and can mint signed
   URLs.
+
+#### Short links
+
+A V4 signed URL is about 700 characters, and it signs every query
+parameter. A client that appends one (ChatGPT adds `utm_source=chatgpt.com`)
+gets `403 SignatureDoesNotMatch`, and so does a link whose 512-hex-digit
+signature a model re-typed (#163). With a **public origin**, the server's
+own `https` origin as clients reach it, the links are short instead:
+
+```
+https://<origin>/a/<render_id>/<n>.<ext>?e=<expiry, unix seconds>&s=<token>
+```
+
+about 100 characters, the same in the `resource_link`, `download_url`, the
+text and the manifest, with `e` the instant `expires_at` reports. Opening
+one (`GET` or `HEAD /a/...`, no `Authorization`, like `/health`) answers
+`302` to a V4 signed URL for that object, minted at that moment through
+`signBlob` and working for 60 s, or until the link expires if that is
+sooner, with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+
+* **The token** is the first 128 bits of an HMAC-SHA-256, base64url (22
+  characters), over a domain-separated message of the `render_id`, `n`, the
+  extension and `e`, keyed by a secret read once at startup from
+  `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` (at least 32 bytes, a trailing
+  newline aside; never logged). Every instance needs the same secret. For
+  rotation, `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` holds the previous
+  one, which is still accepted; links are always made with the current one.
+  Tokens are compared in constant time.
+* **Only the object the token covers.** The path is parsed strictly (a
+  lowercase UUID as minted, `n` from 1 with no leading zero, `png`, `svg`,
+  `pdf` or `bin`) and the object name is built from it, so a path or a
+  parameter never selects another object. Unknown query parameters are
+  ignored, and so is anything glued onto the token (`...&s=<token>?utm_source=...`).
+* **Answers carry no detail:** a malformed path is `404`, a missing or wrong
+  token (or a changed `e`, path or extension) `403`, a genuine expired link
+  `410`, a failed signing (IAM or the metadata server down) `503`, another
+  method `405`, each with a fixed short body. A refused link costs no IAM
+  call. The request span logs the path as `/a/[redacted]`; no line logs the
+  query, the token or the `render_id` (one DEBUG line has the outcome), and
+  a signing failure is one WARN line with codes only. That covers the
+  server's own logs: a platform request log in front (Cloud Run's) or a
+  proxy most likely records the full URL, query included; see
+  [`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#short-links).
+* **Opt-in.** Short links are on only when `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`
+  is set (`https://host[:port]`, no path). Unset (the default) or `direct`,
+  the links are the V4 signed URLs, exactly as before, and no secret is
+  needed; nothing else, `PSCAT_MCP_OAUTH_RESOURCE` included, turns them on.
+  The server **refuses to start** with `gcs`, a public origin and no secret
+  file; a secret file with no origin, and a public origin with `memory` or
+  `off` links, are ignored with a warning. `serve-stdio` refuses a public
+  origin: it serves no `/a/` route.
+* **Signing moves to the click.** With short links a render uploads and
+  signs nothing; a signing failure then shows as the `503` when the link is
+  opened, not as `storage_unavailable` at render time. Each open costs one
+  `signBlob` call on the instance that answers it.
 
 **Async jobs and Tasks.** `start_render` takes `delivery` too (an unusable
 one is refused before the job is accepted), and it is applied when the result
@@ -678,6 +734,9 @@ and `pscat-mcp-server serve-http --help`. The main ones:
 | `PSCAT_MCP_ARTIFACT_BUCKET` | unset | `gcs`: the bucket objects are uploaded to; required with `gcs` |
 | `PSCAT_MCP_ARTIFACT_PREFIX` | `renders/` | `gcs`: the object name prefix (objects are `<prefix><render_id>/<n>.<ext>`): letters, digits, `.`, `_`, `-` and `/`, ending in `/`, with no leading `/`, empty segment or `..` |
 | `PSCAT_MCP_ARTIFACT_SIGNER` | the metadata server's default account | `gcs`: the service account whose Google-managed key signs the URLs, through IAM Credentials `signBlob`; the runtime account needs the Token Creator role on it |
+| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | unset (direct V4 signed URLs) | `gcs`, `serve-http`: the server's `https` origin (`https://host[:port]`, no path); links are then [short links](#short-links) on it that redirect to a signed URL minted when opened, and need `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. `direct`, or no origin: the links are the V4 signed URLs. Opt-in only: `PSCAT_MCP_OAUTH_RESOURCE` does not set it. Ignored, with a warning, with `memory` or `off` links |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` | unset | short links: a file with the secret their tokens are made with, at least 32 bytes (a trailing newline aside), read once at startup, never logged; the same on every instance (a mounted Secret Manager secret). Required with a public origin |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` | unset | short links: a file with the previous secret, still accepted after a rotation |
 | `PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS` | 10000 | `gcs`: the timeout of each call to the metadata server, IAM Credentials or Cloud Storage |
 | `PSCAT_MCP_ARTIFACT_GCS_METADATA_ENDPOINT` / `_IAM_ENDPOINT` / `_STORAGE_ENDPOINT` | unset | **for tests only**, hidden from `--help`: the base URLs of the metadata server, IAM Credentials and Storage uploads, to point `gcs` at a local fake; `https`, or `http` on a loopback host, with no path. Never set them in a deployment. Signed URLs always name `https://storage.googleapis.com` |
 | `PSCAT_MCP_LOG_FORMAT` | `json` (http) / `pretty` (stdio) | log format; `RUST_LOG` sets the level and, when set, replaces the default filter `info`; the `rmcp` crate's own targets are held to WARN and ERROR whatever `RUST_LOG` says, because rmcp logs whole JSON-RPC messages below WARN (the client's `initialize` parameters, requests with their arguments, results with their artifact links), so `RUST_LOG=trace` or `rmcp=trace` logs none of them; our own `pscat_mcp` targets follow `RUST_LOG` (`pscat_mcp=debug` works) |
@@ -947,7 +1006,12 @@ absence of a key, is the boundary. A signed URL is a bearer capability:
 anyone holding it can fetch that one object until it expires, so it is
 never logged, never put in an error message, and capture mode records any
 `http(s)` URL a client sends with its query string (where the signature
-is) redacted. Use a short TTL and a bucket with uniform access, public
+is) redacted. A short link (#163) is a bearer capability too, for its
+whole TTL: its path is logged as `/a/[redacted]`, its query never, and
+capture mode redacts its `render_id` and query. Its route needs no
+`Authorization`, so anyone can make the server check a token; a link that
+verifies costs one IAM `signBlob` call, so the instance's IAM quota is what
+a holder of valid links can spend. Use a short TTL and a bucket with uniform access, public
 access prevention and a 1-day lifecycle rule
 ([`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#cloud-storage-artifact-links)).
 
@@ -985,6 +1049,8 @@ control is enforced by PSCat and which by the server.
   instance's memory. Objects stay in the bucket until its lifecycle rule
   deletes them, whatever the TTL. Only a fake of the Google APIs is used in
   CI; the real-bucket check is in [`docs/LOCAL_TESTING.md`](docs/LOCAL_TESTING.md#real-bucket-check).
+  A short link works until its `e` and cannot be revoked either, short of
+  rotating the link secret with no previous secret (which ends every link).
 * **SVG output is large, so a large SVG is a blob.** PSCat draws text as
   glyph outlines (paths, not `<text>` elements) and a gradient as many
   separate shapes, so an SVG grows quickly: an 88 KB SVG came from a
@@ -1149,9 +1215,9 @@ GitHub Actions runs these on every pull request and push to `main`:
 | `tests/guide.rs` | prompts and resources over stdio: `guide/` is byte for byte `plugin/skills/` of the pinned PSCat checkout in `$CARGO_HOME/git/checkouts` (found without running cargo, so it can't wait on the package-cache lock; the byte comparison is skipped with a message when the checkout isn't there, and fails when `CI` is set), and `guide/SOURCE.json` names the commit in `Cargo.lock`; `initialize` advertises prompts and resources; every resource listed and read (the note, then PSCat's text verbatim; under 24 KB; the note lists exactly this server's tools); every prompt with and without arguments; the font-pack line (none without a pack directory; with the `cjk-thai` fixture, the pack the catalog lists, and each size as read); with a worker that cannot start, the guide says the packs "could not be read just now" and prompts still answer, and once the worker starts the next request lists the packs (a failed catalog read is not kept); unknown URIs and prompts and bad arguments as MCP errors; every runnable `postscript` block in the guides renders, and every library they name loads |
 | `tests/font_pack.rs` | the font-pack directory with a 13 KB `cjk-thai` stand-in (`tests/data/font-pack`): the worker finds the pack face and, unset, does not; a `fonts/catalog/` beside a copy of the server binary (the executable-directory case) is found with the setting unset, and the same copy without it is not; the catalog lists the pack and no path (also in `get_renderer_info`); programs cannot read the directory (absolute, relative, `..`, symlink out, `filenameforall`, a planted `lib/`), nor write there; the worker's environment is `PSCAT_HOME` only (a fake worker), and the server's `HOME`, `XDG_DATA_HOME`, `PSCAT_HOME` and `PSCAT_ROOT` are not inherited; a Japanese `review_sheet` label differs from `???` with the pack and is identical without it; a missing path or a file refuses to start; `filename status` answers for the compiled-in `lib/` only (not a planted `lib/`) and is `false` for every other name |
 | `tests/mcp_cancel.rs` | `notifications/cancelled` for an in-flight render kills its worker and frees the render slot |
-| `tests/logging.rs` | the log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, also with `RUST_LOG` raising `rmcp` to INFO or TRACE; over HTTP the same line is absent by default and with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line; artifact links: a `delivery: url` render and the `resources/read` of its link leave neither the `render_id`, a `pscat://render/` link nor the artifact's bytes in the logs (default filter, `pscat_mcp=trace`, `rmcp=trace,pscat_mcp=trace` and `trace`) or in the capture file, which records the read with the id redacted, and a not-found read does not echo the link; the rmcp clamp: no rmcp line below WARN under those filters, and an rmcp WARN (a request with a disallowed `Origin`) still logged at `trace` |
+| `tests/logging.rs` | the log filter: over stdio, an `initialize` whose `clientInfo.name` is a marker leaves the marker and rmcp's "Service initialized as server" line out of stderr, also with `RUST_LOG` raising `rmcp` to INFO or TRACE; over HTTP the same line is absent by default and with the override; the error codes in the logs: over HTTP, a memory hog, a step loop, an interpreter time limit and a PostScript error each log a `render finished` line with its wire `code` (and `limit`), a queue timeout logs one `server_busy` line with `queue_wait_ms`, and no source, defined name, error command or token is in any line; artifact links: a `delivery: url` render and the `resources/read` of its link leave neither the `render_id`, a `pscat://render/` link nor the artifact's bytes in the logs (default filter, `pscat_mcp=trace`, `rmcp=trace,pscat_mcp=trace` and `trace`) or in the capture file, which records the read with the id redacted, and a not-found read does not echo the link; the rmcp clamp: no rmcp line below WARN under those filters, and an rmcp WARN (a request with a disallowed `Origin`) still logged at `trace`; a short-link path (`/a/<render_id>/...?e=...&s=...`) logged as `/a/[redacted]` with no id, token or query at any filter |
 | `tests/artifacts.rs` | artifact delivery (#139) over an in-process pipe and over HTTP: with no store, `delivery` `inline` or `auto`, and with the memory store, no `delivery`, `inline` or `auto` under the threshold, every tool's result (PNG pages, SVG, PDF, `chalkboard_math`, `handwrite`, `review_sheet`) is the same as today's, with no link field; `url`/`both` with no store `invalid_request` (`error.input.code` `delivery`, a message saying to retry with `delivery: "inline"`, `start_render` too); `url` a manifest of one `resource_link` per page (three pages) with `download_url`, `expires_at` and `render_id`, the links named in the text, no bytes inline and `resources/read` returning each page; `both` the same bytes inline and by link for PNG, SVG and PDF; links from every render tool; `auto` over a threshold; diagnostics (stdout, a PostScript error) inline; the operator default and an argument overriding it; the per-client quota refused with `artifact_quota_bytes`; expiry after the TTL with an injected clock, freeing the quota; a `start_render` job with `delivery: url` storing its result once across two `render_result` calls; over HTTP, another bearer token's `resources/read` of a link failing exactly like a never-issued one. A fixture (`tests/data/inline-results.json`, frozen before #139) pins the inline result builders byte for byte, and unit tests in `src/artifacts.rs` cover the store (owner, TTL, quota, the shared budget, link redaction) |
-| `tests/artifacts_gcs.rs` | the Cloud Storage store (#140) against a local fake of the metadata server, IAM Credentials and Cloud Storage (no Google endpoint is called; the fake IAM signs a blob as its SHA-256, so the test recomputes the signature): the exact upload (path, `uploadType=multipart&ifGenerationMatch=0`, bearer token, metadata `name`, `contentType`, `contentDisposition`, the bytes) and the exact signed URL for a fixed injected time, built independently in the test, with `expires_at`; a three-page manifest under one `render_id`; the token cached, fetched once by concurrent calls, refreshed 300 s before expiry or at half a short life; the signer from the metadata server once, or the configured one with no fetch; the per-principal quota within the TTL; the metadata server down, Storage 412 and 500, IAM 403, each endpoint hanging past the timeout and nothing listening all `storage_unavailable` with no URL, token, bucket or body in the message; the start-up checks (bucket required, prefix, TTL over 7 days, signer, endpoint overrides, `none` refused); through the tools, `url` links in all three places for `render_postscript`, `handwrite` and `review_sheet`, `resources/read` serving nothing, `inline` uploading nothing, a failed upload or signing an error for `url` and an inline result with `delivery_note` for `both`, `auto` and a `start_render` job, the quota refusing `url` and `both` alike, the tool description; and, through the binary over HTTP at the default filter and `pscat_mcp=trace`, no signature, credential, token, response body or render id in the logs, one WARN line with codes only, and the capture file recording a signed URL sent back in a tool argument and in `Mcp-Name` with its query redacted. Unit tests in `src/gcs.rs` check the canonical request and string-to-sign against Google's conformance vectors |
+| `tests/artifacts_gcs.rs` | the Cloud Storage store (#140) against a local fake of the metadata server, IAM Credentials and Cloud Storage (no Google endpoint is called; the fake IAM signs a blob as its SHA-256, so the test recomputes the signature): the exact upload (path, `uploadType=multipart&ifGenerationMatch=0`, bearer token, metadata `name`, `contentType`, `contentDisposition`, the bytes) and the exact signed URL for a fixed injected time, built independently in the test, with `expires_at`; a three-page manifest under one `render_id`; the token cached, fetched once by concurrent calls, refreshed 300 s before expiry or at half a short life; the signer from the metadata server once, or the configured one with no fetch; the per-principal quota within the TTL; the metadata server down, Storage 412 and 500, IAM 403, each endpoint hanging past the timeout and nothing listening all `storage_unavailable` with no URL, token, bucket or body in the message; the start-up checks (bucket required, prefix, TTL over 7 days, signer, endpoint overrides, `none` refused); through the tools, `url` links in all three places for `render_postscript`, `handwrite` and `review_sheet`, `resources/read` serving nothing, `inline` uploading nothing, a failed upload or signing an error for `url` and an inline result with `delivery_note` for `both`, `auto` and a `start_render` job, the quota refusing `url` and `both` alike, the tool description; and, through the binary over HTTP at the default filter and `pscat_mcp=trace`, no signature, credential, token, response body or render id in the logs, one WARN line with codes only, and the capture file recording a signed URL sent back in a tool argument and in `Mcp-Name` with its query redacted. Short links (#163): a short link on the origin with `e` equal to `expires_at` and no signing at render time; opened (`GET`, `HEAD`, with `utm_source` appended, prepended or glued onto the token, with no `Authorization`), a `302` to the exact V4 URL for that object minted at the click time with a 60 s life (less near expiry), `Referrer-Policy: no-referrer`, `Cache-Control: no-store`; a changed token character, another `render_id`, `n` or extension, a changed `e`, a missing token `403`, malformed or traversal paths `404`, an expired link `410`, `POST`/`PUT`/`DELETE` `405`, none of them calling IAM; IAM or the metadata server down `503` with a fixed body; the previous secret accepted after a rotation and refused once dropped; no `/a/` route without an origin; the link in all places through the tools; short links opt-in only (a `PSCAT_MCP_ARTIFACT_LINKS=gcs` server with an https `PSCAT_MCP_OAUTH_RESOURCE` and no origin starts without a secret and gives direct signed URLs); the start-up refusals (an origin with no secret, a short or missing secret file without echoing it, a previous secret alone, a bad origin, `serve-stdio`, `none`); and through the binary at the default filter, `pscat_mcp=trace` and `trace`, no `render_id`, token, query or secret in the logs or the capture file, the span path `/a/[redacted]`, one DEBUG `short link` line per request with its outcome. Unit tests in `src/gcs.rs` check the canonical request and string-to-sign against Google's conformance vectors, and in `src/short_link.rs` the token (every field changed, domain separation, rotation, the strict path, the origin, the secret length) |
 | `tests/http.rs` | 401 without or with a wrong token (and zero renders executed), rmcp HTTP client render, legacy protocol clients over stateless HTTP, bounded concurrency with correct per-request output, `server_busy`, loopback-only unauthenticated mode, Host and Origin checks, `Accept` handling (`application/json` alone, `*/*`, `application/*` and none are served as JSON; `text/html`, SSE-only and `q=0` stay 406, GET stays 405; 401, 403 and 413 come first), body limit (413 with `Content-Length` and for chunked bodies, with no render; the limit follows the largest of the source, `handwrite` text and `review_sheet` source limits), client disconnect kills the worker and frees the slot, the per-principal cap set explicitly (two bearer tokens, two slots: one token's second call is `server_busy` with `error.input.code` `renders_per_principal` while the other token renders, and its share is free again once its render is cancelled), guide prompts and resources through the rmcp client and as raw stateless requests at 2026-07-28 and 2025-06-18 (no worker started) |
 | `tests/auth.rs` | several auth methods side by side, with a test-only method beside `bearer`: `PSCAT_MCP_AUTH=bearer` answers every request (status, `WWW-Authenticate`, body) exactly as the default configuration; each method alone and both together, a request one method rejects and the other accepts, a denial naming both challenges; a job started by one method's principal is `unknown_job` to another method's and to another principal of the same method; the binary refuses `oauth` without its settings, an unknown, empty or repeated list and `bearer` without a token, and keeps the loopback rule for `--allow-unauthenticated`; its JSON logs carry `auth_methods` at startup, `auth_method` on an accepted request's response line and `reason`/`rejected_by` on a rejection, and never a token. Unit tests in `src/auth.rs` cover the chain (order, the fallback rule, which rejection is reported) and the challenge merging |
 | `scripts/tests/test_oauth_check.py` | `scripts/oauth-check.py` (offline, no model, no server): synthetic unsigned tokens against the checklist that mirrors `src/oauth.rs` (shape, `alg`/`crit`/`kid`, the `kid` and key fit in a JWKS, `iss`, `aud` as string or array, `exp`/`nbf` with leeway, `sub`, scopes, `email_verified` as a JSON boolean, `sub:`/`email:` allowlist entries); JWKS discovery against a loopback server; exit codes; the token and its signature never appear in the output, and a token on the command line is rejected without being echoed |

@@ -1047,9 +1047,14 @@ impl PscatMcp {
         if let Some(store) = service.artifacts() {
             let c = service.artifact_config();
             let note = if store.name() == "gcs" {
+                let kind = if store.serves_short_links() {
+                    "short https links on this server, which redirect to signed URLs,"
+                } else {
+                    "https signed URLs"
+                };
                 format!(
                     " With delivery url or both, the output is uploaded to Cloud Storage and \
-                     linked by https signed URLs that work for {} s (at most {} bytes per client \
+                     linked by {kind} that work for {} s (at most {} bytes per client \
                      within that time); auto gives links when the output is over {} bytes. If \
                      the upload fails, url returns storage_unavailable and both or auto return \
                      the output inline. The default delivery here is {}.",
@@ -2552,6 +2557,18 @@ impl Links<'_> {
             text.push_str(
                 "\nThe https links are signed URLs: anyone holding one can fetch the file until \
                  it expires.",
+            );
+        }
+        if self
+            .stored
+            .links
+            .iter()
+            .any(|l| l.scheme == LinkScheme::Short)
+        {
+            text.push_str(
+                "\nThe https links open the file through this server, which redirects to a \
+                 signed URL; anyone holding one can fetch the file until it expires. Extra \
+                 query parameters are ignored.",
             );
         }
         text

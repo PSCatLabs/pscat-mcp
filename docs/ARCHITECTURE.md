@@ -629,6 +629,44 @@ text and `structuredContent.delivery_note`; for `url` it is the tool's
 error. A quota refusal is an error for every delivery. A job's fallback is
 delivered: its result counts as fetched and no links are remembered.
 
+**Short links** (#163, `src/short_link.rs`). A V4 URL signs every query
+parameter and is about 700 characters, so a client appending `utm_source`
+or a model re-typing the signature breaks it. Short links are
+opt-in: only with a public origin (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`;
+unset or `direct`, nothing changes, and nothing else sets it), `put`
+uploads as before but signs nothing: each link is
+`https://<origin>/a/<render_id>/<n>.<ext>?e=<unix expiry>&s=<token>`, with
+`e` the instant of `expires_at` and the token the first 16 bytes of
+HMAC-SHA-256 (`ring::hmac`) over `"pscat-mcp artifact link v1"` and the
+four fields, each after a NUL, base64url (22 characters). The key is read
+once at startup from `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` (32 bytes at
+least), with an optional previous key for rotation; `ArtifactConfig::check`
+refuses a public origin without it, and `serve-stdio` refuses a public
+origin (no HTTP route there). The `LinkScheme::Short` links get their own
+sentence in the text block and the tool descriptions.
+
+`http::router` mounts `/a/{*link}` (outside `require_auth`, like the health
+and metadata paths) only when the store `serves_short_links()`. The handler
+passes the raw path and query to `ArtifactStore::redeem`; nothing is
+percent-decoded. `ShortLinks::verify` parses the path strictly (a UUID as
+`Uuid::hyphenated` prints it, `n` from 1 to 9999 with no leading zero, an
+extension the store uploads), takes the first `e` and the first `s` (its
+leading base64url run) and ignores every other parameter, compares the
+token in constant time (`subtle`) against the current key, then the
+previous one, and only then checks `e` against the store's clock. The
+object name is rebuilt from the three verified fields with the prefix, so
+no client text reaches the bucket. `GcsArtifactStore::redeem` then mints a
+V4 URL at the click time through the same `signBlob` path, for
+`min(60 s, e - now)`, and the handler answers `302` with
+`Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Refusals are
+`404`, `403`, `410` (and `405` for other methods) with fixed bodies and no
+IAM call; a signing failure is `503` and one WARN `artifact link redirect
+failed` with codes only. The request span records the path as
+`/a/[redacted]` (`logged_path`), the handler logs one DEBUG line with the
+outcome, and capture mode's `redact_url_queries` also redacts the render id
+after `/a/` in a URL path. Without a public origin nothing changes: the
+links are the V4 URLs and there is no `/a/` route.
+
 **`none` is refused** with `gcs` by `http::check_none_with_artifact_links`:
 every anonymous caller would share one quota, and anyone who can reach the
 server could upload to the bucket and mint signed URLs, which are bearer

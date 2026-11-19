@@ -123,6 +123,17 @@ fn main() -> std::process::ExitCode {
             artifacts,
             log_format,
         } => run(log_format, async move {
+            // Short links are served by `serve-http`'s `/a/` route only.
+            if artifacts
+                .artifact_public_origin
+                .as_deref()
+                .is_some_and(|o| o.trim() != pscat_mcp::config::DIRECT_LINKS)
+            {
+                anyhow::bail!(
+                    "refusing to start: PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN makes short links, which \
+                     serve-http answers at /a/...; serve-stdio serves no HTTP. Unset it"
+                );
+            }
             // One long-lived process and one local user: jobs are always on.
             let service =
                 pscat_mcp::build_service_with(limits, jobs.enabled(), artifacts, &worker)?;

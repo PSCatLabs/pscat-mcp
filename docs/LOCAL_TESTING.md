@@ -1176,3 +1176,40 @@ service is deleted):
 A new `allUsers` invoker binding on Cloud Run takes about 30 to 60 s to take
 effect; until then Cloud Run's own HTML 401 can alternate with the server's
 answers. That is a platform delay, not a pscat-mcp problem.
+
+## Short-link check
+
+Short links (#163) are tested in CI against the local fake only
+(`tests/artifacts_gcs.rs`). This check runs them against the real APIs on
+the staging service, with the grants and the link secret of
+[`CLOUD_RUN.md`](CLOUD_RUN.md#short-links) in place. **Not run yet**; record
+the result below when it is.
+
+1. Deploy the revision under test with `gcs` links,
+   `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` mounted and
+   `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` set. Without the secret the revision
+   must refuse to start, with a message naming
+   `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`; with the origin unset it must start
+   and give direct signed URLs, as before.
+2. Render a PNG with `delivery: "url"`. Expect a `download_url` of about 100
+   characters, `https://<origin>/a/<render_id>/1.png?e=<expiry>&s=<22 chars>`,
+   with `e` equal to `expires_at`.
+3. `curl -sS -D - -o /dev/null '<link>&utm_source=chatgpt.com'`: expect
+   `302`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and a
+   `Location` on `storage.googleapis.com` with `X-Goog-Expires=60`. `curl -L`
+   the same: expect `200`, `image/png` and the inline bytes.
+4. A link a model copied into its answer (ChatGPT, with `utm_source`
+   appended), opened from the chat: the PNG downloads.
+5. One token character changed: `403 forbidden`. After the TTL: `410`.
+6. Search the service's own stdout/stderr logs of the window for the
+   render id, the token, `e=` and `utm_source`: expect no match; the
+   request lines show `/a/[redacted]`.
+7. Look at Cloud Run's request log (`run.googleapis.com/requests`) for the
+   same window and record whether `httpRequest.requestUrl` holds the full
+   link with its query. If it does, add the log exclusion described in
+   [`CLOUD_RUN.md`](CLOUD_RUN.md#short-links) or restrict access to it.
+
+| Item | Result |
+|---|---|
+| Date, revision | not run |
+| Steps 1 to 7 | not run |

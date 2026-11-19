@@ -21,6 +21,8 @@
 //!   [`artifacts::ArtifactStore`] trait and its memory backend.
 //! * [`gcs`] — the Cloud Storage artifact store: uploads and keyless V4
 //!   signed URLs (server process only).
+//! * [`short_link`] — short artifact links on this server (`/a/...`),
+//!   redirecting to a signed URL minted when opened.
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
@@ -45,6 +47,7 @@ pub mod pscat_extras;
 pub mod render;
 pub mod sandbox;
 pub mod sheet;
+pub mod short_link;
 pub mod telemetry;
 pub mod worker;
 
@@ -98,6 +101,17 @@ pub fn build_service_with(
     }
     // The Cloud Storage store is built here, where its TLS client can fail
     // the start; the memory store is built by the service over its ledger.
+    if artifacts.artifact_links != artifacts::LinksBackend::Gcs
+        && artifacts
+            .artifact_public_origin
+            .as_deref()
+            .is_some_and(|o| o.trim() != config::DIRECT_LINKS)
+    {
+        tracing::warn!(
+            "PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN is set but PSCAT_MCP_ARTIFACT_LINKS is not gcs; it is \
+             ignored"
+        );
+    }
     let gcs = match artifacts.artifact_links {
         artifacts::LinksBackend::Gcs => {
             Some(Arc::new(gcs::GcsArtifactStore::from_config(&artifacts)?))

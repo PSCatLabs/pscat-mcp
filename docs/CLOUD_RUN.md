@@ -219,6 +219,9 @@ account's Google-managed key. Nothing in the configuration is a credential.
 | `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` (the default) keeps existing clients' results unchanged; a call asks for links with `delivery` |
 | `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | bytes one token may upload per TTL, **per instance** |
 | `PSCAT_MCP_AUTH` | without `none`: the server refuses to start with `none` and `gcs` |
+| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | unset (direct signed URLs, as before); to opt in to [short links](#short-links), the service's public `https` origin (no path), e.g. `https://mcp.example.com` |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` | the mounted link secret, e.g. `/secrets/link/secret`; required with a public origin |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` | during a rotation only: the previous secret |
 
 Never set the `PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT` variables in a
 deployment: they exist to point the server at a local fake in tests.
@@ -295,6 +298,87 @@ container otherwise). See "Sandbox" below.
 with a `delivery_note`. Each failure logs one WARN, `artifact links failed`,
 with `code`, `stage` and `status` only; a 403 at `upload` or `signing`
 usually means a missing grant above.
+
+### Short links
+
+With a public origin the links are short links on the service itself,
+`https://<origin>/a/<render_id>/<n>.<ext>?e=...&s=...` (README, "Short
+links"), which redirect to a V4 signed URL minted when opened. A signed URL
+in the link breaks when ChatGPT appends `utm_source=chatgpt.com` or a model
+re-types the signature; a short link does not.
+
+Short links are **opt-in**: with `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` unset
+the links stay direct signed URLs and no secret is needed, so upgrading
+changes nothing. To turn them on, mount the secret first (steps 1 and 2),
+then set the origin; a revision with an origin and no secret refuses to
+start. To roll back, unset the origin (or set it to `direct`); the mounted
+secret is then ignored, with a warning.
+
+1. Create the secret, 48 random bytes, in Secret Manager, and let the
+   runtime account read it:
+
+   ```bash
+   openssl rand -base64 48 | tr -d '\n' | \
+     gcloud secrets create pscat-link-secret --project PROJECT --data-file=-
+   # Version 1. Mount explicit versions, never `latest`: see rotation below.
+   gcloud secrets add-iam-policy-binding pscat-link-secret --project PROJECT \
+     --member serviceAccount:SA --role roles/secretmanager.secretAccessor
+   ```
+
+2. Mount it as a file (each secret needs its own directory) and point the
+   server at it; links stay direct until the origin is set:
+
+   ```bash
+   gcloud run services update SERVICE --region REGION \
+     --update-secrets /secrets/link/secret=pscat-link-secret:1 \
+     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE=/secrets/link/secret
+   ```
+
+   Then opt in:
+
+   ```bash
+   gcloud run services update SERVICE --region REGION \
+     --update-env-vars PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=https://HOST
+   ```
+
+   Roll back with `--remove-env-vars PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`.
+
+   `HOST` is the host clients use (the `run.app` URL or a custom domain).
+   The file is read once at startup, so a new secret version takes effect
+   with a new revision, as for the allowlist. Every instance reads the same
+   secret, so a link made by one instance opens on any other.
+
+3. **Rotation.** Add a new version (say `2`), deploy with it as the
+   current secret and the old one (`1`) as the previous, and drop the
+   previous once links made before have expired (at most
+   `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` later). Pin version numbers: with
+   `latest`, an instance of the old revision that starts after the new
+   version is added would read it as its only secret, and links made by its
+   still-running siblings would get `403` there.
+
+   ```bash
+   openssl rand -base64 48 | tr -d '\n' | \
+     gcloud secrets versions add pscat-link-secret --project PROJECT --data-file=-
+   gcloud run services update SERVICE --region REGION \
+     --update-secrets /secrets/link/secret=pscat-link-secret:2,/secrets/link-previous/secret=pscat-link-secret:1 \
+     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE=/secrets/link-previous/secret
+   ```
+
+   Deploying with no previous secret ends every link made before, which
+   is how to revoke them all at once.
+
+**The route.** `GET`/`HEAD /a/...` needs no `Authorization`: the token is
+the capability. A refused link (wrong token, path or expiry) costs nothing
+but a hash; a valid one costs one IAM `signBlob` call on the instance that
+answers it, so the IAM quota is what someone holding valid links can spend
+by opening them over and over. There is no per-IP rate limit on it. The
+server's own logs show the path as `/a/[redacted]`, never the query.
+**Cloud Run's request log** (`run.googleapis.com/requests`), and any proxy
+or load balancer in front, is outside the server: it most likely records the
+full URL, query included, so it would hold working links for their TTL
+(verify on staging, `LOCAL_TESTING.md`, "Short-link check"). Restrict who
+can read those logs, or add a log exclusion for `httpRequest.requestUrl`
+containing `/a/`.
 
 ## Font packs
 

@@ -781,7 +781,31 @@ pub struct ArtifactConfig {
     /// host. Signed URLs always name `https://storage.googleapis.com`.
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_GCS_STORAGE_ENDPOINT", hide = true)]
     pub artifact_gcs_storage_endpoint: Option<String>,
+
+    /// `gcs`, `serve-http`: the https origin (`https://host[:port]`, no
+    /// path) of this server as clients reach it. Links are then short links
+    /// on it, `/a/<render_id>/<n>.<ext>?e=...&s=...`, which redirect to a V4
+    /// signed URL minted when opened, and need
+    /// `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. Unset (the default) or
+    /// `direct`: the links are the V4 signed URLs themselves, as before.
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN")]
+    pub artifact_public_origin: Option<String>,
+
+    /// `gcs` short links: a file holding the secret their tokens are made
+    /// with (at least 32 bytes, a trailing newline aside), read once at
+    /// startup and never logged; the same on every instance (a mounted
+    /// secret).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE")]
+    pub artifact_link_secret_file: Option<PathBuf>,
+
+    /// `gcs` short links: a file holding the previous secret, still
+    /// accepted for links made before a rotation (optional).
+    #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE")]
+    pub artifact_link_secret_previous_file: Option<PathBuf>,
 }
+
+/// `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`'s value for no short links.
+pub const DIRECT_LINKS: &str = "direct";
 
 /// The default object name prefix of the `gcs` backend.
 pub const DEFAULT_ARTIFACT_PREFIX: &str = "renders/";
@@ -810,6 +834,9 @@ impl Default for ArtifactConfig {
             artifact_gcs_metadata_endpoint: None,
             artifact_gcs_iam_endpoint: None,
             artifact_gcs_storage_endpoint: None,
+            artifact_public_origin: None,
+            artifact_link_secret_file: None,
+            artifact_link_secret_previous_file: None,
         }
     }
 }
@@ -831,6 +858,15 @@ impl ArtifactConfig {
         self.artifact_links = LinksBackend::Gcs;
         self.artifact_bucket = Some(bucket.to_string());
         self
+    }
+
+    /// The public origin short links are on, checked; `None` when unset or
+    /// `direct`. Short links are opt-in: nothing else turns them on.
+    pub fn public_origin(&self) -> Result<Option<String>, String> {
+        match self.artifact_public_origin.as_deref().map(str::trim) {
+            None | Some(DIRECT_LINKS) => Ok(None),
+            Some(v) => crate::short_link::check_origin(v).map(Some),
+        }
     }
 
     /// Reject settings that cannot work with `limits` and `jobs` (whose
@@ -918,6 +954,26 @@ impl ArtifactConfig {
             if let Some(v) = value {
                 gcs::check_endpoint(name, v)?;
             }
+        }
+        if self.artifact_link_secret_previous_file.is_some()
+            && self.artifact_link_secret_file.is_none()
+        {
+            return Err(
+                "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE is set without \
+                 PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: the previous secret is only accepted \
+                 beside a current one"
+                    .into(),
+            );
+        }
+        if self.public_origin()?.is_some() && self.artifact_link_secret_file.is_none() {
+            return Err(
+                "refusing to start: PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN turns on short links on this \
+                 server (with PSCAT_MCP_ARTIFACT_LINKS=gcs), which need \
+                 PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: a file of at least 32 random bytes, the \
+                 same on every instance. Mount it first, or unset \
+                 PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN for direct V4 signed URL links"
+                    .into(),
+            );
         }
         Ok(())
     }

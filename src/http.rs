@@ -10,6 +10,14 @@
 //!   resource URL's path appended (`…/mcp`), only with `oauth` enabled:
 //!   the RFC 9728 document naming the resource, the authorization server and
 //!   the scopes; unauthenticated, as the MCP authorization spec requires.
+//! * `GET`/`HEAD /a/<render_id>/<n>.<ext>?e=...&s=...`, only with `gcs`
+//!   short links on (#163, [`crate::short_link`]): unauthenticated, like the
+//!   health paths, since the token in the link is the capability. A link
+//!   that verifies gets `302` to a V4 signed URL minted now; a bad or missing
+//!   token `403`, an expired link `410`, a malformed path `404`, a failed
+//!   signing `503`, any other method `405`, each with a fixed short body.
+//!   Its request span logs the path as `/a/[redacted]`, and no line logs the
+//!   query, the token or the render id.
 //! * `/mcp` — rmcp's [`StreamableHttpService`] in stateless mode with JSON
 //!   responses, behind the [`Authenticator`] (every enabled auth method,
 //!   checked before rmcp sees the request, so an unauthenticated request
@@ -38,7 +46,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use http::{HeaderValue, StatusCode, header};
 use http_body_util::BodyExt as _;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -48,6 +56,7 @@ use tower::ServiceBuilder;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
+use crate::artifacts::ArtifactStore;
 use crate::auth::{
     AuthChain, AuthMethod, Authenticator, BearerTokenAuth, Denial, ExpiredNoAuth, NoAuth,
 };
@@ -57,6 +66,7 @@ use crate::config::{AuthConfig, AuthMethodKind, HttpConfig};
 use crate::mcp::PscatMcp;
 use crate::oauth::OauthAuth;
 use crate::render::RenderService;
+use crate::short_link::{LinkError, ROUTE_PREFIX};
 
 /// Slack added to the body limit for the JSON-RPC envelope and arguments.
 const BODY_ENVELOPE_BYTES: usize = 64 * 1024;
@@ -344,6 +354,10 @@ pub fn router_with_capture(
     capture: Option<Arc<Capture>>,
 ) -> Router {
     let auth_metadata = auth.published_metadata();
+    let short_links = service
+        .artifacts()
+        .filter(|a| a.serves_short_links())
+        .cloned();
     let limits = service.limits();
     let body_limit = mcp_body_limit(limits.max_text_bytes());
     let mcp_config = mcp_config.with_max_request_body_bytes(body_limit);
@@ -362,39 +376,41 @@ pub fn router_with_capture(
         .layer(middleware::from_fn(accept_json))
         .service(mcp);
 
-    Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/health", get(healthz))
-        .merge(metadata_routes(auth_metadata))
-        .route_service("/mcp", mcp)
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|req: &Request| {
-                            let request_id = req
-                                .headers()
-                                .get("x-request-id")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            // `auth_method` (and, for `oauth`, `sub`) are
-                            // recorded by `require_auth` once a method
-                            // accepts the request; an empty field is left
-                            // out of the log line.
-                            tracing::info_span!(
-                                "http",
-                                method = %req.method(),
-                                path = %req.uri().path(),
-                                request_id = %request_id,
-                                auth_method = tracing::field::Empty,
-                                sub = tracing::field::Empty,
-                            )
-                        })
-                        .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
-                )
-                .layer(PropagateRequestIdLayer::x_request_id()),
-        )
+        .merge(metadata_routes(auth_metadata));
+    if let Some(store) = short_links {
+        app = app.route("/a/{*link}", any(short_link).with_state(store));
+    }
+    app.route_service("/mcp", mcp).layer(
+        ServiceBuilder::new()
+            .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|req: &Request| {
+                        let request_id = req
+                            .headers()
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        // `auth_method` (and, for `oauth`, `sub`) are
+                        // recorded by `require_auth` once a method
+                        // accepts the request; an empty field is left
+                        // out of the log line.
+                        tracing::info_span!(
+                            "http",
+                            method = %req.method(),
+                            path = %logged_path(req.uri().path()),
+                            request_id = %request_id,
+                            auth_method = tracing::field::Empty,
+                            sub = tracing::field::Empty,
+                        )
+                    })
+                    .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+            )
+            .layer(PropagateRequestIdLayer::x_request_id()),
+    )
 }
 
 /// RFC 9728 Protected Resource Metadata routes, unauthenticated like the
@@ -566,6 +582,69 @@ async fn drain(mut body: Body, mut seen: u64) {
         }
     })
     .await;
+}
+
+/// The path as the request span logs it: a short link's (which holds the
+/// render id) as a fixed name.
+fn logged_path(path: &str) -> &str {
+    if path.starts_with(ROUTE_PREFIX) {
+        "/a/[redacted]"
+    } else {
+        path
+    }
+}
+
+/// A fixed short plain-text answer, never cached.
+fn fixed(status: StatusCode, body: &'static str) -> Response {
+    let mut resp = (status, body).into_response();
+    let h = resp.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+/// `GET`/`HEAD /a/...`: redeem a short link (#163). No `Authorization`: the
+/// token in the link is the capability. Unknown query parameters are
+/// ignored. Answers carry no detail, and the one log line has an outcome
+/// only.
+async fn short_link(State(store): State<Arc<dyn ArtifactStore>>, req: Request) -> Response {
+    if !matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+        let mut resp = fixed(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
+        resp.headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+        tracing::debug!(outcome = "method_not_allowed", "short link");
+        return resp;
+    }
+    let answer = store.redeem(req.uri().path(), req.uri().query()).await;
+    let location = answer
+        .as_ref()
+        .ok()
+        .and_then(|url| HeaderValue::from_str(url).ok());
+    let (outcome, resp) = match (answer, location) {
+        (Ok(_), Some(location)) => {
+            let mut resp = fixed(StatusCode::FOUND, "");
+            resp.headers_mut().insert(header::LOCATION, location);
+            ("redirect", resp)
+        }
+        (Ok(_), None) | (Err(LinkError::Unavailable), _) => (
+            "unavailable",
+            fixed(StatusCode::SERVICE_UNAVAILABLE, "unavailable, retry\n"),
+        ),
+        (Err(LinkError::NotFound), _) => ("not_found", fixed(StatusCode::NOT_FOUND, "not found\n")),
+        (Err(LinkError::Forbidden), _) => {
+            ("forbidden", fixed(StatusCode::FORBIDDEN, "forbidden\n"))
+        }
+        (Err(LinkError::Expired), _) => ("expired", fixed(StatusCode::GONE, "link expired\n")),
+    };
+    tracing::debug!(outcome, "short link");
+    resp
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -764,6 +843,7 @@ pub async fn serve_with_capture(
         artifact_links = jobs_service.artifacts().map_or("off", |a| a.name()),
         allowed_hosts = ?config.allowed_hosts,
         allowed_origins = ?config.allowed_origins,
+        short_links = jobs_service.artifacts().is_some_and(|a| a.serves_short_links()),
         "listening; MCP endpoint at /mcp, health at /healthz and /health"
     );
     if !is_loopback(config.bind)

@@ -26,6 +26,13 @@
 //!    signer account (`PSCAT_MCP_ARTIFACT_SIGNER`, by default the account the
 //!    metadata server reports) signs them, and the signature is hex-encoded
 //!    into `X-Goog-Signature`.
+//! 4. **Short links** (#163, opt-in): with a public origin
+//!    (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`), `put` signs nothing: each link is a short
+//!    `https://<origin>/a/<render_id>/<n>.<ext>?e=<expiry>&s=<token>` on this
+//!    server ([`crate::short_link`]), and [`GcsArtifactStore::redeem`] mints
+//!    the V4 URL (step 3) when the link is opened, working for at most
+//!    [`crate::short_link::REDIRECT_URL_SECS`]. Without one, the links are
+//!    the V4 URLs themselves, as before.
 //!
 //! The HTTP client is the hyper + rustls (ring) stack the OAuth resource
 //! server uses; no Google SDK. Every call has its own timeout
@@ -71,6 +78,7 @@ use crate::artifacts::{
 };
 use crate::config::ArtifactConfig;
 use crate::render::{ErrorCode, RenderError};
+use crate::short_link::{LinkError, LinkTarget, REDIRECT_URL_SECS, ShortLinks};
 
 /// The metadata server, as seen from a Google Cloud instance.
 pub const DEFAULT_METADATA_ENDPOINT: &str = "http://metadata.google.internal";
@@ -190,6 +198,9 @@ pub struct GcsSettings {
     pub iam_endpoint: String,
     /// The Cloud Storage base URL for uploads.
     pub storage_endpoint: String,
+    /// Short links on this server (#163); `None`: the links are V4 signed
+    /// URLs.
+    pub short_links: Option<ShortLinks>,
 }
 
 impl std::fmt::Debug for GcsSettings {
@@ -198,19 +209,46 @@ impl std::fmt::Debug for GcsSettings {
             .field("ttl", &self.ttl)
             .field("quota", &self.quota)
             .field("timeout", &self.timeout)
+            .field("short_links", &self.short_links.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl GcsSettings {
     /// The settings `config` gives (already checked by
-    /// [`ArtifactConfig::check`]).
+    /// [`ArtifactConfig::check`]). The link secrets are read here, once.
     pub fn from_config(config: &ArtifactConfig) -> anyhow::Result<Self> {
         let bucket = config
             .artifact_bucket
             .clone()
             .context("PSCAT_MCP_ARTIFACT_LINKS=gcs needs PSCAT_MCP_ARTIFACT_BUCKET")?;
+        let short_links = match config.public_origin().map_err(anyhow::Error::msg)? {
+            Some(origin) => {
+                let secret = config
+                    .artifact_link_secret_file
+                    .as_deref()
+                    .context("short links need PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE")?;
+                Some(
+                    ShortLinks::load(
+                        &origin,
+                        secret,
+                        config.artifact_link_secret_previous_file.as_deref(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?,
+                )
+            }
+            None => {
+                if config.artifact_link_secret_file.is_some() {
+                    tracing::warn!(
+                        "PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE is set but PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN \
+                         is not, so links are V4 signed URLs and the secret is ignored"
+                    );
+                }
+                None
+            }
+        };
         Ok(GcsSettings {
+            short_links,
             bucket,
             prefix: config.artifact_prefix.clone(),
             signer: config.artifact_signer.clone(),
@@ -756,7 +794,10 @@ impl GcsArtifactStore {
         uploaded: &mut bool,
     ) -> Result<Vec<ArtifactLink>, GcsError> {
         let token = self.token().await?;
-        let signer = self.signer().await?;
+        let signer = match self.settings.short_links {
+            Some(_) => None,
+            None => Some(self.signer().await?),
+        };
         let names: Vec<String> = objects
             .iter()
             .enumerate()
@@ -773,6 +814,9 @@ impl GcsArtifactStore {
             *uploaded = true;
             self.upload(&token, name, i + 1, object).await?;
         }
+        let Some(signer) = signer else {
+            return Ok(self.short_links(id, objects, at));
+        };
         let mut links = Vec::with_capacity(names.len());
         for name in &names {
             let unsigned = v4_string_to_sign(
@@ -794,6 +838,81 @@ impl GcsArtifactStore {
         }
         Ok(links)
     }
+
+    /// The short links to `objects` of render `id`, stored at `at`, working
+    /// until `at` plus the TTL: the same instant as `expires_at`.
+    fn short_links(
+        &self,
+        id: &str,
+        objects: &[ArtifactObject],
+        at: SystemTime,
+    ) -> Vec<ArtifactLink> {
+        let Some(short) = &self.settings.short_links else {
+            return Vec::new();
+        };
+        let e = unix_secs(at + self.settings.ttl);
+        objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let target = LinkTarget {
+                    render_id: id.to_string(),
+                    n: i + 1,
+                    ext: extension(&o.mime_type),
+                };
+                let url = short.link(&target, e);
+                ArtifactLink {
+                    uri: url.clone(),
+                    download_url: url,
+                    scheme: LinkScheme::Short,
+                }
+            })
+            .collect()
+    }
+
+    /// Answer a short link: `path` and `query` as the request gave them.
+    /// The link is checked first (no IAM call for one that fails); then a
+    /// V4 signed URL for its object is minted now, working for
+    /// [`REDIRECT_URL_SECS`] or until the link expires, whichever is
+    /// sooner. A failure is one WARN line with codes only.
+    pub async fn redeem(&self, path: &str, query: Option<&str>) -> Result<String, LinkError> {
+        let Some(short) = &self.settings.short_links else {
+            return Err(LinkError::NotFound);
+        };
+        let now = whole_seconds((self.clock)());
+        let (target, left) = short.verify(path, query, now)?;
+        let secs = left.as_secs().clamp(1, REDIRECT_URL_SECS);
+        let name = target.object_name(&self.settings.prefix);
+        let minted = async {
+            let token = self.token().await?;
+            let signer = self.signer().await?;
+            let unsigned = v4_string_to_sign(&self.settings.bucket, &name, &signer, now, secs);
+            let signature = self
+                .sign_blob(&token, &signer, &unsigned.string_to_sign)
+                .await?;
+            Ok::<_, GcsError>(unsigned.url(&signature))
+        };
+        minted.await.map_err(|e| {
+            let status = match e.failure {
+                Failure::Status(s) => Some(s),
+                _ => None,
+            };
+            tracing::warn!(
+                code = ErrorCode::StorageUnavailable.as_str(),
+                stage = e.stage.as_str(),
+                failure = e.failure.as_str(),
+                status,
+                "artifact link redirect failed"
+            );
+            LinkError::Unavailable
+        })
+    }
+}
+
+/// `t` as whole seconds since the Unix epoch (0 before it).
+fn unix_secs(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Whether `needle` occurs in `hay`.
@@ -874,6 +993,18 @@ impl ArtifactStore for GcsArtifactStore {
 
     // `read` keeps the default `None`: the signed URL is the only way to
     // fetch an object.
+
+    fn serves_short_links(&self) -> bool {
+        self.settings.short_links.is_some()
+    }
+
+    fn redeem<'a>(
+        &'a self,
+        path: &'a str,
+        query: Option<&'a str>,
+    ) -> StoreFuture<'a, Result<String, LinkError>> {
+        Box::pin(GcsArtifactStore::redeem(self, path, query))
+    }
 }
 
 #[cfg(test)]
@@ -1047,6 +1178,7 @@ mod tests {
             metadata_endpoint: DEFAULT_METADATA_ENDPOINT.into(),
             iam_endpoint: DEFAULT_IAM_ENDPOINT.into(),
             storage_endpoint: DEFAULT_STORAGE_ENDPOINT.into(),
+            short_links: None,
         };
         let d = format!("{s:?}");
         assert!(!d.contains("hidden-bucket") && !d.contains("sa@"), "{d}");

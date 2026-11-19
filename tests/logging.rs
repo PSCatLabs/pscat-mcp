@@ -604,3 +604,35 @@ async fn rmcp_warnings_still_get_through_at_trace() {
     assert_eq!(warned.len(), 1, "{logs}");
     assert_no_rmcp_below_warn(&logs);
 }
+
+/// A short-link path (`/a/<render_id>/...`, #163) is logged as the fixed
+/// route name, and its query not at all, whether or not short links are on
+/// and at every filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_short_link_path_and_query_never_reach_the_logs() {
+    const ID: &str = "4f1c2b3a-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+    const TOKEN_TEXT: &str = "tokenMarker0123456789x";
+    for rust_log in [None, Some("info,pscat_mcp=trace"), Some("trace")] {
+        let server = start_http(rust_log).await;
+        let root = server.base.strip_suffix("/mcp").unwrap().to_string();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = http
+            .get(format!(
+                "{root}/a/{ID}/1.png?e=1999999999&s={TOKEN_TEXT}&utm_source=chatgpt.com"
+            ))
+            .send()
+            .await
+            .unwrap();
+        // No short links on this server: not found.
+        assert_eq!(resp.status().as_u16(), 404, "{rust_log:?}");
+        let logs = stop(server).await;
+        assert!(logs.contains("/a/[redacted]"), "{rust_log:?}: {logs}");
+        for secret in [ID, TOKEN_TEXT, "utm_source", "1999999999"] {
+            assert!(!logs.contains(secret), "{rust_log:?}: {secret} in {logs}");
+        }
+    }
+}

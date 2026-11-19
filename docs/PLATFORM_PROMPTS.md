@@ -30,6 +30,11 @@ Signed URLs are bearer capabilities: anyone holding one can fetch that file
 until it expires (30 minutes by default). Use a throwaway chat, don't share
 the transcript, and never commit a real link. When you record results in the
 repository, replace every link with `<signed-url>`.
+With a public origin (#163) the links are short links on the server,
+`https://<your-server-host>/a/<render_id>/<n>.<ext>?e=...&s=...`, which
+redirect to a signed URL when opened and keep working when a client appends
+a parameter such as `utm_source`; they are bearer capabilities in the same
+way. Record them as `<short-link>`.
 
 ## The prompt
 

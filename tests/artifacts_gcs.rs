@@ -15,21 +15,25 @@ use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use pscat_mcp::artifacts::{ArtifactObject, ArtifactStore, LinksBackend};
+use pscat_mcp::artifacts::{ArtifactObject, ArtifactStore, LinkScheme, LinksBackend};
+use pscat_mcp::auth::BearerTokenAuth;
 use pscat_mcp::config::{ArtifactConfig, JobsConfig, LimitsConfig, WorkerConfig};
 use pscat_mcp::gcs::{GcsArtifactStore, GcsSettings, WallClock};
 use pscat_mcp::mcp::PscatMcp;
 use pscat_mcp::render::{ErrorCode, RenderService};
+use pscat_mcp::short_link::ShortLinks;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation,
     ReadResourceRequestParams,
 };
 use rmcp::service::RunningService;
+use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
 
 type Client = RunningService<RoleClient, ClientConfig>;
 
@@ -310,6 +314,7 @@ fn settings(fake: &FakeServer) -> GcsSettings {
         metadata_endpoint: fake.base.clone(),
         iam_endpoint: fake.base.clone(),
         storage_endpoint: fake.base.clone(),
+        short_links: None,
     }
 }
 
@@ -646,6 +651,7 @@ async fn nothing_listens_is_storage_unavailable() {
             metadata_endpoint: base.clone(),
             iam_endpoint: base.clone(),
             storage_endpoint: base,
+            short_links: None,
         },
         Arc::new(SystemTime::now),
     );
@@ -1177,6 +1183,15 @@ struct Server {
 }
 
 async fn start_http(fake: &FakeServer, rust_log: Option<&str>, capture: &str) -> Server {
+    start_http_with(fake, rust_log, capture, &[]).await
+}
+
+async fn start_http_with(
+    fake: &FakeServer,
+    rust_log: Option<&str>,
+    capture: &str,
+    env: &[(&str, &str)],
+) -> Server {
     let mut cmd = tokio::process::Command::new(SERVER);
     for (k, _) in std::env::vars() {
         if k.starts_with("PSCAT_MCP_") || k == "PORT" || k == "RUST_LOG" {
@@ -1194,6 +1209,9 @@ async fn start_http(fake: &FakeServer, rust_log: Option<&str>, capture: &str) ->
         .env("PSCAT_MCP_CAPTURE_FILE", capture)
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(v) = rust_log {
         cmd.env("RUST_LOG", v);
     }
@@ -1361,4 +1379,743 @@ async fn signed_urls_never_reach_the_logs_or_the_capture_file() {
 async fn signed_urls_stay_out_of_the_logs_at_trace() {
     let (url, logs, captured) = signed_url_round_trip(Some("info,pscat_mcp=trace")).await;
     no_secrets(&url, &logs, &captured);
+}
+
+// ---------------------------------------------- short links (#163)
+
+const ORIGIN: &str = "https://mcp.example.test";
+const SECRET: &[u8] = b"a link secret for the tests, 32 bytes or more";
+const OLD_SECRET: &[u8] = b"the previous link secret, also long enough";
+
+fn short_settings(fake: &FakeServer, current: &[u8], previous: Option<&[u8]>) -> GcsSettings {
+    GcsSettings {
+        short_links: Some(ShortLinks::from_secrets(ORIGIN, current, previous).unwrap()),
+        ..settings(fake)
+    }
+}
+
+/// The router of a service whose store is `store`.
+fn app_with(fake: &FakeServer, store: Arc<GcsArtifactStore>) -> axum::Router {
+    let config = gcs_config(fake);
+    let svc = Arc::try_unwrap(service(config.clone()))
+        .ok()
+        .expect("one owner")
+        .with_artifact_store(config, store);
+    pscat_mcp::http::router(
+        Arc::new(svc),
+        Arc::new(BearerTokenAuth::new([TOKEN])),
+        StreamableHttpServerConfig::default(),
+    )
+}
+
+struct Answer {
+    status: u16,
+    headers: http::HeaderMap,
+    body: String,
+}
+
+/// `method` `target` (a path and query) on `app`, with no `Authorization`.
+async fn open(app: &axum::Router, method: &str, target: &str) -> Answer {
+    let req = http::Request::builder()
+        .method(method)
+        .uri(target)
+        .header("host", "mcp.example.test")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
+    Answer {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+/// The path and query of a short link.
+fn target_of(link: &str) -> &str {
+    link.strip_prefix(ORIGIN)
+        .unwrap_or_else(|| panic!("not on {ORIGIN}: {link}"))
+}
+
+fn stamp(t: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string()
+}
+
+fn unix(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+}
+
+fn header_of<'a>(a: &'a Answer, name: &str) -> &'a str {
+    a.headers
+        .get(name)
+        .map(|v| v.to_str().unwrap())
+        .unwrap_or("")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_short_link_redirects_to_a_v4_url_minted_when_opened() {
+    let fake = fake_google().await;
+    let t0 = at("2026-01-02T03:04:05.678Z");
+    let (clock, t) = manual_clock(t0);
+    let s = Arc::new(store(short_settings(&fake, SECRET, None), clock));
+    assert!(s.serves_short_links());
+    let stored = s
+        .put(
+            "alice",
+            vec![object("image/png", 30), object("image/svg+xml", 20)],
+        )
+        .await
+        .unwrap();
+    let id = stored.render_id.clone();
+    // Uploaded as before, and nothing signed yet.
+    assert_eq!(fake.uploads().len(), 2);
+    assert!(fake.signs().is_empty());
+    assert_eq!(fake.fake.emails.load(Ordering::SeqCst), 0);
+    // The links: short, on the origin, expiring when the result says.
+    let e = unix(at("2026-01-02T03:34:05Z"));
+    assert_eq!(stored.expires_at_rfc3339(), "2026-01-02T03:34:05Z");
+    for (n, (link, ext)) in stored.links.iter().zip(["png", "svg"]).enumerate() {
+        let prefix = format!("{ORIGIN}/a/{id}/{}.{ext}?e={e}&s=", n + 1);
+        let token = link.download_url.strip_prefix(&prefix).unwrap_or_else(|| {
+            panic!("{}", link.download_url);
+        });
+        assert_eq!(token.len(), 22, "{token}");
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+        );
+        assert_eq!(link.uri, link.download_url);
+        assert_eq!(link.scheme, LinkScheme::Short);
+        assert!(link.uri.len() < 110, "{}", link.uri);
+    }
+
+    // Opened 100 s later: a V4 URL for that object, minted now, for 60 s.
+    *t.lock().unwrap() += Duration::from_secs(100);
+    let click = whole(*t.lock().unwrap());
+    let app = app_with(&fake, s.clone());
+    let link = &stored.links[0].download_url;
+    let (want, sts) = expected_url(
+        &format!("renders/{id}/1.png"),
+        DEFAULT_SA,
+        &stamp(click),
+        60,
+    );
+    for (method, target) in [
+        ("GET", target_of(link).to_string()),
+        ("HEAD", target_of(link).to_string()),
+        ("GET", format!("{}&utm_source=chatgpt.com", target_of(link))),
+        ("GET", format!("{}?utm_source=chatgpt.com", target_of(link))),
+        ("GET", {
+            let (p, q) = target_of(link).split_once('?').unwrap();
+            format!("{p}?utm_source=chatgpt.com&utm_medium=x&{q}")
+        }),
+    ] {
+        let a = open(&app, method, &target).await;
+        assert_eq!(a.status, 302, "{method} {target}: {}", a.body);
+        assert_eq!(header_of(&a, "location"), want, "{method} {target}");
+        assert_eq!(header_of(&a, "referrer-policy"), "no-referrer");
+        assert_eq!(header_of(&a, "cache-control"), "no-store");
+        assert!(a.body.is_empty(), "{}", a.body);
+    }
+    let signs = fake.signs();
+    assert_eq!(signs.len(), 5);
+    assert!(signs.iter().all(|c| c.payload == sts));
+    // The second object, the same way.
+    let (want2, _) = expected_url(
+        &format!("renders/{id}/2.svg"),
+        DEFAULT_SA,
+        &stamp(click),
+        60,
+    );
+    let a = open(&app, "GET", target_of(&stored.links[1].download_url)).await;
+    assert_eq!(header_of(&a, "location"), want2);
+
+    // Ten seconds before the link expires, the URL works for those ten.
+    *t.lock().unwrap() = SystemTime::UNIX_EPOCH + Duration::from_secs(e - 10);
+    let (want, _) = expected_url(
+        &format!("renders/{id}/1.png"),
+        DEFAULT_SA,
+        &stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(e - 10)),
+        10,
+    );
+    let a = open(&app, "GET", target_of(link)).await;
+    assert_eq!(header_of(&a, "location"), want);
+    // At `e`, gone.
+    *t.lock().unwrap() = SystemTime::UNIX_EPOCH + Duration::from_secs(e);
+    let before = fake.signs().len();
+    let a = open(&app, "GET", target_of(link)).await;
+    assert_eq!(a.status, 410, "{}", a.body);
+    assert_eq!(a.body, "link expired\n");
+    assert!(a.headers.get("location").is_none());
+    assert_eq!(fake.signs().len(), before);
+}
+
+fn whole(t: SystemTime) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(unix(t))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_or_malformed_short_link_gives_no_redirect() {
+    let fake = fake_google().await;
+    let (clock, t) = manual_clock(at("2026-02-03T04:05:06Z"));
+    let s = Arc::new(store(short_settings(&fake, SECRET, None), clock));
+    let stored = s.put("alice", vec![object("image/png", 30)]).await.unwrap();
+    let id = &stored.render_id;
+    // Another real render: its id is valid, but not under this token.
+    let other = s.put("alice", vec![object("image/png", 30)]).await.unwrap();
+    let app = app_with(&fake, s.clone());
+    let link = target_of(&stored.links[0].download_url).to_string();
+    let (path, query) = link.split_once('?').unwrap();
+    let token = query.split("s=").nth(1).unwrap().to_string();
+    let e: u64 = query
+        .strip_prefix("e=")
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let flip = |i: usize| {
+        let mut b: Vec<u8> = token.bytes().collect();
+        b[i] = if b[i] == b'A' { b'B' } else { b'A' };
+        String::from_utf8(b).unwrap()
+    };
+    let mut cases: Vec<(String, u16)> = Vec::new();
+    for i in [0, 10, 21] {
+        cases.push((format!("{path}?e={e}&s={}", flip(i)), 403));
+    }
+    cases.extend([
+        // Another render id, page, format.
+        (format!("/a/{}/1.png?{query}", other.render_id), 403),
+        (format!("/a/{id}/2.png?{query}"), 403),
+        (format!("/a/{id}/1.svg?{query}"), 403),
+        (format!("/a/{id}/1.pdf?{query}"), 403),
+        // A changed expiry, later or earlier.
+        (format!("{path}?e={}&s={token}", e + 3600), 403),
+        (format!("{path}?e={}&s={token}", e - 1), 403),
+        // No token, no expiry, nothing.
+        (format!("{path}?e={e}"), 403),
+        (format!("{path}?s={token}"), 403),
+        (path.to_string(), 403),
+        (format!("{path}?e={e}&s="), 403),
+        (format!("{path}?e={e}&s={}", &token[..21]), 403),
+        // Paths that are not a link: never another object.
+        (format!("/a/{}/1.png?{query}", id.to_uppercase()), 404),
+        (format!("/a/{}/1.png?{query}", id.replace('-', "")), 404),
+        (format!("/a/{id}/01.png?{query}"), 404),
+        (format!("/a/{id}/1.png/../../x/1.png?{query}"), 404),
+        (format!("/a/{id}/..%2F1.png?{query}"), 404),
+        (format!("/a/{id}%2F1.png?{query}"), 404),
+        (format!("/a/{id}/1.png.exe?{query}"), 404),
+        (format!("/a/{id}/1?{query}"), 404),
+        (format!("/a/{id}?{query}"), 404),
+        (format!("/a/x/{id}/1.png?{query}"), 404),
+    ]);
+    for (target, status) in &cases {
+        let a = open(&app, "GET", target).await;
+        assert_eq!(a.status, *status, "{target}: {}", a.body);
+        assert!(a.headers.get("location").is_none(), "{target}");
+        let want = if *status == 403 { "forbidden\n" } else { "" };
+        if *status == 403 {
+            assert_eq!(a.body, want, "{target}");
+        } else {
+            assert!(
+                a.body.is_empty() || a.body == "not found\n",
+                "{target}: {}",
+                a.body
+            );
+        }
+        assert!(!a.body.contains(id.as_str()) && !a.body.contains(&token));
+    }
+    assert!(fake.signs().is_empty(), "a refused link reached IAM");
+    // POST and the like: 405, nothing signed.
+    for method in ["POST", "PUT", "DELETE"] {
+        let a = open(&app, method, &link).await;
+        assert_eq!(a.status, 405, "{method}");
+        assert_eq!(header_of(&a, "allow"), "GET, HEAD");
+        assert!(a.headers.get("location").is_none());
+    }
+    assert!(fake.signs().is_empty());
+    // The link itself still works; IAM down is a 503 with no detail.
+    *t.lock().unwrap() += Duration::from_secs(1);
+    assert_eq!(open(&app, "GET", &link).await.status, 302);
+    fake.set("iam", Mode::Status(500));
+    let a = open(&app, "GET", &link).await;
+    assert_eq!(a.status, 503);
+    assert_eq!(a.body, "unavailable, retry\n");
+    assert!(a.headers.get("location").is_none());
+    fake.set("iam", Mode::Ok);
+    fake.set("metadata", Mode::Status(500));
+    // The token is cached; a fresh store must fetch it and fails.
+    let fresh = Arc::new(store(
+        short_settings(&fake, SECRET, None),
+        Arc::new(move || at("2026-02-03T04:05:07Z")),
+    ));
+    let a = open(&app_with(&fake, fresh), "GET", &link).await;
+    assert_eq!(a.status, 503);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_previous_secret_still_works_after_a_rotation() {
+    let fake = fake_google().await;
+    let (clock, _) = manual_clock(at("2026-03-01T00:00:00Z"));
+    // Links made before the rotation, under the old secret.
+    let before = store(short_settings(&fake, OLD_SECRET, None), clock.clone());
+    let stored = before.put("a", vec![object("image/png", 5)]).await.unwrap();
+    let link = target_of(&stored.links[0].download_url).to_string();
+    // After: the new secret is current, the old one previous.
+    let rotated = Arc::new(store(
+        short_settings(&fake, SECRET, Some(OLD_SECRET)),
+        clock.clone(),
+    ));
+    let a = open(&app_with(&fake, rotated.clone()), "GET", &link).await;
+    assert_eq!(a.status, 302, "{}", a.body);
+    assert!(header_of(&a, "location").contains(&format!("/renders/{}/1.png?", stored.render_id)));
+    // New links are under the new secret, which the old store refuses.
+    let fresh = rotated
+        .put("a", vec![object("image/png", 5)])
+        .await
+        .unwrap();
+    assert_ne!(
+        fresh.links[0].uri.split("s=").nth(1),
+        stored.links[0].uri.split("s=").nth(1)
+    );
+    // Once the previous secret is dropped, the old links stop.
+    let dropped = Arc::new(store(short_settings(&fake, SECRET, None), clock));
+    let app = app_with(&fake, dropped);
+    assert_eq!(open(&app, "GET", &link).await.status, 403);
+    assert_eq!(
+        open(&app, "GET", target_of(&fresh.links[0].uri))
+            .await
+            .status,
+        302
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_short_links_there_is_no_a_route() {
+    let fake = fake_google().await;
+    let s = Arc::new(store(settings(&fake), Arc::new(SystemTime::now)));
+    assert!(!s.serves_short_links());
+    let stored = s.put("a", vec![object("image/png", 5)]).await.unwrap();
+    assert!(
+        stored.links[0]
+            .uri
+            .starts_with("https://storage.googleapis.com/")
+    );
+    // A token minted with any secret leads nowhere here.
+    let other = ShortLinks::from_secrets(ORIGIN, SECRET, None).unwrap();
+    let link = other.link(
+        &pscat_mcp::short_link::LinkTarget {
+            render_id: stored.render_id.clone(),
+            n: 1,
+            ext: "png",
+        },
+        unix(SystemTime::now()) + 600,
+    );
+    let a = open(&app_with(&fake, s), "GET", target_of(&link)).await;
+    assert_eq!(a.status, 404);
+    assert_eq!(fake.signs().len(), 1);
+}
+
+/// A secret file in the temp directory, removed on drop.
+struct SecretFile(std::path::PathBuf);
+
+impl SecretFile {
+    fn new(bytes: &[u8]) -> Self {
+        let p = std::env::temp_dir().join(format!(
+            "pscat-mcp-link-secret-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        SecretFile(p)
+    }
+    fn path(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+}
+
+impl Drop for SecretFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn url_delivery_carries_the_short_link_in_every_place() {
+    let fake = fake_google().await;
+    let secret = SecretFile::new(b"0123456789abcdef0123456789abcdef\n");
+    let config = ArtifactConfig {
+        artifact_public_origin: Some(format!("{ORIGIN}/")),
+        artifact_link_secret_file: Some(secret.0.clone()),
+        ..gcs_config(&fake)
+    };
+    let svc = service(config);
+    assert!(svc.artifacts().unwrap().serves_short_links());
+    let client = connect(svc.clone()).await;
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": pages(2), "width": 30, "height": 20, "delivery": "url"}),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let sc = &r["structuredContent"];
+    let id = sc["render_id"].as_str().unwrap();
+    let links = blocks_of(&r, "resource_link");
+    let text = text_of(&r);
+    for (n, (a, link)) in sc["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&links)
+        .enumerate()
+    {
+        let url = a["download_url"].as_str().unwrap();
+        let expires = chrono::DateTime::parse_from_rfc3339(a["expires_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp();
+        assert!(
+            url.starts_with(&format!("{ORIGIN}/a/{id}/{}.png?e={expires}&s=", n + 1)),
+            "{url}"
+        );
+        assert_eq!(link["uri"], url);
+        assert!(text.contains(url), "{text}");
+    }
+    assert!(text.contains("redirects to a"), "{text}");
+    assert!(!text.contains("storage.googleapis.com"), "{text}");
+    assert!(fake.signs().is_empty());
+    // The tool description says what the links are.
+    let tools = client.list_all_tools().await.unwrap();
+    let d = tools
+        .iter()
+        .find(|t| t.name == "render_postscript")
+        .and_then(|t| t.description.as_deref())
+        .unwrap_or("");
+    assert!(d.contains("short https links"), "{d}");
+    // And the router redeems it.
+    let url = sc["artifacts"][0]["download_url"].as_str().unwrap();
+    let app = pscat_mcp::http::router(
+        svc,
+        Arc::new(BearerTokenAuth::new([TOKEN])),
+        StreamableHttpServerConfig::default(),
+    );
+    let a = open(&app, "GET", target_of(url)).await;
+    assert_eq!(a.status, 302, "{}", a.body);
+    assert!(
+        header_of(&a, "location").starts_with(&format!(
+            "https://storage.googleapis.com/{BUCKET}/renders/{id}/1.png?"
+        )),
+        "{}",
+        header_of(&a, "location")
+    );
+    assert!(header_of(&a, "location").contains("&X-Goog-Expires="));
+    // Inline output is untouched.
+    let r = call(
+        &client,
+        "render_postscript",
+        json!({"source": pages(1), "width": 30, "height": 20}),
+    )
+    .await;
+    assert!(r["structuredContent"].get("render_id").is_none());
+    assert_eq!(blocks_of(&r, "image").len(), 1);
+}
+
+#[test]
+fn short_link_settings_are_checked_at_startup() {
+    let http = ["serve-http", "--bind", "127.0.0.1", "--port", "0"];
+    let gcs = [
+        ("PSCAT_MCP_ARTIFACT_LINKS", "gcs"),
+        ("PSCAT_MCP_ARTIFACT_BUCKET", BUCKET),
+        ("PSCAT_MCP_AUTH_TOKENS", TOKEN),
+    ];
+    let with = |extra: &[(&str, &str)]| {
+        let mut env = gcs.to_vec();
+        env.extend_from_slice(extra);
+        run_server(&http, &env)
+    };
+    // A public origin needs a secret.
+    let (ok, err) = with(&[("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN)]);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE")
+            && err.contains("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN"),
+        "{err}"
+    );
+    assert!(!err.contains("listening"), "{err}");
+    // A short secret is refused, and never echoed.
+    let short = SecretFile::new(b"too-short-secret-value\n");
+    let (ok, err) = with(&[
+        ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN),
+        ("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE", short.path()),
+    ]);
+    assert!(!ok && err.contains("32"), "{err}");
+    assert!(!err.contains("too-short-secret-value"), "{err}");
+    // A missing file.
+    let (ok, err) = with(&[
+        ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN),
+        (
+            "PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE",
+            "/nonexistent/pscat-secret",
+        ),
+    ]);
+    assert!(
+        !ok && err.contains("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE"),
+        "{err}"
+    );
+    // A previous secret alone.
+    let good = SecretFile::new(&[b'k'; 40]);
+    let (ok, err) = with(&[("PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE", good.path())]);
+    assert!(
+        !ok && err.contains("PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE"),
+        "{err}"
+    );
+    // A bad origin.
+    for bad in [
+        "http://mcp.example.test",
+        "https://mcp.example.test/mcp",
+        "https://mcp.example.test?x=1",
+    ] {
+        let (ok, err) = with(&[
+            ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", bad),
+            ("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE", good.path()),
+        ]);
+        assert!(
+            !ok && err.contains("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN"),
+            "{bad}: {err}"
+        );
+    }
+    // serve-stdio serves no /a/ route.
+    let (ok, err) = run_server(
+        &["serve-stdio"],
+        &[
+            ("PSCAT_MCP_ARTIFACT_LINKS", "gcs"),
+            ("PSCAT_MCP_ARTIFACT_BUCKET", BUCKET),
+            ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN),
+            ("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE", good.path()),
+        ],
+    );
+    assert!(!ok && err.contains("serve-stdio"), "{err}");
+    // `none` stays refused with gcs links, short or not.
+    let (ok, err) = run_server(
+        &http,
+        &[
+            ("PSCAT_MCP_AUTH", "none"),
+            ("PSCAT_MCP_ARTIFACT_LINKS", "gcs"),
+            ("PSCAT_MCP_ARTIFACT_BUCKET", BUCKET),
+            ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN),
+            ("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE", good.path()),
+        ],
+    );
+    assert!(!ok && err.contains("cannot be combined"), "{err}");
+}
+
+#[test]
+fn short_links_are_opt_in() {
+    // Unset or `direct`: direct links, no secret needed.
+    let c = ArtifactConfig::default().gcs(BUCKET);
+    assert_eq!(c.public_origin(), Ok(None));
+    assert!(check(c.clone()).is_ok());
+    let direct = ArtifactConfig {
+        artifact_public_origin: Some("direct".into()),
+        ..c.clone()
+    };
+    assert_eq!(direct.public_origin(), Ok(None));
+    assert!(check(direct).is_ok());
+    // Given: short links, which need the secret.
+    let given = ArtifactConfig {
+        artifact_public_origin: Some("https://links.example.test/".into()),
+        ..c
+    };
+    assert_eq!(
+        given.public_origin(),
+        Ok(Some("https://links.example.test".into()))
+    );
+    assert!(check(given).unwrap_err().contains("LINK_SECRET_FILE"));
+}
+
+/// A deployed server with `gcs` links and an https OAuth resource, and no
+/// public origin, keeps starting without a secret and keeps direct links.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oauth_resource_does_not_turn_short_links_on() {
+    let fake = fake_google().await;
+    let capture = std::env::temp_dir().join(format!(
+        "pscat-mcp-optin-capture-{}.jsonl",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut server = start_http_with(
+        &fake,
+        None,
+        &capture.to_string_lossy(),
+        &[("PSCAT_MCP_OAUTH_RESOURCE", "https://mcp.example.test/mcp")],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let v = post(
+        &http,
+        &server.base,
+        &render(1, "0 0 1 1 rectfill", "url"),
+        None,
+    )
+    .await;
+    let url = v["result"]["structuredContent"]["artifacts"][0]["download_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no link: {v}"));
+    assert!(
+        url.starts_with("https://storage.googleapis.com/") && url.contains("X-Goog-Signature="),
+        "{url}"
+    );
+    server.child.kill().await.unwrap();
+    let _ = std::fs::remove_file(&capture);
+}
+
+// ---------------- short links: logs and capture, through the binary
+
+/// Render with short links, open the link (with `utm_source`, and with a
+/// bad token), send it back inside requests; return the link, the logs and
+/// the capture file.
+async fn short_link_round_trip(rust_log: Option<&str>) -> (String, String, String) {
+    let fake = fake_google().await;
+    let secret = SecretFile::new(b"a secret only the server and this test know, 48b");
+    let capture = std::env::temp_dir().join(format!(
+        "pscat-mcp-short-capture-{}.jsonl",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let capture_path = capture.to_string_lossy().into_owned();
+    let mut server = start_http_with(
+        &fake,
+        rust_log,
+        &capture_path,
+        &[
+            ("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN),
+            ("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE", secret.path()),
+        ],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let v = post(
+        &http,
+        &server.base,
+        &render(1, "0.3 setgray 0 0 40 40 rectfill", "url"),
+        None,
+    )
+    .await;
+    let link = v["result"]["structuredContent"]["artifacts"][0]["download_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no link: {v}"))
+        .to_string();
+    let root = server.base.strip_suffix("/mcp").unwrap().to_string();
+    let target = target_of(&link).to_string();
+    // Opened as a model would: with a parameter appended. No Authorization.
+    let resp = http
+        .get(format!("{root}{target}&utm_source=chatgpt.com"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 302);
+    let location = resp.headers()["location"].to_str().unwrap().to_string();
+    assert!(
+        location.starts_with("https://storage.googleapis.com/"),
+        "{location}"
+    );
+    // A bad token, a HEAD and a POST.
+    let bad = target.replace("&s=", "&s=A");
+    let resp = http.get(format!("{root}{bad}")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(resp.text().await.unwrap(), "forbidden\n");
+    let resp = http.head(format!("{root}{target}")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 302);
+    let resp = http.post(format!("{root}{target}")).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 405);
+    // A client sends the link back: in a tool argument and in `Mcp-Name`.
+    let source = format!("% {link}\n0 0 1 1 rectfill");
+    post(&http, &server.base, &render(2, &source, "inline"), None).await;
+    let read = json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read",
+                      "params": {"uri": link}});
+    let v = post(&http, &server.base, &read, Some(&link)).await;
+    assert!(v.get("error").is_some(), "{v}");
+    server.child.kill().await.unwrap();
+    let logs = tokio::time::timeout(Duration::from_secs(30), server.logs)
+        .await
+        .expect("stderr closed")
+        .unwrap();
+    let captured = std::fs::read_to_string(&capture).unwrap_or_default();
+    let _ = std::fs::remove_file(&capture);
+    (link, logs, captured)
+}
+
+fn no_short_link_secrets(link: &str, logs: &str, captured: &str) {
+    let target = target_of(link);
+    let (path, query) = target.split_once('?').unwrap();
+    let id = path.split('/').nth(2).unwrap();
+    let token = query.split("s=").nth(1).unwrap();
+    assert_eq!(id.len(), 36, "{id}");
+    for (what, text) in [("logs", logs), ("capture file", captured)] {
+        assert!(!text.contains(id), "the render id is in the {what}");
+        assert!(!text.contains(token), "the token is in the {what}");
+        assert!(!text.contains(query), "the query is in the {what}");
+        assert!(!text.contains("utm_source"), "{what}: a query is logged");
+        assert!(!text.contains("X-Goog-Signature"), "{what}: {text}");
+        assert!(!text.contains("ya29."), "a token is in the {what}");
+        assert!(
+            !text.contains("secret only the server"),
+            "the secret is in the {what}"
+        );
+    }
+    assert!(!logs.contains("storage.googleapis.com"), "{logs}");
+    assert!(!logs.contains("artifact link redirect failed"), "{logs}");
+    // The request span names the route, not the path.
+    assert!(logs.contains("/a/[redacted]"), "{logs}");
+    // The capture recorded the link sent back, id and query redacted.
+    assert!(
+        captured.contains(&format!("{ORIGIN}/a/[redacted]/1.png?[redacted]")),
+        "{captured}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn short_links_never_reach_the_logs_or_the_capture_file() {
+    let (link, logs, captured) = short_link_round_trip(None).await;
+    no_short_link_secrets(&link, &logs, &captured);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn short_links_stay_out_of_the_logs_at_pscat_mcp_trace() {
+    let (link, logs, captured) = short_link_round_trip(Some("info,pscat_mcp=trace")).await;
+    no_short_link_secrets(&link, &logs, &captured);
+    // The route's one line, at DEBUG, has an outcome only.
+    let lines: Vec<Value> = logs
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["message"] == "short link")
+        .collect();
+    let outcomes: Vec<&str> = lines
+        .iter()
+        .map(|v| v["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["redirect", "forbidden", "redirect", "method_not_allowed"],
+        "{logs}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn short_links_stay_out_of_the_logs_at_trace() {
+    let (link, logs, captured) = short_link_round_trip(Some("trace")).await;
+    no_short_link_secrets(&link, &logs, &captured);
 }
