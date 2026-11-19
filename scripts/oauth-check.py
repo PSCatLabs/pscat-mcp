@@ -114,8 +114,11 @@ def https_or_loopback(url):
 # --------------------------------------------------------------- allowlist
 
 def parse_allow_user(entry):
-    """('sub'|'email', value) as `load_allowlist` reads it, or None if malformed."""
+    """('sub'|'email'|'verified', value) as `load_allowlist` reads it, or None if
+    malformed."""
     entry = entry.strip()
+    if entry.startswith("verified:"):
+        return ("verified", "*") if entry[9:].strip() == "*" else None
     if entry.startswith("sub:"):
         value = entry[4:].strip()
         return ("sub", value) if value else None
@@ -356,12 +359,13 @@ def check_token(token, issuer, resource, allow=(), jwks=None, scopes=(),
     else:
         out.append(Result(SKIP, "scope", "no --scope given (the server's default: no scope check)"))
 
-    # --- email and email_verified. Only `email:` entries depend on them, so
-    # they fail the check when such an entry is the way in (or when no
-    # allowlist was given to tell); a matching `sub:` entry makes them notes.
+    # --- email and email_verified. Only `email:` and `verified:*` entries
+    # depend on them, so they fail the check when such an entry is the way in
+    # (or when no allowlist was given to tell); a matching `sub:` entry makes
+    # them notes.
     email = claims.get("email")
     ev = claims.get("email_verified", None)
-    email_entries = [a for a in allow if a[0] == "email"]
+    email_entries = [a for a in allow if a[0] in ("email", "verified")]
     sub_matched = isinstance(sub, str) and any(k == "sub" and v == sub for k, v in allow)
     relevant = (bool(email_entries) and not sub_matched) or not allow
     bad = FAIL if relevant else INFO
@@ -380,7 +384,7 @@ def check_token(token, issuer, resource, allow=(), jwks=None, scopes=(),
                           "`email:` entries need it (a JSON boolean true)", why))
     else:
         out.append(Result(SKIP, "email_verified", "no email claims and no `email:` entries"))
-    if email_entries and not isinstance(email, str):
+    if any(a[0] == "email" for a in allow) and not isinstance(email, str):
         out.append(Result(bad, "email", "`email:` entries are used but the token has no `email` "
                           "string; add it to the JWT template or use `sub:` entries", why))
     elif isinstance(email, str):
@@ -397,6 +401,8 @@ def check_token(token, issuer, resource, allow=(), jwks=None, scopes=(),
             elif (kind == "email" and ev is True and isinstance(email, str)
                   and ascii_lower(email) == value):
                 matched.append("entry %d (email:)" % i)
+            elif kind == "verified" and ev is True:
+                matched.append("entry %d (verified:*)" % i)
         if matched:
             out.append(Result(PASS, "allowlist", "would match " + ", ".join(matched)))
         else:
@@ -523,7 +529,8 @@ def main(argv=None, environ=None, out=None):
     for n, e in enumerate(args.allow_user, 1):
         parsed = parse_allow_user(e)
         if parsed is None:  # not echoed: it may be a personal address
-            return usage("--allow-user #%d is neither sub:<subject> nor email:<address>" % n)
+            return usage("--allow-user #%d is neither sub:<subject>, email:<address> nor "
+                         "verified:*" % n)
         allow.append(parsed)
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$", args.token_env):
         # Not echoed: a token pasted here by mistake must not reach the output.

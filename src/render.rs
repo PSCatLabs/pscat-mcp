@@ -4,15 +4,17 @@
 //! backend. MCP tools (and a future REST API) call it; nothing here knows
 //! about MCP or HTTP.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::artifacts::{ArtifactStore, LinksBackend, MemoryArtifactStore};
 use crate::backend::{BackendError, RenderBackend};
@@ -20,7 +22,7 @@ use crate::config::{
     ArtifactConfig, JobsConfig, LimitsConfig, MAX_DPI, MIN_DPI, PSCAT_MAX_SIDE_PX,
 };
 use crate::generate::{GenerateJob, PlannedPage};
-use crate::jobs::{JobState, JobStatus, JobStore};
+use crate::jobs::{JobState, JobStatus, JobStore, LOCAL_PRINCIPAL};
 use crate::worker::{
     Artifact, InterpLimits, JobMode, LintNote, OutputFormat, PsDiagnostic, SyntaxScan,
     WorkerFailure, WorkerJob, WorkerResult,
@@ -590,6 +592,9 @@ pub struct RenderService {
     backend: Arc<dyn RenderBackend>,
     limits: LimitsConfig,
     slots: Arc<Semaphore>,
+    /// The per-principal cap on render slots
+    /// ([`LimitsConfig::renders_per_principal`]).
+    per_principal: Arc<PrincipalSlots>,
     /// The art catalog, fetched from a worker on first use. A failed fetch
     /// leaves it empty, so the next call tries again.
     catalog: tokio::sync::OnceCell<Arc<ArtCatalog>>,
@@ -611,7 +616,12 @@ impl RenderService {
     /// A service running jobs on `backend` under `limits`.
     pub fn new(backend: Arc<dyn RenderBackend>, limits: LimitsConfig) -> Self {
         let slots = Arc::new(Semaphore::new(limits.concurrency()));
+        let per_principal = Arc::new(PrincipalSlots::new(
+            limits.renders_per_principal(),
+            limits.renders_per_principal_all_methods(),
+        ));
         RenderService {
+            per_principal,
             jobs: Arc::new(JobStore::new(JobsConfig::default(), &limits)),
             artifact_config: ArtifactConfig::default(),
             artifacts: None,
@@ -709,21 +719,45 @@ impl RenderService {
         &self.limits
     }
 
-    /// Render a program.
+    /// Render a program, with no per-principal cap (one local user).
     pub async fn render(&self, req: RenderRequest) -> Result<RenderOutput, RenderError> {
+        self.render_as(None, req).await
+    }
+
+    /// Render a program for `owner`, whose renders share the per-principal
+    /// cap on render slots (`None`, or stdio's one local user
+    /// [`LOCAL_PRINCIPAL`]: no cap).
+    pub async fn render_as(
+        &self,
+        owner: Option<&str>,
+        req: RenderRequest,
+    ) -> Result<RenderOutput, RenderError> {
         let validated = self.check(&req, JobMode::Render)?;
-        self.render_job(validated.job).await
+        self.render_job(owner, validated.job).await
     }
 
-    /// Generate a program from non-PostScript input and render it. The
-    /// input is checked here ([`validate_generate`]); the generator and the
-    /// program run in the worker, like a render.
+    /// Generate a program from non-PostScript input and render it, with no
+    /// per-principal cap. The input is checked here ([`validate_generate`]);
+    /// the generator and the program run in the worker, like a render.
     pub async fn generate(&self, req: GenerateRequest) -> Result<RenderOutput, RenderError> {
-        let validated = self.rejected(validate_generate(&req, &self.limits))?;
-        self.render_job(validated.job).await
+        self.generate_as(None, req).await
     }
 
-    async fn render_job(&self, job: WorkerJob) -> Result<RenderOutput, RenderError> {
+    /// [`Self::generate`] for `owner` (see [`Self::render_as`]).
+    pub async fn generate_as(
+        &self,
+        owner: Option<&str>,
+        req: GenerateRequest,
+    ) -> Result<RenderOutput, RenderError> {
+        let validated = self.rejected(validate_generate(&req, &self.limits))?;
+        self.render_job(owner, validated.job).await
+    }
+
+    async fn render_job(
+        &self,
+        owner: Option<&str>,
+        job: WorkerJob,
+    ) -> Result<RenderOutput, RenderError> {
         let started = Instant::now();
         // A review sheet's deadline covers all of its cells.
         let deadline = if job.sheet.is_some() {
@@ -731,13 +765,13 @@ impl RenderService {
         } else {
             self.limits.render_timeout()
         };
-        let permit = self.slot().await?;
+        let permit = self.slot(owner).await?;
         self.render_in_slot(permit, job, deadline, started).await
     }
 
     async fn render_in_slot(
         &self,
-        permit: OwnedSemaphorePermit,
+        permit: Slot,
         job: WorkerJob,
         deadline: Duration,
         started: Instant,
@@ -826,28 +860,39 @@ impl RenderService {
         let work = {
             let service = Arc::clone(self);
             let id = id.clone();
+            let owner = owner.to_string();
             async move {
-                // A running-job permit first, then a render slot shared with
-                // every synchronous call; a queued job waits as long as it
-                // takes.
+                // A running-job permit first, then the owner's share of the
+                // render slots, then a render slot shared with every
+                // synchronous call; a queued job waits as long as it takes.
                 let _running = service
                     .jobs
                     .running_permit()
                     .await
                     .ok_or_else(shutting_down)?;
-                let permit = service
+                let principal = match service.per_principal.cap_for(&owner) {
+                    Some(_) => Some(service.per_principal.acquire(&owner).await),
+                    None => None,
+                };
+                let global = service
                     .slots
                     .clone()
                     .acquire_owned()
                     .await
                     .map_err(|_| shutting_down())?;
+                let permit = Slot {
+                    _global: global,
+                    _principal: principal,
+                };
                 service.jobs.mark_running(&id);
                 service
                     .render_in_slot(permit, job, deadline, Instant::now())
                     .await
             }
         };
-        tokio::spawn(async move { service.drive_job(guard, cancel, work).await });
+        // In the span of the request that started it, so the job's lines
+        // carry its request id (and, for `oauth`, its `sub`).
+        tokio::spawn(async move { service.drive_job(guard, cancel, work).await }.in_current_span());
         status
     }
 
@@ -927,7 +972,7 @@ impl RenderService {
         let permit = tokio::select! {
             biased;
             () = ct.cancelled() => return TaskCall::Done(Err(cancelled())),
-            p = self.slot() => match p {
+            p = self.slot(Some(owner)) => match p {
                 Ok(p) => p,
                 Err(err) => return TaskCall::Done(Err(err)),
             },
@@ -1012,13 +1057,16 @@ impl RenderService {
         tracing::info!(tool, "call promoted to a task");
         let guard = self.finish_on_drop(&id);
         let service = Arc::clone(self);
-        tokio::spawn(async move {
-            let work = async move {
-                let _running = running;
-                render.await
-            };
-            service.drive_job(guard, cancel, work).await
-        });
+        tokio::spawn(
+            async move {
+                let work = async move {
+                    let _running = running;
+                    render.await
+                };
+                service.drive_job(guard, cancel, work).await
+            }
+            .in_current_span(),
+        );
         Ok(status)
     }
 
@@ -1073,15 +1121,25 @@ impl RenderService {
         );
     }
 
-    /// Scan and execute a program, returning diagnostics and no image.
+    /// Scan and execute a program, returning diagnostics and no image; no
+    /// per-principal cap.
     pub async fn validate(&self, source: String) -> Result<ValidationReport, RenderError> {
+        self.validate_as(None, source).await
+    }
+
+    /// [`Self::validate`] for `owner` (see [`Self::render_as`]).
+    pub async fn validate_as(
+        &self,
+        owner: Option<&str>,
+        source: String,
+    ) -> Result<ValidationReport, RenderError> {
         let req = RenderRequest {
             source,
             ..RenderRequest::default()
         };
         let validated = self.check(&req, JobMode::Validate)?;
         let result = self
-            .run(validated.job, self.limits.render_timeout())
+            .run(owner, validated.job, self.limits.render_timeout())
             .await?;
         match &result.failure {
             None | Some(WorkerFailure::PostScript) => {}
@@ -1138,7 +1196,7 @@ impl RenderService {
             decided_height: None,
             sheet: None,
         };
-        let result = self.run(job, self.limits.render_timeout()).await?;
+        let result = self.run(None, job, self.limits.render_timeout()).await?;
         if let Some(failure) = result.failure.clone() {
             return Err(failure_to_error(failure, result, OutputFormat::Png, None));
         }
@@ -1171,41 +1229,86 @@ impl RenderService {
         })
     }
 
-    /// Run `job` on the backend in a render slot, killing it after
-    /// `deadline`.
-    async fn run(&self, job: WorkerJob, deadline: Duration) -> Result<WorkerResult, RenderError> {
-        let permit = self.slot().await?;
+    /// Run `job` on the backend in a render slot of `owner`'s, killing it
+    /// after `deadline`.
+    async fn run(
+        &self,
+        owner: Option<&str>,
+        job: WorkerJob,
+        deadline: Duration,
+    ) -> Result<WorkerResult, RenderError> {
+        let permit = self.slot(owner).await?;
         self.run_in_slot(permit, job, deadline).await
     }
 
-    /// A render slot, waiting at most the queue timeout.
-    async fn slot(&self) -> Result<OwnedSemaphorePermit, RenderError> {
+    /// A render slot for `owner`, waiting at most the queue timeout in all:
+    /// first for the owner's share of the slots (when the per-principal cap
+    /// is on and there is an owner), then for a slot. Waiting for the share
+    /// holds no slot, so another principal's call can take a free one.
+    async fn slot(&self, owner: Option<&str>) -> Result<Slot, RenderError> {
         let waited = Instant::now();
-        tokio::time::timeout(
-            self.limits.queue_timeout(),
-            self.slots.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| {
-            // The signal that the service needs more capacity. Only fixed
-            // fields: the wire code and the time waited.
-            tracing::warn!(
-                code = ErrorCode::ServerBusy.as_str(),
-                queue_wait_ms = waited.elapsed().as_millis() as u64,
-                "request refused: no render slot became free in time"
-            );
-            RenderError::new(
-                ErrorCode::ServerBusy,
-                "all render slots are busy; try again shortly",
-            )
-        })?
-        .map_err(|_| shutting_down())
+        let until = tokio::time::Instant::from_std(waited + self.limits.queue_timeout());
+        let capped = owner.and_then(|o| Some((o, self.per_principal.cap_for(o)?)));
+        let principal = match capped {
+            Some((owner, cap)) => Some(
+                tokio::time::timeout_at(until, self.per_principal.acquire(owner))
+                    .await
+                    .map_err(|_| {
+                        // Only fixed fields: the wire code, the cap and the
+                        // time waited, never who it was.
+                        tracing::warn!(
+                            code = ErrorCode::ServerBusy.as_str(),
+                            limit = PER_PRINCIPAL_CODE,
+                            renders_per_principal = cap,
+                            queue_wait_ms = waited.elapsed().as_millis() as u64,
+                            "request refused: this client already holds its share of the render \
+                             slots"
+                        );
+                        let mut err = RenderError::new(
+                            ErrorCode::ServerBusy,
+                            format!(
+                                "this client already has {cap} render(s) running, the most one \
+                                 client may run at once on this server; try again when one \
+                                 finishes"
+                            ),
+                        );
+                        err.input = Some(Box::new(InputDiagnostic {
+                            code: PER_PRINCIPAL_CODE.into(),
+                            token: None,
+                            limit_bytes: None,
+                            reached_bytes: None,
+                        }));
+                        err
+                    })?,
+            ),
+            None => None,
+        };
+        let global = tokio::time::timeout_at(until, self.slots.clone().acquire_owned())
+            .await
+            .map_err(|_| {
+                // The signal that the service needs more capacity. Only fixed
+                // fields: the wire code and the time waited.
+                tracing::warn!(
+                    code = ErrorCode::ServerBusy.as_str(),
+                    queue_wait_ms = waited.elapsed().as_millis() as u64,
+                    "request refused: no render slot became free in time"
+                );
+                RenderError::new(
+                    ErrorCode::ServerBusy,
+                    "all render slots are busy; try again shortly",
+                )
+            })?
+            .map_err(|_| shutting_down())?;
+        Ok(Slot {
+            _global: global,
+            _principal: principal,
+        })
     }
 
     /// Run `job` in the slot `permit` holds, killing it after `deadline`.
     async fn run_in_slot(
         &self,
-        permit: OwnedSemaphorePermit,
+        permit: Slot,
         job: WorkerJob,
         deadline: Duration,
     ) -> Result<WorkerResult, RenderError> {
@@ -1272,6 +1375,110 @@ impl RenderService {
                 );
                 Err(RenderError::new(ErrorCode::WorkerFailed, e.to_string()))
             }
+        }
+    }
+}
+
+/// `error.input.code` (and the log's `limit`) of a call refused by the
+/// per-principal cap.
+const PER_PRINCIPAL_CODE: &str = "renders_per_principal";
+
+/// A held render slot: the global permit and, under the per-principal cap,
+/// the owner's share. Dropping it (the render ended, was cancelled or was
+/// killed) frees both.
+pub(crate) struct Slot {
+    _global: OwnedSemaphorePermit,
+    _principal: Option<PrincipalLease>,
+}
+
+/// The per-principal cap on render slots: one semaphore of `cap` permits
+/// per principal id that holds or waits for a slot. An entry is removed as
+/// soon as nobody holds or waits for it, so the map stays as small as the
+/// set of principals rendering right now, however many sign in over time.
+pub(crate) struct PrincipalSlots {
+    cap: Option<usize>,
+    /// Whether every method's principals are capped (an explicit setting),
+    /// or only OAuth users (the default).
+    all_methods: bool,
+    held: Mutex<HashMap<String, Arc<Semaphore>>>,
+}
+
+impl PrincipalSlots {
+    fn new(cap: Option<usize>, all_methods: bool) -> Self {
+        PrincipalSlots {
+            cap,
+            all_methods,
+            held: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The cap that applies to `owner`, if any: none for stdio's one local
+    /// user; by default only OAuth users (`oauth:` ids) are capped, so a
+    /// shared bearer token and `none`'s one `anonymous` principal are not;
+    /// with an explicit setting every other principal is.
+    fn cap_for(&self, owner: &str) -> Option<usize> {
+        let cap = self.cap?;
+        if owner == LOCAL_PRINCIPAL {
+            return None;
+        }
+        (self.all_methods || owner.starts_with("oauth:")).then_some(cap)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Semaphore>>> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// One of `owner`'s permits, waiting as long as it takes (callers bound
+    /// the wait). Only called with a cap.
+    async fn acquire(self: &Arc<Self>, owner: &str) -> PrincipalLease {
+        let cap = self.cap.unwrap_or(1);
+        let sem = self
+            .lock()
+            .entry(owner.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(cap)))
+            .clone();
+        // Made before the wait, so a wait given up (the queue timeout, a
+        // cancelled call) still removes an entry nobody uses.
+        let mut lease = PrincipalLease {
+            slots: Arc::clone(self),
+            owner: owner.to_string(),
+            sem: Some(sem.clone()),
+            permit: None,
+        };
+        // The semaphore is never closed.
+        lease.permit = sem.acquire_owned().await.ok();
+        lease
+    }
+
+    /// Principals holding or waiting for a slot (tests).
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// A principal's share of a render slot, held or waited for.
+struct PrincipalLease {
+    slots: Arc<PrincipalSlots>,
+    owner: String,
+    sem: Option<Arc<Semaphore>>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for PrincipalLease {
+    fn drop(&mut self) {
+        // Release first, so the count below sees only other users.
+        drop(self.permit.take());
+        drop(self.sem.take());
+        let mut held = self.slots.lock();
+        // Every holder and waiter keeps a clone; only the map's is left
+        // when nobody uses the entry. Clones are taken under the lock, so
+        // the count cannot grow while it is checked.
+        if held
+            .get(&self.owner)
+            .is_some_and(|sem| Arc::strong_count(sem) == 1)
+        {
+            held.remove(&self.owner);
         }
     }
 }
@@ -1866,5 +2073,220 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::WorkerFailed);
+    }
+
+    /// A backend whose job, named by its source, runs until the test opens
+    /// that source's gate (or drops the call).
+    #[derive(Default)]
+    struct Gated {
+        gates: Mutex<HashMap<String, Arc<Semaphore>>>,
+        started: AtomicU64,
+    }
+
+    impl Gated {
+        fn gate(&self, name: &str) -> Arc<Semaphore> {
+            self.gates
+                .lock()
+                .unwrap()
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(0)))
+                .clone()
+        }
+    }
+
+    impl RenderBackend for Gated {
+        fn execute(
+            &self,
+            job: WorkerJob,
+            _deadline: std::time::Duration,
+        ) -> crate::backend::BackendFuture<'_> {
+            let gate = self.gate(&job.source);
+            self.started.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let _open = gate.acquire().await;
+                Ok(WorkerResult::empty())
+            })
+        }
+    }
+
+    async fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        for _ in 0..1000 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_principal_cannot_take_every_render_slot() {
+        let backend = Arc::new(Gated::default());
+        let limits = LimitsConfig {
+            max_concurrent_renders: Some(2),
+            queue_timeout_ms: 200,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(limits.renders_per_principal(), Some(1));
+        let svc = Arc::new(RenderService::new(backend.clone(), limits));
+        let started = || backend.started.load(Ordering::SeqCst);
+        let spawn = |owner: &'static str, source: &'static str| {
+            let svc = svc.clone();
+            tokio::spawn(async move { svc.render_as(Some(owner), req(source)).await })
+        };
+
+        // A holds its one share; its second call waits out the queue
+        // timeout without taking the free slot, and is refused as busy.
+        let a1 = spawn("oauth:aaaa", "a1");
+        wait_for("a1 to start", || started() == 1).await;
+        let err = svc
+            .render_as(Some("oauth:aaaa"), req("a2"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ServerBusy, "{err}");
+        assert_eq!(
+            err.input.as_ref().map(|i| i.code.as_str()),
+            Some(PER_PRINCIPAL_CODE)
+        );
+        assert!(err.message.contains("1 render(s) running"), "{err}");
+        assert_eq!(started(), 1);
+        // Another principal still gets the free slot.
+        let b1 = spawn("oauth:bbbb", "b1");
+        wait_for("b1 to start", || started() == 2).await;
+        assert_eq!(svc.per_principal.tracked(), 2);
+
+        // A's render ends: A gets a slot again.
+        backend.gate("a1").add_permits(1);
+        a1.await.unwrap().unwrap_err(); // no artifacts: worker_failed
+        let a3 = spawn("oauth:aaaa", "a3");
+        wait_for("a3 to start", || started() == 3).await;
+        // A's render is cancelled (the call dropped): A gets a slot again.
+        a3.abort();
+        assert!(a3.await.unwrap_err().is_cancelled());
+        let a4 = spawn("oauth:aaaa", "a4");
+        wait_for("a4 to start", || started() == 4).await;
+
+        // Every share freed, the map is empty again.
+        a4.abort();
+        b1.abort();
+        let _ = (a4.await, b1.await);
+        assert_eq!(svc.per_principal.tracked(), 0);
+        assert_eq!(svc.slots.available_permits(), 2);
+
+        // stdio's one local user, and a call with no owner, are not
+        // limited: both slots at once.
+        let l1 = spawn(LOCAL_PRINCIPAL, "l1");
+        let svc2 = svc.clone();
+        let l2 = tokio::spawn(async move { svc2.render(req("l2")).await });
+        wait_for("both local renders to start", || started() == 6).await;
+        assert_eq!(svc.per_principal.tracked(), 0);
+        l1.abort();
+        l2.abort();
+        let _ = (l1.await, l2.await);
+    }
+
+    #[test]
+    fn the_default_cap_is_for_oauth_users_and_an_explicit_one_for_all() {
+        let slots = |cap: Option<usize>| {
+            let l = LimitsConfig {
+                max_concurrent_renders: Some(2),
+                max_renders_per_principal: cap,
+                ..LimitsConfig::default()
+            };
+            PrincipalSlots::new(
+                l.renders_per_principal(),
+                l.renders_per_principal_all_methods(),
+            )
+        };
+        // Default: only OAuth users; a shared bearer token, `none`'s one
+        // `anonymous` and stdio's local user are not capped.
+        let d = slots(None);
+        assert_eq!(d.cap_for("oauth:0123abcd"), Some(1));
+        for id in ["token#0", "anonymous", LOCAL_PRINCIPAL] {
+            assert_eq!(d.cap_for(id), None, "{id}");
+        }
+        // Explicit: every principal but stdio's.
+        let e = slots(Some(1));
+        for id in ["oauth:0123abcd", "token#0", "anonymous"] {
+            assert_eq!(e.cap_for(id), Some(1), "{id}");
+        }
+        assert_eq!(e.cap_for(LOCAL_PRINCIPAL), None);
+        // 0: off for all.
+        assert_eq!(slots(Some(0)).cap_for("oauth:0123abcd"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bearer_token_takes_every_slot_by_default() {
+        let backend = Arc::new(Gated::default());
+        let limits = LimitsConfig {
+            max_concurrent_renders: Some(2),
+            queue_timeout_ms: 200,
+            ..LimitsConfig::default()
+        };
+        let svc = Arc::new(RenderService::new(backend.clone(), limits));
+        let calls: Vec<_> = ["t1", "t2"]
+            .into_iter()
+            .map(|src| {
+                let svc = svc.clone();
+                tokio::spawn(async move { svc.render_as(Some("token#0"), req(src)).await })
+            })
+            .collect();
+        wait_for("both renders to start", || {
+            backend.started.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        assert_eq!(svc.per_principal.tracked(), 0);
+        for c in calls {
+            c.abort();
+            let _ = c.await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_waiting_job_takes_its_share_and_gives_it_back() {
+        let backend = Arc::new(Gated::default());
+        let limits = LimitsConfig {
+            max_concurrent_renders: Some(4),
+            queue_timeout_ms: 200,
+            // Explicit, so the plain owner `p` is capped too.
+            max_renders_per_principal: Some(2),
+            ..LimitsConfig::default()
+        };
+        let jobs = JobsConfig {
+            max_running_jobs: Some(3),
+            ..JobsConfig::default()
+        }
+        .enabled();
+        let svc = Arc::new(RenderService::new(backend.clone(), limits).with_jobs(jobs));
+        let started = || backend.started.load(Ordering::SeqCst);
+        // Two jobs fill p's share of 2; a third waits, holding no slot.
+        let mut ids = Vec::new();
+        for src in ["j1", "j2", "j3"] {
+            let r = JobRequest::Render(req(src));
+            ids.push(svc.start_job("p", r).unwrap().job_id);
+        }
+        wait_for("two jobs to start", || started() == 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(started(), 2);
+        assert_eq!(svc.slots.available_permits(), 2);
+        // A sync call of p's is refused while its share is held.
+        let err = svc.render_as(Some("p"), req("s1")).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::ServerBusy);
+        // Cancelling a running job lets the waiting one start.
+        let first_running = ids
+            .iter()
+            .find(|id| svc.jobs().status("p", id).unwrap().state == JobState::Running)
+            .unwrap()
+            .clone();
+        svc.cancel_job("p", &first_running).await.unwrap();
+        wait_for("the third job to start", || started() == 3).await;
+        for id in &ids {
+            let _ = svc.cancel_job("p", id).await;
+        }
+        wait_for("every share to be freed", || {
+            svc.per_principal.tracked() == 0
+        })
+        .await;
+        assert_eq!(svc.slots.available_permits(), 4);
     }
 }

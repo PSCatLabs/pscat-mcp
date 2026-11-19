@@ -69,7 +69,7 @@ the deployment wires:
 | `PSCAT_MCP_AUTH` | env | `bearer,oauth` (bearer for Claude Code, scripts and CI; OAuth for ChatGPT and claude.ai), or `oauth` |
 | `PSCAT_MCP_OAUTH_ISSUER` | env, not secret | the provider's issuer URL exactly as it appears in tokens' `iss` (mind a trailing `/`) |
 | `PSCAT_MCP_OAUTH_RESOURCE` | env, not secret | the public URL clients connect to, e.g. `https://<custom domain>/mcp`; tokens' `aud` must contain it. Use the custom domain the connectors are given, not the `run.app` URL, unless that is what users type |
-| `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | Secret Manager volume (personal data, not a credential) | allowlist, one `sub:<subject>` or `email:<address>` per line; or `PSCAT_MCP_OAUTH_ALLOWED_USERS` (comma list, env). Required |
+| `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | Secret Manager volume (personal data, not a credential) | allowlist, one `sub:<subject>` or `email:<address>` per line, or the single line `verified:*` to admit anyone with a verified email; or `PSCAT_MCP_OAUTH_ALLOWED_USERS` (comma list, env; `verified:*` alone holds no personal data, so an env var is fine for it). Required |
 | `PSCAT_MCP_OAUTH_SCOPES` | env, optional | scopes every token must carry, comma list |
 | `PSCAT_MCP_OAUTH_JWKS_URL` | env, optional | only if discovery (RFC 8414 / OpenID Connect) does not work for the provider |
 | `PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS`, `PSCAT_MCP_OAUTH_JWKS_TTL_SECS`, `PSCAT_MCP_OAUTH_JWKS_REFETCH_SECS`, `PSCAT_MCP_OAUTH_LEEWAY_SECS` | env, optional | defaults 5000, 600, 30, 60 |
@@ -108,6 +108,15 @@ the deployment wires:
   `PSCAT_MCP_MAX_CONCURRENT_RENDERS`: `initialize`, `tools/list` and health
   checks are cheap, and extra renders queue for up to
   `PSCAT_MCP_QUEUE_TIMEOUT_MS`, then get `server_busy`.
+* **Per-user share.** By default one OAuth user holds at most half the
+  slots, rounded up: one of two on a `--cpu 2` instance. Further calls wait
+  the queue timeout without taking a free slot, then get `server_busy` with
+  `error.input.code` `renders_per_principal`, so one user cannot block the
+  others. Bearer tokens (shared by CI, scripts and agents) and `none` are
+  not capped unless `PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL` is set
+  explicitly, which caps every principal at that value (all of `none`'s
+  anonymous callers are one principal). The count is per instance. 0 turns
+  it off.
 * **Memory.** About `max_concurrent_renders × (max_memory + 300 MiB)` plus
   50 MiB for the server. With the defaults and 2 renders: about 1.6 GiB, so
   2 GiB (`--memory=2Gi`). With 4 renders: about 3.2 GiB, more than that
@@ -470,10 +479,21 @@ with `reason` and `rejected_by`, and the startup lines name the enabled
 `auth_methods`. With `oauth`, a refused token also logs `oauth: token
 rejected` with a fixed `reason` (such as `expired`, `wrong_audience`,
 `not_allowed`, `jwks_unavailable`), and a failed JWKS fetch logs a warning;
-no subject, email or token is ever logged, and the principal is a hash. There is one line per render with source byte count,
+no email, token or claim other than `sub` is ever logged, and the job owner
+is a hash. An accepted OAuth request's lines carry `sub`, the token's
+subject (the WorkOS user id, `user_…`), on purpose (issue #160): the owner
+can find who made a request in the AuthKit dashboard or the WorkOS API by that ID.
+Its render lines and those of an async job it started carry it too, since
+they are logged in the request's span. That reverses the earlier "no
+per-user labels" rule for log lines only: `sub` is personal data (it
+identifies a user at WorkOS), so limit who can read the service's logs and
+keep Cloud Logging's retention short. `bearer` and `none` requests carry no
+`sub`. There is one line per render with source byte count,
 steps, elapsed ms, pages and failure flag. PostScript source and tokens are
 never logged, except in the opt-in capture mode (`PSCAT_MCP_CAPTURE_FILE`),
-which only starts on a loopback bind and so never in a deployment. No per-user or per-program labels are emitted, so cardinality
+which only starts on a loopback bind and so never in a deployment; the
+capture file holds no `sub`. No metric has a per-user or per-program
+label (do not build a log-based metric labelled by `sub`), so cardinality
 stays low.
 
 The failure and queue lines carry the wire error code (the response's
@@ -485,6 +505,7 @@ The failure and queue lines carry the wire error code (the response's
 | `render killed at the deadline` (WARN) | `code=timeout`: the wall-clock deadline killed the worker. |
 | `render worker failed` (ERROR) | `code=worker_failed`: the worker crashed or its output was unusable. |
 | `request refused: no render slot became free in time` (WARN) | `code=server_busy` and `queue_wait_ms`: one line per request that waited out `PSCAT_MCP_QUEUE_TIMEOUT_MS` for a render slot (the signal to add capacity). Other `server_busy` causes (async job caps, shutdown) are not logged here. |
+| `request refused: this client already holds its share of the render slots` (WARN) | `code=server_busy`, `limit=renders_per_principal`, `renders_per_principal` (the cap) and `queue_wait_ms`: a client waited out the queue timeout for its own share (`PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL`). A sign that one client is busy, not that the service needs capacity; for an OAuth client, the span's `sub` says who. |
 | `request rejected before execution` | `code`: the wire code (`invalid_request`, `source_too_large`, `too_many_pixels`, ...). |
 
 The code and limit are never taken from the program: a PostScript error's name

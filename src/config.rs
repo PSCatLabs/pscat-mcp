@@ -147,6 +147,15 @@ pub struct LimitsConfig {
     #[arg(long, env = "PSCAT_MCP_QUEUE_TIMEOUT_MS", default_value_t = 10_000)]
     pub queue_timeout_ms: u64,
 
+    /// Most render slots one principal (a bearer token, an OAuth user, the
+    /// shared `anonymous` of `none`) holds at once, so one client cannot take
+    /// every slot. A call over it waits like any other for the queue
+    /// timeout, then fails with `server_busy`. Defaults to half the slots,
+    /// rounded up (at least 1); 0 turns it off. A value at or above the slot
+    /// count changes nothing. stdio (one local user) is not limited.
+    #[arg(long, env = "PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL")]
+    pub max_renders_per_principal: Option<usize>,
+
     /// Most cells (dpi entries over all rows) one `review_sheet` may have.
     /// Checked before execution. The PSCat plugin's limit.
     #[arg(long, env = "PSCAT_MCP_MAX_SHEET_CELLS", default_value_t = 32)]
@@ -202,6 +211,7 @@ impl Default for LimitsConfig {
             max_program_output_bytes: 16 * 1024,
             max_concurrent_renders: None,
             queue_timeout_ms: 10_000,
+            max_renders_per_principal: None,
             max_sheet_cells: 32,
             max_sheet_source_bytes: None,
             max_sheet_cell_pixels: None,
@@ -320,6 +330,29 @@ impl LimitsConfig {
                     .unwrap_or(1)
                     .min(4)
             })
+    }
+
+    /// Render slots one principal may hold at once, or `None` when there
+    /// is no such limit: turned off (0), or at or above the slot count. The
+    /// default is half the slots, rounded up, at least 1. Whom it applies
+    /// to is [`Self::renders_per_principal_all_methods`].
+    pub fn renders_per_principal(&self) -> Option<usize> {
+        let slots = self.concurrency();
+        let cap = match self.max_renders_per_principal {
+            Some(0) => return None,
+            Some(n) => n,
+            None => slots.div_ceil(2).max(1),
+        };
+        (cap < slots).then_some(cap)
+    }
+
+    /// Whether the per-principal cap applies to every auth method's
+    /// principals (the setting given explicitly, above 0) or, by default,
+    /// only to OAuth users (`oauth:` ids): a bearer token is often shared
+    /// by several clients (CI, scripts, a developer's agent), so it is
+    /// capped only on request. stdio's local user is never capped.
+    pub fn renders_per_principal_all_methods(&self) -> bool {
+        self.max_renders_per_principal.is_some_and(|n| n > 0)
     }
 
     /// Queue wait before `server_busy`.
@@ -1541,6 +1574,29 @@ mod tests {
             ..LimitsConfig::default()
         };
         assert_eq!(one.concurrency(), 1);
+    }
+
+    #[test]
+    fn renders_per_principal_defaults_to_half_the_slots() {
+        let with = |slots: usize, cap: Option<usize>| LimitsConfig {
+            max_concurrent_renders: Some(slots),
+            max_renders_per_principal: cap,
+            ..LimitsConfig::default()
+        };
+        // Half, rounded up; with one slot the cap is that slot, so no limit.
+        assert_eq!(with(1, None).renders_per_principal(), None);
+        assert_eq!(with(2, None).renders_per_principal(), Some(1));
+        assert_eq!(with(3, None).renders_per_principal(), Some(2));
+        assert_eq!(with(4, None).renders_per_principal(), Some(2));
+        // 0 is off; at or above the slot count changes nothing.
+        assert_eq!(with(4, Some(0)).renders_per_principal(), None);
+        assert_eq!(with(4, Some(4)).renders_per_principal(), None);
+        assert_eq!(with(4, Some(9)).renders_per_principal(), None);
+        assert_eq!(with(4, Some(3)).renders_per_principal(), Some(3));
+        // By default only OAuth users; an explicit value caps every method.
+        assert!(!with(2, None).renders_per_principal_all_methods());
+        assert!(!with(2, Some(0)).renders_per_principal_all_methods());
+        assert!(with(2, Some(1)).renders_per_principal_all_methods());
     }
 
     #[test]

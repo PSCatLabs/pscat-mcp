@@ -39,8 +39,10 @@
 //! * every scope of `PSCAT_MCP_OAUTH_SCOPES` is granted (`scope`, space
 //!   separated, or `scp`), else `403 insufficient_scope`;
 //! * the user is on the allowlist, else `403 not_allowed`: `sub:<subject>`
-//!   (the issuer is already fixed, so this is issuer plus subject), or
-//!   `email:<address>` only when the token also says `email_verified: true`.
+//!   (the issuer is already fixed, so this is issuer plus subject),
+//!   `email:<address>` only when the token also says `email_verified: true`,
+//!   or, with the entry `verified:*`, any subject whose token says
+//!   `email_verified: true` (the JSON boolean; no `email` claim needed).
 //!
 //! The token is only parsed (bounded JSON) and checked here, in the server;
 //! nothing in it is executed, and no PostScript runs before it is accepted.
@@ -66,9 +68,15 @@
 //! # Privacy
 //!
 //! The principal id is `oauth:` and 128 bits of SHA-256 over issuer and
-//! subject, so neither the subject nor an email reaches a log line or a job
-//! record. Rejections log only a fixed `reason` (at INFO), never the token or
-//! a claim.
+//! subject; job records and the per-principal budgets use only it. The
+//! token's `sub` itself is kept on the [`Principal`] as
+//! [`Principal::subject`] and logged as the request span's `sub` field
+//! (issue #160), so the operator can look the user up at the issuer. That is
+//! a deliberate reversal of the earlier "no per-user labels" design: the
+//! `sub` is an opaque issuer id, never an email. No other claim, no email and
+//! never the token reaches a log line; metrics carry no per-user label, and
+//! the capture file holds no principal. Rejections log only a fixed `reason`
+//! (at INFO), never the token or a claim.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -131,8 +139,9 @@ pub struct OauthConfig {
     )]
     pub scopes: Vec<String>,
 
-    /// Users allowed in, comma separated: `sub:<subject>` or
-    /// `email:<address>` (matched only when `email_verified` is true).
+    /// Users allowed in, comma separated: `sub:<subject>`,
+    /// `email:<address>` (matched only when `email_verified` is true), or
+    /// `verified:*` (any user whose `email_verified` is true).
     #[arg(
         long = "oauth-allowed-users",
         env = "PSCAT_MCP_OAUTH_ALLOWED_USERS",
@@ -237,6 +246,13 @@ impl OauthConfig {
                 let sub = sub.trim();
                 anyhow::ensure!(!sub.is_empty(), "an allowlist entry `sub:` has no subject");
                 list.subjects.insert(sub.to_string());
+            } else if let Some(rest) = entry.strip_prefix("verified:") {
+                // Do not echo the entry: only `*` is defined.
+                anyhow::ensure!(
+                    rest.trim() == "*",
+                    "an allowlist entry `verified:` must be exactly `verified:*`"
+                );
+                list.any_verified = true;
             } else if let Some(email) = entry.strip_prefix("email:") {
                 let email = email.trim();
                 anyhow::ensure!(
@@ -248,7 +264,7 @@ impl OauthConfig {
                 // Do not echo the entry: it may be a personal address.
                 anyhow::bail!(
                     "an entry of PSCAT_MCP_OAUTH_ALLOWED_USERS(_FILE) is neither `sub:<subject>` \
-                     nor `email:<address>`"
+                     nor `email:<address>` (nor `verified:*`)"
                 );
             }
         }
@@ -261,20 +277,27 @@ struct Allowlist {
     subjects: HashSet<String>,
     /// Lowercased.
     emails: HashSet<String>,
+    /// `verified:*`: any token whose `email_verified` is `true`.
+    any_verified: bool,
 }
 
 impl Allowlist {
+    /// The number of entries, `verified:*` counting as one.
     fn len(&self) -> usize {
-        self.subjects.len() + self.emails.len()
+        self.subjects.len() + self.emails.len() + usize::from(self.any_verified)
     }
 
     fn allows(&self, claims: &Value, sub: &str) -> bool {
         if self.subjects.contains(sub) {
             return true;
         }
-        // An email only counts when the issuer vouches for it.
-        claims["email_verified"] == Value::Bool(true)
-            && claims["email"]
+        // An email only counts when the issuer vouches for it: the JSON
+        // boolean `true`, never the string "true".
+        if claims["email_verified"] != Value::Bool(true) {
+            return false;
+        }
+        self.any_verified
+            || claims["email"]
                 .as_str()
                 .is_some_and(|e| self.emails.contains(&e.to_ascii_lowercase()))
     }
@@ -783,9 +806,17 @@ impl OauthAuth {
         anyhow::ensure!(
             allow.len() > 0,
             "auth method `oauth` needs an allowlist: set PSCAT_MCP_OAUTH_ALLOWED_USERS or \
-             PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE (entries `sub:<subject>` or `email:<address>`); \
-             being able to sign in at the issuer is not enough"
+             PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE (entries `sub:<subject>` or `email:<address>`, \
+             or `verified:*` for any user with a verified email); being able to sign in at the \
+             issuer is not enough"
         );
+        if allow.any_verified {
+            tracing::warn!(
+                "the OAuth allowlist has `verified:*`: ANY user who signs in at the issuer with a \
+                 verified email is admitted and can spend this server's render time; the other \
+                 entries are still honoured"
+            );
+        }
         anyhow::ensure!(
             cfg.jwks_timeout_ms > 0,
             "PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS must be positive"
@@ -1010,10 +1041,7 @@ impl OauthAuth {
         if !self.allow.allows(c, sub) {
             return Err(Reject::NotAllowed);
         }
-        Ok(Principal::new(
-            OauthAuth::NAME,
-            principal_id(&self.issuer, sub),
-        ))
+        Ok(Principal::new(OauthAuth::NAME, principal_id(&self.issuer, sub)).with_subject(sub))
     }
 }
 
@@ -1087,11 +1115,15 @@ impl AuthMethod for OauthAuth {
     }
 
     fn summary(&self) -> String {
+        let listed = self.allow.subjects.len() + self.allow.emails.len();
+        let users = if self.allow.any_verified {
+            format!("{listed} listed user(s) and any verified email (verified:*)")
+        } else {
+            format!("{listed} allowed user(s)")
+        };
         format!(
-            "oauth (issuer {}, resource {}, {} allowed user(s))",
-            self.issuer,
-            self.resource,
-            self.allow.len()
+            "oauth (issuer {}, resource {}, {users})",
+            self.issuer, self.resource
         )
     }
 }
@@ -1224,6 +1256,45 @@ mod tests {
         for bad in [&["alice@example.com"][..], &["sub:"], &["email:nobody"]] {
             let err = cfg(bad).load_allowlist().unwrap_err().to_string();
             assert!(!err.contains("alice"), "{err}");
+        }
+        assert!(!list.any_verified);
+    }
+
+    #[test]
+    fn verified_star_admits_any_verified_subject() {
+        let cfg = |entries: &[&str]| OauthConfig {
+            allowed_users: entries.iter().map(|s| s.to_string()).collect(),
+            ..OauthConfig::default()
+        };
+        let list = cfg(&["verified:*"]).load_allowlist().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list.any_verified);
+        assert!(list.allows(&json!({"email_verified": true}), "anyone"));
+        assert!(list.allows(
+            &json!({"email": "x@example.com", "email_verified": true}),
+            "anyone"
+        ));
+        for refused in [
+            json!({}),
+            json!({"email_verified": false}),
+            json!({"email_verified": "true"}),
+            json!({"email_verified": 1}),
+            json!({"email": "x@example.com"}),
+        ] {
+            assert!(!list.allows(&refused, "anyone"), "{refused}");
+        }
+        // Next to the other entries, which keep working.
+        let list = cfg(&["sub:abc", " verified: * ", "email:a@example.com"])
+            .load_allowlist()
+            .unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.allows(&json!({}), "abc"));
+        assert!(!list.allows(&json!({}), "abd"));
+        // Only `*` is defined, and the entry is not echoed.
+        for bad in ["verified:secret-person", "verified:", "verified:**"] {
+            let err = cfg(&[bad]).load_allowlist().unwrap_err().to_string();
+            assert!(!err.contains("secret-person"), "{err}");
+            assert!(err.contains("verified:*"), "{err}");
         }
     }
 

@@ -524,6 +524,16 @@ fn invalid_tokens(issuer: &str) -> Vec<(&'static str, String)> {
                 }),
             ),
         ),
+        (
+            "empty sub",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.insert("sub".into(), json!(""));
+                }),
+            ),
+        ),
         ("not a JWT", "abc.def".into()),
         ("too large", "a".repeat(9000)),
     ]
@@ -639,6 +649,132 @@ async fn tokens_are_validated() {
     assert_eq!(executed(&svc), 1);
     // One discovery and one JWKS fetch served everything above.
     assert_eq!(m.jwks_fetches.load(Ordering::SeqCst), 1);
+}
+
+/// `verified:*` (issue #160) admits any subject whose token says
+/// `email_verified: true`, with or without an `email`, next to the other
+/// entries; every other check still applies.
+#[tokio::test(flavor = "multi_thread")]
+async fn verified_star_admits_any_verified_email() {
+    let m = mock_as().await;
+    let svc = service();
+    let mut oauth = oauth_config(&m);
+    oauth.allowed_users = vec![format!("sub:{ALICE}"), "verified:*".into()];
+    let srv = serve(svc.clone(), authn("oauth", oauth)).await;
+    let verified = |sub: &str| {
+        with(claims(&m.base, sub), |c| {
+            c.insert("email_verified".into(), json!(true));
+        })
+    };
+
+    // Any subject with a verified email, with or without the `email`
+    // claim; the `sub:` entry still admits ALICE without one.
+    for (what, c) in [
+        ("verified, no email", verified(BOB)),
+        (
+            "verified with an email",
+            with(verified("dave-subject-31"), |c| {
+                c.insert("email".into(), json!("dave@example.com"));
+            }),
+        ),
+        ("sub: entry, no email_verified", claims(&m.base, ALICE)),
+    ] {
+        let seen = post(&srv.url, &sign(Signer::Es256, "ec-1", &c), &initialize()).await;
+        assert_eq!(seen.status, 200, "{what}: {seen:?}");
+    }
+
+    // Not vouched for: 403 not_allowed.
+    for (what, c) in [
+        ("no email_verified", claims(&m.base, BOB)),
+        (
+            "email_verified false",
+            with(claims(&m.base, BOB), |c| {
+                c.insert("email_verified".into(), json!(false));
+            }),
+        ),
+        (
+            "email_verified as a string",
+            with(claims(&m.base, BOB), |c| {
+                c.insert("email_verified".into(), json!("true"));
+            }),
+        ),
+        (
+            "email_verified as a number",
+            with(claims(&m.base, BOB), |c| {
+                c.insert("email_verified".into(), json!(1));
+            }),
+        ),
+    ] {
+        let seen = post(&srv.url, &sign(Signer::Rs256, "rsa-1", &c), &render_call()).await;
+        assert_eq!(seen.status, 403, "{what}: {seen:?}");
+        assert_eq!(seen.error(), "not_allowed", "{what}");
+    }
+
+    // Every other check still applies, to a verified token too: 401.
+    let good = verified(BOB);
+    for (what, token) in [
+        ("bad signature", sign(Signer::Rogue, "ec-1", &good)),
+        (
+            "wrong audience",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.insert("aud".into(), json!("https://other.example.test/mcp"));
+                }),
+            ),
+        ),
+        (
+            "wrong issuer",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.insert("iss".into(), json!("https://evil.example.test"));
+                }),
+            ),
+        ),
+        (
+            "expired",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.insert("exp".into(), json!(now() - 3600));
+                }),
+            ),
+        ),
+        (
+            "empty sub",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.insert("sub".into(), json!(""));
+                }),
+            ),
+        ),
+        (
+            "no sub",
+            sign(
+                Signer::Es256,
+                "ec-1",
+                &with(good.clone(), |c| {
+                    c.remove("sub");
+                }),
+            ),
+        ),
+    ] {
+        let seen = post(&srv.url, &token, &render_call()).await;
+        assert_eq!(seen.status, 401, "{what}: {seen:?}");
+        assert_eq!(seen.error(), "invalid_token", "{what}");
+    }
+    // The shared invalid set too.
+    for (what, token) in invalid_tokens(&m.base) {
+        let seen = post(&srv.url, &token, &render_call()).await;
+        assert_eq!(seen.status, 401, "{what}: {seen:?}");
+    }
+    assert_eq!(executed(&svc), 0, "no PostScript ran for a refused request");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1137,23 +1273,45 @@ fn startup_refuses_a_bad_oauth_config() {
     assert!(!out.status.success());
     assert!(stderr.contains("neither"), "{stderr}");
     assert!(!stderr.contains("secret.person"), "{stderr}");
+    // `verified:` takes only `*`; anything else is refused, not echoed.
+    for entry in ["verified:secret-person", "verified:", "sub:abc,verified:no"] {
+        let mut cmd = server_command();
+        cmd.env("PSCAT_MCP_AUTH", "oauth");
+        for (k, v) in replace("PSCAT_MCP_OAUTH_ALLOWED_USERS", "x") {
+            if k != "PSCAT_MCP_OAUTH_ALLOWED_USERS" {
+                cmd.env(k, v);
+            }
+        }
+        cmd.env("PSCAT_MCP_OAUTH_ALLOWED_USERS", entry);
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{entry} must not start: {stderr}");
+        assert!(stderr.contains("exactly `verified:*`"), "{entry}: {stderr}");
+        assert!(!stderr.contains("secret-person"), "{stderr}");
+        assert!(!stderr.contains("listening"), "{stderr}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The binary with `PSCAT_MCP_AUTH=oauth` against the mock issuer: an
-/// accepted request logs `auth_method=oauth`, a refused one its reason, and
-/// no subject, email or token appears in the logs at INFO.
+/// The binary with `PSCAT_MCP_AUTH=bearer,oauth` against the mock issuer
+/// and an allowlist with `verified:*`: startup warns about `verified:*`; an
+/// accepted OAuth request logs `auth_method=oauth` and the token's subject as
+/// `sub` (issue #160) on its own lines, its render's and its async job's; a
+/// bearer request carries no `sub`; a refused one logs its reason and no
+/// subject; and no email, other claim or token appears in the logs at INFO.
 #[tokio::test(flavor = "multi_thread")]
-async fn logs_never_carry_identity_or_tokens() {
+async fn logs_carry_the_subject_but_never_emails_or_tokens() {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     let m = mock_as().await;
     let mut child = tokio::process::Command::from(server_command())
-        .env("PSCAT_MCP_AUTH", "oauth")
+        .env("PSCAT_MCP_AUTH", "bearer,oauth")
+        .env("PSCAT_MCP_AUTH_TOKENS", STATIC_TOKEN)
+        .env("PSCAT_MCP_ASYNC_JOBS", "true")
         .env("PSCAT_MCP_OAUTH_ISSUER", &m.base)
         .env("PSCAT_MCP_OAUTH_RESOURCE", RESOURCE)
         .env(
             "PSCAT_MCP_OAUTH_ALLOWED_USERS",
-            format!("sub:{ALICE},email:{CAROL_EMAIL}"),
+            format!("sub:{ALICE},email:{CAROL_EMAIL},verified:*"),
         )
         .env("PSCAT_MCP_LOG_FORMAT", "json")
         .env("RUST_LOG", "info")
@@ -1215,11 +1373,38 @@ async fn logs_never_carry_identity_or_tokens() {
     assert_eq!(post(&url, &carol, &initialize()).await.status, 200);
     assert_eq!(post(&url, &bob, &initialize()).await.status, 403);
     assert_eq!(post(&url, &expired, &initialize()).await.status, 401);
-    let mut responses = 0;
-    while responses < 4 {
+    // A render and an async job as ALICE, and a render with the bearer
+    // token; the three programs differ in length, so `source_bytes` tells
+    // their lines apart.
+    let tool = |name: &str, source: &str| {
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": name,
+            "arguments": {"source": source, "width": 20, "height": 20},
+        }})
+    };
+    const SYNC: &str = "0 0 moveto 10 10 lineto stroke showpage";
+    const JOB: &str = "showpage";
+    const BEARER: &str = "1 pop showpage";
+    let seen = post(&url, &alice, &tool("render_postscript", SYNC)).await;
+    assert_eq!(seen.status, 200, "{seen:?}");
+    let seen = post(&url, &alice, &tool("start_render", JOB)).await;
+    assert_eq!(seen.status, 200, "{seen:?}");
+    assert!(seen.body.contains("job_id"), "{seen:?}");
+    let seen = post(&url, STATIC_TOKEN, &tool("render_postscript", BEARER)).await;
+    assert_eq!(seen.status, 200, "{seen:?}");
+    // Seven responses, and three renders ended (the job's may come after
+    // its response; on a loaded machine one may be killed at its deadline).
+    let (mut responses, mut ended) = (0, 0);
+    while responses < 7 || ended < 3 {
         let v = next_line().await;
         if v["message"] == "finished processing request" {
             responses += 1;
+        }
+        if matches!(
+            v["message"].as_str(),
+            Some("render finished" | "render killed at the deadline" | "render worker failed")
+        ) {
+            ended += 1;
         }
         log.push(v);
     }
@@ -1230,10 +1415,16 @@ async fn logs_never_carry_identity_or_tokens() {
         .map(|v| v.to_string())
         .collect::<Vec<_>>()
         .join("\n");
+    // ALICE is logged, on purpose, only as the span's `sub`; BOB and the
+    // expired token never got past the auth layer.
+    assert!(
+        log.iter()
+            .filter(|v| v.to_string().contains(ALICE))
+            .all(|v| v["span"]["sub"] == ALICE),
+        "{text}"
+    );
     for secret in [
-        ALICE,
         BOB,
-        "carol-subject",
         "alice.private",
         CAROL_EMAIL,
         &alice[alice.len() - 20..],
@@ -1247,11 +1438,65 @@ async fn logs_never_carry_identity_or_tokens() {
             .filter(|v| v["message"].as_str().is_some_and(|m| m.starts_with(msg)))
             .collect()
     };
-    assert_eq!(find("auth methods enabled")[0]["auth_methods"], "oauth");
+    assert_eq!(
+        find("auth methods enabled")[0]["auth_methods"],
+        "bearer,oauth"
+    );
+    assert_eq!(
+        find("the OAuth allowlist has `verified:*`").len(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        find("the OAuth allowlist has `verified:*`")[0]["level"],
+        "WARN"
+    );
+    let listening = find("listening");
+    assert!(
+        listening[0]["auth"]
+            .as_str()
+            .is_some_and(|a| a.contains("any verified email (verified:*)")),
+        "{text}"
+    );
     let done = find("finished processing request");
     let statuses: Vec<i64> = done.iter().map(|v| v["status"].as_i64().unwrap()).collect();
-    assert_eq!(statuses, [200, 200, 403, 401], "{text}");
+    assert_eq!(statuses, [200, 200, 403, 401, 200, 200, 200], "{text}");
     assert_eq!(done[0]["span"]["auth_method"], "oauth", "{text}");
+    assert_eq!(done[0]["span"]["sub"], ALICE, "{text}");
+    // Carol's subject too: the field is the token's `sub`, never the email.
+    assert_eq!(done[1]["span"]["sub"], "carol-subject-0a1", "{text}");
+    for refused in &done[2..4] {
+        assert!(refused["span"].get("sub").is_none(), "{text}");
+    }
+    assert_eq!(done[4]["span"]["sub"], ALICE, "{text}");
+    assert_eq!(done[5]["span"]["sub"], ALICE, "{text}");
+    assert_eq!(done[6]["span"]["auth_method"], "bearer", "{text}");
+    assert!(done[6]["span"].get("sub").is_none(), "{text}");
+    // The render lines carry the span: ALICE's sync render and her job's
+    // render (in the span of the request that started it), not the
+    // bearer's.
+    let render_lines = |bytes: usize| -> Vec<&Value> {
+        log.iter()
+            .filter(|v| {
+                v["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("render "))
+                    && v["source_bytes"] == bytes
+            })
+            .collect()
+    };
+    for (what, bytes, sub) in [
+        ("sync", SYNC.len(), Some(ALICE)),
+        ("job", JOB.len(), Some(ALICE)),
+        ("bearer", BEARER.len(), None),
+    ] {
+        let lines = render_lines(bytes);
+        assert_eq!(lines.len(), 2, "{what}: {text}");
+        for l in lines {
+            assert_eq!(l["span"]["sub"].as_str(), sub, "{what}: {l}");
+            assert!(l["span"]["request_id"].is_string(), "{what}: {l}");
+        }
+    }
     let rejected = find("rejected unauthenticated request");
     let reasons: Vec<&str> = rejected
         .iter()

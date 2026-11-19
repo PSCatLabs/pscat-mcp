@@ -32,7 +32,9 @@ exactly; `aud` containing `PSCAT_MCP_OAUTH_RESOURCE` (case-sensitive, one
 trailing `/` ignored); `exp` in the future and `nbf` not in the future (60 s
 leeway); a non-empty `sub`; and a user on the allowlist. An `email:` entry
 matches only when the token has an `email` and `email_verified` that is the
-JSON boolean `true`.
+JSON boolean `true`. The entry `verified:*` matches any token whose
+`email_verified` is the JSON boolean `true`, with or without an `email`
+(section 3a).
 
 ## 1. Decision: the resource URL
 
@@ -168,7 +170,7 @@ signatures).
 | `PSCAT_MCP_AUTH_TOKEN_FILE` | existing bearer-token file | `bearer` needs at least one token; unchanged. |
 | `PSCAT_MCP_OAUTH_ISSUER` | `https://<authkit-domain>` | Copied from the metadata `issuer` (2.1). Exact; a trailing `/` makes every token `wrong_issuer`. |
 | `PSCAT_MCP_OAUTH_RESOURCE` | `https://mcp.example.com/mcp` | The resource URL of section 1, byte for byte the Resource Indicator. |
-| `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | a path such as `/secrets/oauth-allowlist` | A Secret Manager secret mounted as a file (volume); not an env var, since it holds personal data. One entry per line: `email:person@example.com` (production: `email:` only). `#` comments and blank lines are skipped; an empty list, or an entry that is neither `sub:` nor `email:`, stops the server from starting. |
+| `PSCAT_MCP_OAUTH_ALLOWED_USERS_FILE` | a path such as `/secrets/oauth-allowlist` | A Secret Manager secret mounted as a file (volume); not an env var, since it holds personal data. One entry per line: `email:person@example.com` (production: `email:` only), or the single line `verified:*` to open the server to everyone (section 3a). `#` comments and blank lines are skipped; an empty list, or an entry that is neither `sub:`, `email:` nor exactly `verified:*`, stops the server from starting. |
 | `PSCAT_MCP_OAUTH_SCOPES` | **unset** | No scope check. WorkOS advertises the scopes `email`, `offline_access`, `openid` and `profile` [W1]; whether `scope` in the access token carries them is **`unverified`**, so do not require one. If a scope is ever required, the token must carry it in `scope` or `scp`. |
 | `PSCAT_MCP_OAUTH_JWKS_URL` | **unset** | Discovery works for AuthKit. |
 | `PSCAT_MCP_AUTH_NONE_*` | **unset** | Part of `none`, which must be off. |
@@ -190,6 +192,57 @@ Deployment checks:
   domain must be the one in the setting.
 * Startup never contacts AuthKit, so an AuthKit outage cannot crash-loop the
   service; it only makes JWTs with a key not yet fetched fail.
+
+## 3a. Opening the server to everyone (`verified:*`)
+
+To let anyone who signs in at AuthKit use the server, with no registration
+page and nobody listed by hand, make the allowlist the single line
+
+```text
+verified:*
+```
+
+(in the allowlist file, or `PSCAT_MCP_OAUTH_ALLOWED_USERS=verified:*`; it
+holds no personal data, so an env var is fine for it).
+
+* It admits any token that passes every other check (signature, `iss`,
+  `aud`, `exp`/`nbf`, a non-empty `sub`, scopes) and whose `email_verified`
+  is the JSON boolean `true`. Missing, `false` or the string `"true"` get
+  `403 not_allowed`. No `email` claim is needed, only the flag, so the JWT
+  template of 2.6 must add `email_verified` as a boolean.
+* Who can sign up is then AuthKit's setting (2.9): with sign-up open, anyone
+  with a verified email gets in. Email verification must stay on in
+  AuthKit, or `email_verified` means nothing.
+* `sub:` and `email:` lines keep working beside it (for a user whose token
+  lacks the flag, for example).
+* Startup logs a WARN (`the OAuth allowlist has verified:*`), and the
+  `listening` line's `auth` summary says `any verified email (verified:*)`.
+  Like every entry, it is read once at startup.
+* Cost: any such user can spend render time. By default one OAuth user
+  holds at most half the render slots (one of two), so one user cannot
+  block the others; bearer tokens are not capped unless
+  `PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL` is set explicitly, which caps every
+  method. Only
+  `--max-instances` and a budget alert bound the total
+  ([`AUTH_STRATEGY.md`](AUTH_STRATEGY.md), Q2).
+
+**Who made a request (privacy).** An accepted OAuth request's log lines
+carry `sub`, the token's subject: the WorkOS user ID (`user_…`). Find the
+person in the AuthKit dashboard's users (or through the WorkOS API by user ID). The render lines
+of the request, and of an async job it started, carry it too. Nothing else
+about the user is logged: never the email, the name, another claim or the
+token, and a refused token's `sub` is not logged. `bearer` and `none`
+requests have no `sub`. The `sub` is still personal data (it identifies a
+WorkOS user), so:
+
+* limit who can read the service's logs (Cloud Logging IAM) and keep the
+  retention short;
+* do not build a log-based metric labelled by `sub` (no per-user metrics);
+* say in the service's privacy notice that requests are logged with the
+  account's WorkOS ID.
+
+This is a deliberate change from the first OAuth version, which logged only
+a hash of the subject (issue #160).
 
 ## 4. Check the deployment without a client (pscat-cloud)
 
@@ -274,7 +327,7 @@ python3 -I scripts/oauth-check.py \
 ```
 
 * `--issuer` and `--resource` are the two settings of section 3, exactly.
-* `--allow-user sub:X` or `email:Y` (repeatable) is an allowlist entry; the
+* `--allow-user sub:X`, `email:Y` or `verified:*` (repeatable) is an allowlist entry; the
   checklist says which entry would match. The script never prints the
   token's `sub` or `email`, only whether they are present and which of your
   entries match, so its output can be shared.
@@ -399,7 +452,8 @@ the `reason=` it prints is the same vocabulary.
 | `401` right after sign-in | `not_yet_valid` | `nbf` in the future: a skewed clock beyond the 60 s leeway. |
 | `401`, no `oauth:` INFO line, `rejected_by` names the methods that rejected it | `not_a_jwt` (debug) | The token is not a JWT: AuthKit issued an opaque token, or a wrong static token. The server needs JWT access tokens (`AUTH_STRATEGY` Q3). Check the checker's `shape`. |
 | `401` | `unsupported_alg`, `missing_kid`, `missing_subject`, `token_too_large` | The token header or claims are outside what the server accepts; the checker names which. |
-| `403` after a correct sign-in | `not_allowed` (`reason=not_allowed` on the request line, no `error` parameter in the challenge) | The user is not on the allowlist, or an `email:` entry cannot match: the token has no `email`, or `email_verified` is missing, `false` or a **string** (fix the JWT template, 2.6), or the address differs (matching ignores case only). Run the checker with `--allow-user`. After editing the list, deploy a new revision (read once at startup). |
+| `403` after a correct sign-in | `not_allowed` (`reason=not_allowed` on the request line, no `error` parameter in the challenge) | The user is not on the allowlist, or an `email:` or `verified:*` entry cannot match: `email_verified` is missing, `false` or a **string** (fix the JWT template, 2.6), or for `email:` the token has no `email` or the address differs (matching ignores case only). Run the checker with `--allow-user`. After editing the list, deploy a new revision (read once at startup). |
+| `server_busy` with `error.input.code` `renders_per_principal` | `request refused: this client already holds its share of the render slots` (WARN; the span's `sub` names the user) | The user already has `PSCAT_MCP_MAX_RENDERS_PER_PRINCIPAL` renders running (by default half the slots). Retry when one ends; raise the setting, or set 0 to turn it off. |
 | `403` | `insufficient_scope` | `PSCAT_MCP_OAUTH_SCOPES` is set and the token lacks one (`scope`/`scp`). Unset it (section 3). |
 | The service does not start | none (startup error, no secret echoed) | `oauth` without `PSCAT_MCP_OAUTH_ISSUER`, `_RESOURCE`, or an allowlist (an empty, unreadable or malformed file); `http` URLs off loopback; `none` with async jobs or in-memory artifact links. |
 | ChatGPT works, claude.ai or Claude Code does not (or the reverse) | per the rows above | Compare the redirect URI and client registration method (CIMD/DCR) per client (2.2, 2.3, 2.7). |

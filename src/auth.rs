@@ -100,6 +100,13 @@ pub struct Principal {
     /// The [`AuthMethod::name`] of the method that accepted the request,
     /// e.g. `bearer`; logged as `auth_method`.
     pub method: &'static str,
+    /// The identity provider's own id for the user, logged as the request
+    /// span's `sub` so the operator can look the user up at the issuer
+    /// (issue #160). Only `oauth` sets it, to the token's `sub` claim: an
+    /// opaque issuer id, never an email or any other claim. It is not used
+    /// for job ownership or budgets (those compare [`Principal::id`]), and
+    /// never goes into metrics or the capture file.
+    pub subject: Option<String>,
 }
 
 impl Principal {
@@ -108,7 +115,15 @@ impl Principal {
         Principal {
             id: id.into(),
             method,
+            subject: None,
         }
+    }
+
+    /// The same principal with the issuer's subject id (see
+    /// [`Principal::subject`]).
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
     }
 
     /// The principal used when authentication is disabled.

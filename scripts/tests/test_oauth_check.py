@@ -237,6 +237,20 @@ class Allowlist(unittest.TestCase):
         for bad in ("alice@example.com", "email:nobody", "sub:", "user:x", ""):
             self.assertIsNone(oc.parse_allow_user(bad), bad)
 
+    def test_verified_star_matches_any_verified_token(self):
+        self.assertEqual(oc.parse_allow_user(" verified: * "), ("verified", "*"))
+        for bad in ("verified:", "verified:x", "verified:**"):
+            self.assertIsNone(oc.parse_allow_user(bad), bad)
+        r = run(token(claims(sub="someone-else", email=DROP)), allow=["verified:*"])
+        self.assertEqual(failed(r), set())
+        self.assertIn("entry 1 (verified:*)", get(r, "allowlist").detail)
+        # Missing or a string: the claim itself fails; false only the match.
+        for ev in (DROP, "true"):
+            r = run(token(claims(email_verified=ev)), allow=["verified:*"])
+            self.assertTrue({"email_verified", "allowlist"} <= failed(r), ev)
+        r = run(token(claims(email_verified=False)), allow=["verified:*"])
+        self.assertEqual(failed(r), {"allowlist"})
+
     def test_lowercasing_is_ascii_only_like_the_server(self):
         self.assertEqual(oc.parse_allow_user("email:\u00c9@example.com"),
                          ("email", "\u00c9@example.com"))
