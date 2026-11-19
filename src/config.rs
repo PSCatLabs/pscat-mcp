@@ -786,9 +786,8 @@ pub struct ArtifactConfig {
     /// path) of this server as clients reach it. Links are then short links
     /// on it, `/a/<render_id>/<n>.<ext>?e=...&s=...`, which redirect to a V4
     /// signed URL minted when opened, and need
-    /// `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. Unset: the origin of
-    /// `PSCAT_MCP_OAUTH_RESOURCE` when that is an https URL, else none.
-    /// `direct`, or no origin: the links are the V4 signed URLs themselves.
+    /// `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`. Unset (the default) or
+    /// `direct`: the links are the V4 signed URLs themselves, as before.
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN")]
     pub artifact_public_origin: Option<String>,
 
@@ -803,11 +802,6 @@ pub struct ArtifactConfig {
     /// accepted for links made before a rotation (optional).
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE")]
     pub artifact_link_secret_previous_file: Option<PathBuf>,
-
-    /// The public origin used when `artifact_public_origin` is unset: the
-    /// origin of `PSCAT_MCP_OAUTH_RESOURCE`, set by `serve-http`.
-    #[arg(skip)]
-    pub artifact_default_public_origin: Option<String>,
 }
 
 /// `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`'s value for no short links.
@@ -843,7 +837,6 @@ impl Default for ArtifactConfig {
             artifact_public_origin: None,
             artifact_link_secret_file: None,
             artifact_link_secret_previous_file: None,
-            artifact_default_public_origin: None,
         }
     }
 }
@@ -867,21 +860,12 @@ impl ArtifactConfig {
         self
     }
 
-    /// The same settings with the public origin defaulting to the origin of
-    /// `oauth_resource` (`PSCAT_MCP_OAUTH_RESOURCE`), when that is an https
-    /// URL.
-    pub fn with_default_public_origin(mut self, oauth_resource: Option<&str>) -> Self {
-        self.artifact_default_public_origin = oauth_resource.and_then(crate::short_link::origin_of);
-        self
-    }
-
-    /// The public origin short links are on, checked: the configured one,
-    /// else the default; `None` for `direct` or none.
+    /// The public origin short links are on, checked; `None` when unset or
+    /// `direct`. Short links are opt-in: nothing else turns them on.
     pub fn public_origin(&self) -> Result<Option<String>, String> {
         match self.artifact_public_origin.as_deref().map(str::trim) {
-            Some(DIRECT_LINKS) => Ok(None),
+            None | Some(DIRECT_LINKS) => Ok(None),
             Some(v) => crate::short_link::check_origin(v).map(Some),
-            None => Ok(self.artifact_default_public_origin.clone()),
         }
     }
 
@@ -975,13 +959,19 @@ impl ArtifactConfig {
             && self.artifact_link_secret_file.is_none()
         {
             return Err(
-                "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE is set without                  PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: the previous secret is only accepted                  beside a current one"
+                "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE is set without \
+                 PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: the previous secret is only accepted \
+                 beside a current one"
                     .into(),
             );
         }
         if self.public_origin()?.is_some() && self.artifact_link_secret_file.is_none() {
             return Err(
-                "refusing to start: with PSCAT_MCP_ARTIFACT_LINKS=gcs and a public origin                  (PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN, or by default the origin of                  PSCAT_MCP_OAUTH_RESOURCE), links are short links on this server, which need                  PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: a file of at least 32 random bytes, the                  same on every instance. Set it, or set PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct                  for V4 signed URL links"
+                "refusing to start: PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN turns on short links on this \
+                 server (with PSCAT_MCP_ARTIFACT_LINKS=gcs), which need \
+                 PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE: a file of at least 32 random bytes, the \
+                 same on every instance. Mount it first, or unset \
+                 PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN for direct V4 signed URL links"
                     .into(),
             );
         }

@@ -1841,19 +1841,15 @@ fn short_link_settings_are_checked_at_startup() {
         env.extend_from_slice(extra);
         run_server(&http, &env)
     };
-    // A public origin, given or from the OAuth resource, needs a secret.
-    for extra in [
-        [("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN)],
-        [("PSCAT_MCP_OAUTH_RESOURCE", "https://mcp.example.test/mcp")],
-    ] {
-        let (ok, err) = with(&extra);
-        assert!(!ok, "{extra:?}: {err}");
-        assert!(
-            err.contains("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE") && err.contains("direct"),
-            "{extra:?}: {err}"
-        );
-        assert!(!err.contains("listening"), "{err}");
-    }
+    // A public origin needs a secret.
+    let (ok, err) = with(&[("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN", ORIGIN)]);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE")
+            && err.contains("PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN"),
+        "{err}"
+    );
+    assert!(!err.contains("listening"), "{err}");
     // A short secret is refused, and never echoed.
     let short = SecretFile::new(b"too-short-secret-value\n");
     let (ok, err) = with(&[
@@ -1922,36 +1918,65 @@ fn short_link_settings_are_checked_at_startup() {
 }
 
 #[test]
-fn the_public_origin_resolves_as_documented() {
+fn short_links_are_opt_in() {
+    // Unset or `direct`: direct links, no secret needed.
     let c = ArtifactConfig::default().gcs(BUCKET);
     assert_eq!(c.public_origin(), Ok(None));
-    let d = c
-        .clone()
-        .with_default_public_origin(Some("https://mcp.example.test/mcp"));
-    assert_eq!(d.public_origin(), Ok(Some(ORIGIN.to_string())));
-    // An http (loopback) resource gives no default.
-    let l = c
-        .clone()
-        .with_default_public_origin(Some("http://127.0.0.1:8080/mcp"));
-    assert_eq!(l.public_origin(), Ok(None));
-    // `direct` turns the default off; a given origin wins over it.
+    assert!(check(c.clone()).is_ok());
     let direct = ArtifactConfig {
         artifact_public_origin: Some("direct".into()),
-        ..d.clone()
+        ..c.clone()
     };
     assert_eq!(direct.public_origin(), Ok(None));
     assert!(check(direct).is_ok());
+    // Given: short links, which need the secret.
     let given = ArtifactConfig {
-        artifact_public_origin: Some("https://links.example.test".into()),
-        ..d.clone()
+        artifact_public_origin: Some("https://links.example.test/".into()),
+        ..c
     };
     assert_eq!(
         given.public_origin(),
         Ok(Some("https://links.example.test".into()))
     );
-    // No origin and no secret: direct links, as before.
-    assert!(check(c).is_ok());
-    assert!(check(d).unwrap_err().contains("LINK_SECRET_FILE"));
+    assert!(check(given).unwrap_err().contains("LINK_SECRET_FILE"));
+}
+
+/// A deployed server with `gcs` links and an https OAuth resource, and no
+/// public origin, keeps starting without a secret and keeps direct links.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oauth_resource_does_not_turn_short_links_on() {
+    let fake = fake_google().await;
+    let capture = std::env::temp_dir().join(format!(
+        "pscat-mcp-optin-capture-{}.jsonl",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut server = start_http_with(
+        &fake,
+        None,
+        &capture.to_string_lossy(),
+        &[("PSCAT_MCP_OAUTH_RESOURCE", "https://mcp.example.test/mcp")],
+    )
+    .await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let v = post(
+        &http,
+        &server.base,
+        &render(1, "0 0 1 1 rectfill", "url"),
+        None,
+    )
+    .await;
+    let url = v["result"]["structuredContent"]["artifacts"][0]["download_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no link: {v}"));
+    assert!(
+        url.starts_with("https://storage.googleapis.com/") && url.contains("X-Goog-Signature="),
+        "{url}"
+    );
+    server.child.kill().await.unwrap();
+    let _ = std::fs::remove_file(&capture);
 }
 
 // ---------------- short links: logs and capture, through the binary

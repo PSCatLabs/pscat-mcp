@@ -631,10 +631,9 @@ delivered: its result counts as fetched and no links are remembered.
 
 **Short links** (#163, `src/short_link.rs`). A V4 URL signs every query
 parameter and is about 700 characters, so a client appending `utm_source`
-or a model re-typing the signature breaks it. With a public origin
-(`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`, by default the origin of
-`PSCAT_MCP_OAUTH_RESOURCE` when `https`, filled in by `main.rs` for
-`serve-http` through `ArtifactConfig::with_default_public_origin`), `put`
+or a model re-typing the signature breaks it. Short links are
+opt-in: only with a public origin (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`;
+unset or `direct`, nothing changes, and nothing else sets it), `put`
 uploads as before but signs nothing: each link is
 `https://<origin>/a/<render_id>/<n>.<ext>?e=<unix expiry>&s=<token>`, with
 `e` the instant of `expires_at` and the token the first 16 bytes of

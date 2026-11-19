@@ -1187,9 +1187,10 @@ the result below when it is.
 
 1. Deploy the revision under test with `gcs` links,
    `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` mounted and
-   `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` set (or `PSCAT_MCP_OAUTH_RESOURCE`).
-   Without the secret the revision must refuse to start, with a message
-   naming `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`.
+   `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` set. Without the secret the revision
+   must refuse to start, with a message naming
+   `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE`; with the origin unset it must start
+   and give direct signed URLs, as before.
 2. Render a PNG with `delivery: "url"`. Expect a `download_url` of about 100
    characters, `https://<origin>/a/<render_id>/1.png?e=<expiry>&s=<22 chars>`,
    with `e` equal to `expires_at`.

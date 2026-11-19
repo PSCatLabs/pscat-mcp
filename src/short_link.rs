@@ -198,15 +198,6 @@ pub fn check_origin(value: &str) -> Result<String, String> {
     }
 }
 
-/// The origin (`scheme://authority`) of an https URL, if it is one; the
-/// default public origin from `PSCAT_MCP_OAUTH_RESOURCE`.
-pub fn origin_of(url: &str) -> Option<String> {
-    let uri: http::Uri = url.parse().ok()?;
-    let authority = uri.authority()?;
-    (uri.scheme_str() == Some("https") && !authority.as_str().contains('@'))
-        .then(|| format!("https://{authority}"))
-}
-
 impl ShortLinks {
     /// Short links on `origin` (already checked) with the secrets in
     /// `current` and, for rotation, `previous`, each read once.
@@ -576,10 +567,5 @@ mod tests {
         ] {
             assert!(check_origin(bad).is_err(), "{bad}");
         }
-        assert_eq!(
-            origin_of("https://mcp.example.com/mcp").as_deref(),
-            Some("https://mcp.example.com")
-        );
-        assert_eq!(origin_of("http://localhost:8080/mcp"), None);
     }
 }

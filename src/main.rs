@@ -99,9 +99,6 @@ fn main() -> std::process::ExitCode {
                 enabled: http.async_jobs,
                 ..jobs
             };
-            // Short links default to the server's own public origin, the
-            // OAuth resource's.
-            let artifacts = artifacts.with_default_public_origin(auth.oauth.resource.as_deref());
             let service = pscat_mcp::build_service_with(limits, jobs, artifacts, &worker)?;
             let capture = match &capture.capture_file {
                 Some(path) => {

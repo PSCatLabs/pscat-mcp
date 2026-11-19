@@ -101,6 +101,17 @@ pub fn build_service_with(
     }
     // The Cloud Storage store is built here, where its TLS client can fail
     // the start; the memory store is built by the service over its ledger.
+    if artifacts.artifact_links != artifacts::LinksBackend::Gcs
+        && artifacts
+            .artifact_public_origin
+            .as_deref()
+            .is_some_and(|o| o.trim() != config::DIRECT_LINKS)
+    {
+        tracing::warn!(
+            "PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN is set but PSCAT_MCP_ARTIFACT_LINKS is not gcs; it is \
+             ignored"
+        );
+    }
     let gcs = match artifacts.artifact_links {
         artifacts::LinksBackend::Gcs => {
             Some(Arc::new(gcs::GcsArtifactStore::from_config(&artifacts)?))

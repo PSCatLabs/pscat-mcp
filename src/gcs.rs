@@ -26,9 +26,8 @@
 //!    signer account (`PSCAT_MCP_ARTIFACT_SIGNER`, by default the account the
 //!    metadata server reports) signs them, and the signature is hex-encoded
 //!    into `X-Goog-Signature`.
-//! 4. **Short links** (#163): with a public origin
-//!    (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`, or the origin of
-//!    `PSCAT_MCP_OAUTH_RESOURCE`), `put` signs nothing: each link is a short
+//! 4. **Short links** (#163, opt-in): with a public origin
+//!    (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`), `put` signs nothing: each link is a short
 //!    `https://<origin>/a/<render_id>/<n>.<ext>?e=<expiry>&s=<token>` on this
 //!    server ([`crate::short_link`]), and [`GcsArtifactStore::redeem`] mints
 //!    the V4 URL (step 3) when the link is opened, working for at most
@@ -241,7 +240,8 @@ impl GcsSettings {
             None => {
                 if config.artifact_link_secret_file.is_some() {
                     tracing::warn!(
-                        "PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE is set but there is no public origin                          (PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN, or PSCAT_MCP_OAUTH_RESOURCE with                          serve-http), so links are V4 signed URLs and the secret is ignored"
+                        "PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE is set but PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN \
+                         is not, so links are V4 signed URLs and the secret is ignored"
                     );
                 }
                 None

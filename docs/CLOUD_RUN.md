@@ -219,7 +219,7 @@ account's Google-managed key. Nothing in the configuration is a credential.
 | `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` (the default) keeps existing clients' results unchanged; a call asks for links with `delivery` |
 | `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | bytes one token may upload per TTL, **per instance** |
 | `PSCAT_MCP_AUTH` | without `none`: the server refuses to start with `none` and `gcs` |
-| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | the service's public `https` origin (no path), e.g. `https://mcp.example.com`; unset, the origin of `PSCAT_MCP_OAUTH_RESOURCE`. Makes [short links](#short-links) |
+| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | unset (direct signed URLs, as before); to opt in to [short links](#short-links), the service's public `https` origin (no path), e.g. `https://mcp.example.com` |
 | `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` | the mounted link secret, e.g. `/secrets/link/secret`; required with a public origin |
 | `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` | during a rotation only: the previous secret |
 
@@ -307,11 +307,12 @@ links"), which redirect to a V4 signed URL minted when opened. A signed URL
 in the link breaks when ChatGPT appends `utm_source=chatgpt.com` or a model
 re-types the signature; a short link does not.
 
-**Before deploying a revision with this change** to a service that has
-`gcs` links and `PSCAT_MCP_OAUTH_RESOURCE` (an `https` URL), create and
-mount the secret: the origin defaults to the OAuth resource's, and **the
-revision refuses to start with a public origin and no secret**. To keep the
-old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
+Short links are **opt-in**: with `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` unset
+the links stay direct signed URLs and no secret is needed, so upgrading
+changes nothing. To turn them on, mount the secret first (steps 1 and 2),
+then set the origin; a revision with an origin and no secret refuses to
+start. To roll back, unset the origin (or set it to `direct`); the mounted
+secret is then ignored, with a warning.
 
 1. Create the secret, 48 random bytes, in Secret Manager, and let the
    runtime account read it:
@@ -325,13 +326,22 @@ old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
    ```
 
 2. Mount it as a file (each secret needs its own directory) and point the
-   server at it, with the public origin:
+   server at it; links stay direct until the origin is set:
 
    ```bash
    gcloud run services update SERVICE --region REGION \
      --update-secrets /secrets/link/secret=pscat-link-secret:1 \
-     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE=/secrets/link/secret,PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=https://HOST
+     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE=/secrets/link/secret
    ```
+
+   Then opt in:
+
+   ```bash
+   gcloud run services update SERVICE --region REGION \
+     --update-env-vars PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=https://HOST
+   ```
+
+   Roll back with `--remove-env-vars PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`.
 
    `HOST` is the host clients use (the `run.app` URL or a custom domain).
    The file is read once at startup, so a new secret version takes effect
