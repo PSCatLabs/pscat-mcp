@@ -380,6 +380,31 @@ full URL, query included, so it would hold working links for their TTL
 can read those logs, or add a log exclusion for `httpRequest.requestUrl`
 containing `/a/`.
 
+## ChatGPT image widget
+
+To let ChatGPT show the pictures (#162), set `PSCAT_MCP_CHATGPT_WIDGET=true`
+on a service that already has `gcs` links (and, preferably, short links).
+Results do not change; `tools/list` gains `_meta` on the picture tools and
+`resources/list` the `ui://pscat/render-result-v1` page (see the README's
+[ChatGPT image widget](../README.md#chatgpt-image-widget)).
+
+```bash
+gcloud run services update SERVICE --region REGION \
+  --update-env-vars PSCAT_MCP_CHATGPT_WIDGET=true
+```
+
+* The page's Content Security Policy lists the image origins from the same
+  settings: `https://storage.googleapis.com`, and the short-link origin
+  (`PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`) when set. Changing either changes the
+  policy on the next revision; nothing else to configure.
+* With `memory` or `off` links the revision starts with a warning and the
+  page shows no pictures.
+* The page only shows a link the call asked for: `delivery` `url` or `both`
+  on the call, or `PSCAT_MCP_ARTIFACT_DELIVERY` as the service's default.
+  Whether to make that the default for ChatGPT is open (#162).
+* To roll back, remove the variable. ChatGPT may keep a cached copy of the
+  page until the connector is refreshed.
+
 ## Font packs
 
 The image has PSCat's compiled-in fonts only, and the worker's empty

@@ -204,6 +204,15 @@ async fn inline_results_are_unchanged_with_or_without_a_store() {
     ))
     .await;
     let linked = connect(service_with(LimitsConfig::default(), memory())).await;
+    // The ChatGPT widget (#162) changes descriptors, never results.
+    let widget = connect(service_with(
+        LimitsConfig::default(),
+        ArtifactConfig {
+            chatgpt_widget: true,
+            ..memory()
+        },
+    ))
+    .await;
     for (tool, args) in tool_calls() {
         let base = normalise(call(&plain, tool, args.clone()).await);
         assert_ne!(base["isError"], true, "{tool}: {base}");
@@ -219,6 +228,7 @@ async fn inline_results_are_unchanged_with_or_without_a_store() {
             (&linked, with_delivery(&args, "inline")),
             // Under the 1 MiB threshold.
             (&linked, with_delivery(&args, "auto")),
+            (&widget, args.clone()),
         ];
         for (i, (client, a)) in variants.into_iter().enumerate() {
             let got = normalise(call(client, tool, a).await);

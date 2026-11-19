@@ -23,6 +23,8 @@
 //!   signed URLs (server process only).
 //! * [`short_link`] — short artifact links on this server (`/a/...`),
 //!   redirecting to a signed URL minted when opened.
+//! * [`widget`] — the opt-in MCP Apps image widget (`ui://` resource) for
+//!   ChatGPT.
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
@@ -49,6 +51,7 @@ pub mod sandbox;
 pub mod sheet;
 pub mod short_link;
 pub mod telemetry;
+pub mod widget;
 pub mod worker;
 
 use std::sync::Arc;
@@ -111,6 +114,9 @@ pub fn build_service_with(
             "PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN is set but PSCAT_MCP_ARTIFACT_LINKS is not gcs; it is \
              ignored"
         );
+    }
+    if let Some(warning) = widget::startup_warning(&artifacts) {
+        tracing::warn!("{warning}");
     }
     let gcs = match artifacts.artifact_links {
         artifacts::LinksBackend::Gcs => {

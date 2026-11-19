@@ -1213,3 +1213,29 @@ the result below when it is.
 |---|---|
 | Date, revision | not run |
 | Steps 1 to 7 | not run |
+
+## ChatGPT widget check
+
+The widget (#162) is tested in CI at the protocol level only
+(`tests/widget.rs`, `src/widget.rs`): the descriptors, the resource and its
+policy, and the page's text. Whether ChatGPT shows it is measured here, with
+the prompt in [`PLATFORM_PROMPTS.md`](PLATFORM_PROMPTS.md#chatgpt-widget),
+on the staging service with `gcs` links and `PSCAT_MCP_CHATGPT_WIDGET=true`.
+**Not run yet**; fill in the table when it is. Replace every link with
+`<short-link>` or `<signed-url>`.
+
+| Item | Result |
+|---|---|
+| Date, revision, ChatGPT surface (web, desktop, mobile) | |
+| Connector: developer mode, auth method, refreshed after the change? | |
+| `tools/list` as ChatGPT fetched it shows `_meta.ui.resourceUri` (capture mode or the connector's tool view) | |
+| ChatGPT read `ui://pscat/render-result-v1` (`resources/read` in the server log or a capture) | |
+| A panel appears under the `url` call | |
+| The picture loads in the panel (short link; then direct signed URL) | |
+| The link text shows under the picture | |
+| The default `inline` call: the panel's "ask for delivery url" message | |
+| Did ChatGPT show the inline `image` block itself, outside the panel? | |
+| After the TTL: the "expired" message | |
+| `review_sheet` and `handwrite` with `delivery` `url`: panel and picture | |
+| Any error text, or the browser console of the panel | |
+| Size of the largest `structuredContent` that still rendered, if a limit was hit | |
