@@ -1093,6 +1093,14 @@ impl PscatMcp {
                 );
             }
         }
+        if service.artifact_config().chatgpt_widget {
+            for name in crate::widget::TOOLS {
+                if let Some(route) = tool_router.map.get_mut(name) {
+                    let meta = route.attr.meta.get_or_insert_with(Default::default);
+                    meta.0.extend(crate::widget::tool_meta().0);
+                }
+            }
+        }
         for route in tool_router.map.values_mut() {
             strip_uint_formats(Arc::make_mut(&mut route.attr.input_schema));
             if let Some(schema) = route.attr.output_schema.as_mut() {
@@ -2161,9 +2169,11 @@ impl ServerHandler for PscatMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(
-            self.guide().await.resources(),
-        ))
+        let mut resources = self.guide().await.resources();
+        if self.service.artifact_config().chatgpt_widget {
+            resources.push(crate::widget::resource());
+        }
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn read_resource(
@@ -2171,6 +2181,10 @@ impl ServerHandler for PscatMcp {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
+        let config = self.service.artifact_config();
+        if config.chatgpt_widget && request.uri == crate::widget::URI {
+            return Ok(ReadResourceResponse::from(crate::widget::read(config)));
+        }
         if request.uri.starts_with(RENDER_URI_PREFIX) {
             return self
                 .read_stored(&request.uri, &context.extensions)

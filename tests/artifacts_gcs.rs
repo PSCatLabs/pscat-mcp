@@ -2119,3 +2119,38 @@ async fn short_links_stay_out_of_the_logs_at_trace() {
     let (link, logs, captured) = short_link_round_trip(Some("trace")).await;
     no_short_link_secrets(&link, &logs, &captured);
 }
+
+/// The ChatGPT widget (#162) lets its page load images from where the links
+/// point: the short-link origin and Cloud Storage (the redirect target), or
+/// Cloud Storage alone for direct signed URLs.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_widget_policy_names_the_link_origins() {
+    let fake = fake_google().await;
+    let secret = SecretFile::new(b"0123456789abcdef0123456789abcdef\n");
+    let direct = ArtifactConfig {
+        chatgpt_widget: true,
+        ..gcs_config(&fake)
+    };
+    let short = ArtifactConfig {
+        artifact_public_origin: Some(format!("{ORIGIN}/")),
+        artifact_link_secret_file: Some(secret.0.clone()),
+        ..direct.clone()
+    };
+    for (config, want) in [
+        (direct, json!(["https://storage.googleapis.com"])),
+        (short, json!([ORIGIN, "https://storage.googleapis.com"])),
+    ] {
+        let client = connect(service(config)).await;
+        let r = client
+            .read_resource(ReadResourceRequestParams::new(pscat_mcp::widget::URI))
+            .await
+            .expect("resources/read");
+        let r = serde_json::to_value(&r).unwrap();
+        let c = &r["contents"][0];
+        assert_eq!(c["mimeType"], "text/html;profile=mcp-app", "{c}");
+        assert_eq!(c["_meta"]["ui"]["csp"]["resourceDomains"], want, "{c}");
+        assert_eq!(c["_meta"]["ui"]["csp"]["connectDomains"], json!([]), "{c}");
+        assert_eq!(c["_meta"]["openai/widgetCSP"]["resource_domains"], want);
+        client.cancel().await.ok();
+    }
+}

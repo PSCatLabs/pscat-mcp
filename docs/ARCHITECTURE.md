@@ -675,6 +675,49 @@ bytes, and `resources/read` of any `http(s)` URI is "resource not found"
 with a message that does not echo it (the guide's own not-found error, which
 names the URI, is reached only by other URIs).
 
+### The ChatGPT widget
+
+`src/widget.rs` and `src/widget.html` (issue #162), opt-in with
+`PSCAT_MCP_CHATGPT_WIDGET` (`ArtifactConfig::chatgpt_widget`, default off).
+ChatGPT shows a tool's pictures through an MCP App, a `ui://` HTML resource
+named in the tool descriptor, rather than through `image` blocks (#138).
+
+* **Descriptors.** `PscatMcp::with_transport` merges `widget::tool_meta()`
+  (`ui.resourceUri` and the `openai/outputTemplate` alias, both
+  `ui://pscat/render-result-v1`) into the `_meta` of the tools in
+  `widget::TOOLS`: the four link tools and `render_result` when jobs are on.
+  Nothing else in the listing changes; off, no tool has `_meta`.
+* **Resources.** `list_resources` appends `widget::resource()` after the
+  guide's documents, and `read_resource` answers the URI with
+  `widget::read`: the page as text, `text/html;profile=mcp-app`, with
+  `_meta.ui.csp` (`connectDomains` empty, `resourceDomains` from
+  `widget::resource_domains`), `_meta.ui.prefersBorder` and the legacy
+  `openai/widgetCSP` (snake_case) beside it. Off, the URI falls through to
+  the guide's not-found error like any unknown one. The `resources`
+  capability was already advertised for the guide.
+* **The policy follows the links.** `gcs`: `https://storage.googleapis.com`,
+  preceded by the short-link origin when `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`
+  is set, because an `<img>` request is checked against the policy again
+  after the `302`. `memory` (`pscat://` links) and `off`: none.
+* **The page is a constant** (`include_str!`), so no request or result text
+  reaches its HTML. Its script reads `window.openai.toolOutput` (and again
+  on the `openai:set_globals` event), and also does the MCP Apps handshake:
+  `ui/initialize` (protocol `2026-01-26`) to `window.parent`, then
+  `ui/notifications/initialized` on a result, then renders the
+  `structuredContent` of `ui/notifications/tool-result`; it answers any
+  other host request with an empty result and ignores messages not from
+  `window.parent`. It builds elements with `textContent` and sets
+  `img.src` only for an `https://` link whose `expires_at` has not passed;
+  `src/widget.rs` tests this at string level (one inline script, no
+  `src=`, `eval`, `innerHTML` or `fetch`).
+* **Results are not touched**, so the inline fixture stands; with the
+  default `delivery` `inline` the page has no link and says so. Startup
+  warns (`widget::startup_warning`, from `build_service_with`) when links are
+  `off` or `memory`, and refuses nothing.
+
+A breaking change to the page takes a new URI (`-v2`): hosts cache UI
+resources by URI.
+
 ## Agent guidance (prompts and resources)
 
 `src/guide.rs` serves the PSCat plugin's skills (issue #39). It runs no

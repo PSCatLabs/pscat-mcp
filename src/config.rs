@@ -802,6 +802,16 @@ pub struct ArtifactConfig {
     /// accepted for links made before a rotation (optional).
     #[arg(long, env = "PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE")]
     pub artifact_link_secret_previous_file: Option<PathBuf>,
+
+    /// Serve the MCP Apps image widget (#162) for ChatGPT: the
+    /// `ui://pscat/render-result-v1` resource (`text/html;profile=mcp-app`)
+    /// and, on the render and generator tools and `render_result`, the
+    /// `_meta.ui.resourceUri` and `openai/outputTemplate` that point to it.
+    /// Tool results are unchanged. The page shows the pictures at their
+    /// https links (`delivery` `url` or `both`), so it is useful only with
+    /// `PSCAT_MCP_ARTIFACT_LINKS=gcs`. Off by default: nothing changes then.
+    #[arg(long, env = "PSCAT_MCP_CHATGPT_WIDGET", default_value_t = false)]
+    pub chatgpt_widget: bool,
 }
 
 /// `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN`'s value for no short links.
@@ -837,6 +847,7 @@ impl Default for ArtifactConfig {
             artifact_public_origin: None,
             artifact_link_secret_file: None,
             artifact_link_secret_previous_file: None,
+            chatgpt_widget: false,
         }
     }
 }

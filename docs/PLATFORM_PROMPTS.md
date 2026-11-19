@@ -123,3 +123,57 @@ file's content, not shown), **link only** (the link reached the user or the
 assistant but nothing opened it), **ignored** (the link did not reach the
 assistant, or it did not mention it), or **error** (with the code). For C and
 D add whether the inline PNG or SVG was also shown.
+
+## ChatGPT widget
+
+For the opt-in image widget (#162): a server with `gcs` links (short links
+preferred) and `PSCAT_MCP_CHATGPT_WIDGET=true`, added to ChatGPT as a
+developer-mode connector with OAuth. Refresh the connector after turning the
+option on, so ChatGPT reads the new `tools/list`. Record the result in
+[`LOCAL_TESTING.md`](LOCAL_TESTING.md#chatgpt-widget-check).
+
+Paste this into a new chat with the connector on:
+
+---
+
+Use the PSCat `render_postscript` tool once, with `delivery` set to `"url"`,
+`format` `"png"`, 400 x 250 points, `dpi` 144, of this program:
+
+```
+0.1 0.3 0.7 setrgbcolor 0 0 400 250 rectfill 1 0.8 0 setrgbcolor 200 125 80 0 360 arc fill
+```
+
+Then call it again with the same program and no `delivery`. After each call,
+tell me in one sentence what you received from the tool. Do not describe the
+picture unless you can see it.
+
+---
+
+What the owner should see, outside the model's reply:
+
+1. **First call (`url`).** Under the tool call, a bordered panel with the
+   picture: a blue rectangle with a yellow disc in the middle, 800 x 500
+   pixels scaled to the panel's width, and under it the link in small
+   monospace text (`https://<your-server-host>/a/<render_id>/1.png?e=...&s=...`
+   with short links, a `storage.googleapis.com` URL without).
+2. **Second call (default `inline`).** The same panel with only the text
+   "The pictures were returned inline, which this view cannot show. Ask for
+   the render again with delivery "url" to see them here."
+3. **After the link's TTL** (30 minutes by default), reopening the chat:
+   "this link expired at ...; render again for a new one." in place of the
+   picture.
+
+Failures to tell apart, each worth a row in the record:
+
+* **no panel at all**: ChatGPT did not use the template (a developer-mode
+  connector may not render widgets, or it did not re-read `tools/list`);
+* **a panel that stays at "Waiting for the render result."**: the page
+  loaded but received no result (`window.openai.toolOutput` empty and no
+  `ui/notifications/tool-result`);
+* **"the picture could not be loaded from its link."**: the `<img>` was
+  blocked (the sandbox's policy, or the redirect target) or the link failed;
+  open the link from the panel's text in a browser to tell them apart;
+* **a panel with the link and a broken image icon**: the same, in a host that
+  does not fire `error`.
+
+Treat the link like any other: it is a bearer capability until it expires.
