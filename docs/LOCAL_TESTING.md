@@ -1221,21 +1221,22 @@ The widget (#162) is tested in CI at the protocol level only
 policy, and the page's text. Whether ChatGPT shows it is measured here, with
 the prompt in [`PLATFORM_PROMPTS.md`](PLATFORM_PROMPTS.md#chatgpt-widget),
 on the staging service with `gcs` links and `PSCAT_MCP_CHATGPT_WIDGET=true`.
-**Not run yet**; fill in the table when it is. Replace every link with
-`<short-link>` or `<signed-url>`.
+Run once, on 2026-11-19, with partial results: the rows below that say
+"not tested yet" are still open. Fill them in as they are run. Replace every
+link with `<short-link>` or `<signed-url>`.
 
 | Item | Result |
 |---|---|
-| Date, revision, ChatGPT surface (web, desktop, mobile) | |
-| Connector: developer mode, auth method, refreshed after the change? | |
-| `tools/list` as ChatGPT fetched it shows `_meta.ui.resourceUri` (capture mode or the connector's tool view) | |
-| ChatGPT read `ui://pscat/render-result-v1` (`resources/read` in the server log or a capture) | |
-| A panel appears under the `url` call | |
-| The picture loads in the panel (short link; then direct signed URL) | |
-| The link text shows under the picture | |
-| The default `inline` call: the panel's "ask for delivery url" message | |
-| Did ChatGPT show the inline `image` block itself, outside the panel? | |
-| After the TTL: the "expired" message | |
-| `review_sheet` and `handwrite` with `delivery` `url`: panel and picture | |
-| Any error text, or the browser console of the panel | |
-| Size of the largest `structuredContent` that still rendered, if a limit was hit | |
+| Date, revision, ChatGPT surface (web, desktop, mobile) | 2026-11-19; staging revision 00029, image sha-0f1e8fd (PSCat renderer 0.7.0-rc.5); surface not recorded |
+| Connector: developer mode, auth method, refreshed after the change? | Deleted and re-added, with OAuth, so it was refreshed. Developer-mode status not recorded |
+| `tools/list` as ChatGPT fetched it shows `_meta.ui.resourceUri` (capture mode or the connector's tool view) | Not tested yet as ChatGPT fetched it. Separately, `_meta.ui.resourceUri` was confirmed against the server directly, not through ChatGPT |
+| ChatGPT read `ui://pscat/render-result-v1` (`resources/read` in the server log or a capture) | Not tested yet as ChatGPT fetched it. Separately, `resources/list` was confirmed against the server directly, not what ChatGPT fetched. No network traffic was seen |
+| A panel appears under the `url` call | Yes. A `render_postscript` call with `delivery` `url` showed an "Opened Render PostScript" widget card; the whole call took about 37 s |
+| The picture loads in the panel (short link; then direct signed URL) | Yes: the PNG (1000x667) showed inline in the card. Which path loaded it, the `<short-link>` or its storage redirect, is not known; the direct signed URL is not tested yet |
+| The link text shows under the picture | Yes: the `<short-link>` text showed under the picture |
+| The default `inline` call: the panel's "ask for delivery url" message | Not tested yet |
+| Did ChatGPT show the inline `image` block itself, outside the panel? | Not tested yet |
+| After the TTL: the "expired" message | Not tested yet |
+| `review_sheet` and `handwrite` with `delivery` `url`: panel and picture | Not tested yet |
+| Any error text, or the browser console of the panel | Not tested yet |
+| Size of the largest `structuredContent` that still rendered, if a limit was hit | Not tested yet |
