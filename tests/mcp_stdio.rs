@@ -1395,3 +1395,39 @@ async fn catalog_load_lines_work_in_a_render() {
     );
     client.cancel().await.ok();
 }
+
+/// Every tool with a `dpi` argument tells a model what the default looks
+/// like in a chat UI and that 144 to 200 dpi is sharper (#161). Text only:
+/// the dpi schemas keep their types and bounds.
+#[tokio::test]
+async fn every_dpi_tool_suggests_144_to_200_dpi() {
+    let client = start().await;
+    let mut checked = Vec::new();
+    for t in tools(&client).await {
+        let Some(dpi) = t.input_schema["properties"].get("dpi") else {
+            continue;
+        };
+        let name = t.name.to_string();
+        let d = t.description.as_deref().unwrap_or("");
+        assert!(d.contains("144 to 200 dpi"), "{name} description: {d}");
+        let arg = dpi["description"].as_str().unwrap_or("");
+        assert!(arg.contains("144 to 200 dpi"), "{name} dpi: {arg}");
+        if name != "chalkboard_math" {
+            assert!(d.contains("72"), "{name} description: {d}");
+            assert!(arg.contains("72"), "{name} dpi: {arg}");
+        }
+        checked.push(name);
+    }
+    checked.sort_unstable();
+    assert_eq!(
+        checked,
+        [
+            "chalkboard_math",
+            "handwrite",
+            "render_postscript",
+            "review_sheet",
+            "start_render"
+        ]
+    );
+    client.cancel().await.ok();
+}

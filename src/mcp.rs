@@ -102,7 +102,10 @@ pub struct RenderArgs {
     /// Page height in points. Defaults to 792 (US Letter).
     pub height: Option<u32>,
     /// Resolution in dots per inch, 9 to 1200. Default 72, i.e. one pixel
-    /// per point. Device pixels = points * dpi / 72.
+    /// per point (device pixels = points * dpi / 72). Chat UIs such as
+    /// claude.ai show a 72 dpi picture small; 144 to 200 dpi is sharper and
+    /// larger for a page of a few hundred points, within the pixel and
+    /// output limits.
     pub dpi: Option<f64>,
     /// Screen the raster like a mono laser printer: a 45 degree clustered-dot
     /// screen of pure black and white pixels. PNG only; with "svg" or "pdf"
@@ -210,7 +213,9 @@ pub struct ChalkboardArgs {
     #[schemars(range(min = 1, max = 8000))]
     pub height: Option<u32>,
     /// Resolution in dots per inch, 9 to 1200. Default 144 (the default
-    /// board is 800x400 points, 1600x800 pixels). The result reports the
+    /// board is 800x400 points, 1600x800 pixels). Chat UIs such as
+    /// claude.ai show a 72 dpi picture small; 144 to 200 dpi is sharper and
+    /// larger, within the pixel and output limits. The result reports the
     /// board in points and in pixels.
     pub dpi: Option<f64>,
     /// Output format: "png" (the default), "svg" or "pdf".
@@ -320,7 +325,10 @@ pub struct HandwriteArgs {
     /// Random seed; the same seed gives the same note. Default 1985.
     #[schemars(range(min = -2147483648_i64, max = 2147483647_i64))]
     pub seed: Option<i64>,
-    /// Resolution in dots per inch, 9 to 1200. Default 72.
+    /// Resolution in dots per inch, 9 to 1200. Default 72, i.e. one pixel
+    /// per point. Chat UIs such as claude.ai show a 72 dpi picture small;
+    /// 144 to 200 dpi is sharper and larger for a note a few hundred points
+    /// wide, within the pixel limit.
     pub dpi: Option<f64>,
     /// How the output is returned: "inline" (the bytes in the result),
     /// "url" (a link per artifact instead: a resource_link block, and
@@ -379,6 +387,9 @@ pub struct ReviewSheetArgs {
     #[schemars(range(min = 1, max = 8000))]
     pub height: Option<u32>,
     /// One cell per item, left to right, for entries that give no list.
+    /// Default [72], one pixel per point. Chat UIs such as claude.ai show a
+    /// 72 dpi cell small; 144 to 200 dpi is sharper and larger for a page of
+    /// a few hundred points, within the pixel limits.
     #[serde(default)]
     #[schemars(schema_with = "sheet_dpi_default_schema")]
     pub dpi: Option<Value>,
@@ -1525,7 +1536,10 @@ impl PscatMcp {
                        produced as PNG images (default), SVG documents or a PDF document, with a \
                        short text summary (the size of each page in points and in pixels, and \
                        the dpi) and \
-                       the program's stdout. The program runs in a sandbox: reading files is refused except for PSCat's built-in lib/ \
+                       the program's stdout. `dpi` defaults to 72, one pixel per point. Chat \
+                       UIs such as claude.ai show a 72 dpi picture small; 144 to 200 dpi is \
+                       sharper and larger for a page of a few hundred points, within the \
+                       pixel and output limits below. The program runs in a sandbox: reading files is refused except for PSCat's built-in lib/ \
                        (for example `(lib/artkit.ps) run`), and nothing can be written. A \
                        PostScript error returns the error name, offending command and line \
                        instead of an image.",
@@ -1570,7 +1584,9 @@ impl PscatMcp {
                        TeX subset is PSCat mathkit's (fractions, roots, sums, integrals, Greek \
                        letters, matrices, cases, accents); a command outside it fails with \
                        postscript_error naming it, and a bad board setting with invalid_request. \
-                       The default board is 800x400 points at 144 dpi (1600x800 pixels); the \
+                       The default board is 800x400 points at 144 dpi (1600x800 pixels). Chat \
+                       UIs such as claude.ai show a 72 dpi picture small; 144 to 200 dpi is \
+                       sharper and larger, within the pixel and output limits below. The \
                        result gives the board's size in points (`width_pt`, `height_pt`), in pixels \
                        and its dpi. SVG and PDF keep every chalk grain as a vector mark: the default board is \
                        about 0.3 MB as PNG, 2.6 MB as PDF and 7 to 10 MB as SVG. The same \
@@ -1618,7 +1634,9 @@ impl PscatMcp {
                        breaks. `paper` ruled adds ruled lines and a margin rule. `jitter` is a whole \
                        number from 0 to 10000 (default 16). The same \
                        arguments give the same image. The default note is 612 points wide at \
-                       72 dpi, 36 point type in dark blue ink; a one-line note is 146 points \
+                       72 dpi, 36 point type in dark blue ink; chat UIs such as claude.ai \
+                       show a 72 dpi picture small, and 144 to 200 dpi is sharper and larger, \
+                       within the pixel limit below. A one-line note is 146 points \
                        tall and each further line adds 54 points. A note whose height would \
                        pass the pixel or side limit fails with too_many_pixels or \
                        invalid_dimensions, before it is drawn. The input is text only, never \
@@ -1662,7 +1680,10 @@ impl PscatMcp {
                        list a cell, drawn at its true pixel size (a 48 px render stays 48 px \
                        beside a 512 px one), centred in its column with a hairline around it, \
                        the row label above and a pixel-size caption (`48x48 px`) under each \
-                       cell. A dpi item {\"dpi\": 9, \"zoom\": 4} draws that render enlarged 4x \
+                       cell. The default dpi is 72, one pixel per point; chat UIs such as \
+                       claude.ai show a 72 dpi cell small, and 144 to 200 dpi is sharper and \
+                       larger for a page of a few hundred points, within the pixel limits \
+                       below. A dpi item {\"dpi\": 9, \"zoom\": 4} draws that render enlarged 4x \
                        with no smoothing (whole factors 2 to 16). A program that shows several \
                        pages gives its last one. A cell whose program fails is drawn as far as \
                        it got; structuredContent lists every cell with its size in pixels and in \
@@ -1822,7 +1843,10 @@ impl PscatMcp {
                        failed or cancelled); render_result(job_id) then returns what \
                        render_postscript would have (the pages, or the error); cancel_render \
                        (job_id) stops it. Arguments are checked here, before a job is \
-                       accepted. A job belongs to the client that started it.",
+                       accepted. `dpi` defaults to 72, one pixel per point. Chat UIs such as \
+                       claude.ai show a 72 dpi picture small; 144 to 200 dpi is sharper and \
+                       larger for a page of a few hundred points, within the same pixel and \
+                       output limits. A job belongs to the client that started it.",
         output_schema = rmcp::handler::server::tool::schema_for_output::<JobToolOutput>(),
         annotations(
             title = "Start a render job",
