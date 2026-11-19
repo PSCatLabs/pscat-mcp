@@ -27,7 +27,8 @@ boundaries are, and where to extend it.
                              config), then the same format/page/pixel checks
                              (for a note: its width; the worker checks the height;
                              for a review sheet: every sheet budget, in sheet.rs)
-                           • semaphore: bounded concurrent renders + queue timeout
+                           • semaphore: bounded concurrent renders + queue timeout,
+                             and a per-principal share of the slots
                            • maps worker/backend failures to stable ErrorCodes
                                │  WorkerJob (JSON)
                                ▼
@@ -338,9 +339,13 @@ A drop guard in the task finishes the job as `worker_failed` if the task
 panics or is dropped (the runtime shutting down) before it records an end,
 so the job leaves the caps and its reservation is released.
 It waits for a running-job permit (`--max-running-jobs`, below the render
-slots so a synchronous call always has one), then for a render slot from
+slots so a synchronous call always has one), then for its owner's share of
+the slots (the per-principal cap, below), then for a render slot from
 the same FIFO semaphore as every other call, without the queue timeout, and
-only then counts its deadline. Cancel (`cancel_render`, `tasks/cancel`,
+only then counts its deadline. The task is spawned in the span of the
+request that started the job, so its log lines (`render started`,
+`render finished`) carry that request's `request_id` and, for `oauth`, its
+`sub`; so does a promoted Task's. Cancel (`cancel_render`, `tasks/cancel`,
 shutdown) fires the job's token; the task drops the render future, and the
 backend's `Worker` drop kills the worker's process group: the same path as a
 client's `notifications/cancelled`. A queued job never starts. Shutdown (the
@@ -770,10 +775,11 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Pages returned | worker | 10 |
 | Program stdout returned | worker (truncates) | 16 KiB |
 | Concurrent renders | server semaphore, queue timeout → `server_busy` | min(CPUs, 4) |
+| Renders per principal | one semaphore per principal holding or waiting for a slot, taken before the shared slot within the same queue timeout → `server_busy`, `error.input.code` `renders_per_principal`; async jobs wait for it without a timeout; stdio's local user is exempt; 0 turns it off | half the slots, rounded up |
 | Client cancel / disconnect | dropping the future kills the worker (`kill_on_drop`) | — |
 | Async job deadline | server: SIGKILL of the worker; PSCat's time limit and `RLIMIT_CPU` follow it | 10 min |
 | Async job steps | PSCat `Limits::max_steps` | 25·10⁹ |
-| Async jobs running | job semaphore, below the render slots; then a shared render slot, no queue timeout | half the slots |
+| Async jobs running | job semaphore, below the render slots; then the owner's share and a shared render slot, no queue timeout | half the slots |
 | Async jobs held | per principal and in all (unfinished), `server_busy` | 4, 16 |
 | Async job results | byte budget (largest result reserved while a job runs), TTL after it finishes | 128 MiB, 1 h |
 | Stored artifacts (memory links) | per-principal quota; the async job results budget, shared; TTL after storing | 32 MiB, 128 MiB, 30 min |
@@ -998,7 +1004,11 @@ The rules for a method:
 
 Any single method is also an `Authenticator`, a chain of one. The request
 span records `auth_method`, the name of the method that accepted the
-request, and startup logs `auth_methods`.
+request, and startup logs `auth_methods`. A method may also give
+`Principal::subject`, the identity provider's own user id; only `oauth`
+does (the token's `sub`), and the span records it as `sub` (issue #160).
+It is for the operator to find a user, nothing else: ownership and budgets
+still compare only the id.
 
 An empty, unknown or repeated list is refused at startup.
 
@@ -1113,8 +1123,21 @@ client ──401 + resource_metadata──► GET /.well-known/oauth-protected-r
   and its paths; the router serves them outside the authenticated `/mcp`
   like `/health`. The resource URL, and so the `resource_metadata` URL in
   the challenge, comes from `PSCAT_MCP_OAUTH_RESOURCE`, never from `Host`.
-* **Privacy.** The principal is `oauth:` plus a hash, rejections log a fixed
-  `reason`, and no subject, email or token is logged.
+* **Allowlist.** `sub:<subject>`, `email:<address>` (with `email_verified`
+  the JSON `true`) and `verified:*`, which admits any token whose
+  `email_verified` is `true`, `email` claim or not (issue #160). The list is
+  read once at startup; `verified:*` logs a warning and shows in the auth
+  summary, and any other `verified:` value is refused without being echoed.
+* **Privacy.** The principal (job owner) is `oauth:` plus a hash, and
+  rejections log a fixed `reason`. An accepted token's `sub` is logged as
+  the request span's `sub` field, so every line of the request, its render
+  and an async job it started carries it. That is a deliberate reversal
+  (issue #160) of the earlier rule that no per-user label reaches the logs:
+  the owner opens the server to anyone with a verified email and needs to
+  know who made a request, and the `sub` (an opaque issuer id, looked up in
+  the issuer's dashboard) is the least that does it. No email, other claim
+  or token is logged; no metric carries a per-user label; the capture file
+  holds no principal.
 
 **The identity provider.** The hosted deployment uses WorkOS AuthKit
 (owner decision of 2026-11-17, [`AUTH_STRATEGY.md`](AUTH_STRATEGY.md), issue

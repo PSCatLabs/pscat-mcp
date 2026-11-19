@@ -19,8 +19,13 @@
 //!
 //! Every response carries an `x-request-id` (generated when the client sent
 //! none), and each request is traced in a span with method, path and
-//! request id, plus `auth_method` once an auth method has accepted it.
-//! Query strings and credentials are never logged. (Capture mode, opt-in and
+//! request id, plus `auth_method` once an auth method has accepted it, and
+//! for an `oauth` request `sub`, the token's subject (issue #160; see
+//! [`crate::auth::Principal::subject`]). Every line logged while the request
+//! runs carries the span, the render lines included, and so do an async
+//! job's lines, whose task is started in the span of the request that
+//! started it. Query strings, credentials, emails and other claims are never
+//! logged. (Capture mode, opt-in and
 //! loopback-only, is the one exception for request bodies: see `capture.rs`.)
 
 use std::net::IpAddr;
@@ -373,14 +378,17 @@ pub fn router_with_capture(
                                 .get("x-request-id")
                                 .and_then(|v| v.to_str().ok())
                                 .unwrap_or("");
-                            // `auth_method` is recorded by `require_auth`
-                            // once a method accepts the request.
+                            // `auth_method` (and, for `oauth`, `sub`) are
+                            // recorded by `require_auth` once a method
+                            // accepts the request; an empty field is left
+                            // out of the log line.
                             tracing::info_span!(
                                 "http",
                                 method = %req.method(),
                                 path = %req.uri().path(),
                                 request_id = %request_id,
                                 auth_method = tracing::field::Empty,
+                                sub = tracing::field::Empty,
                             )
                         })
                         .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
@@ -582,7 +590,8 @@ async fn resource_metadata(State(doc): State<Arc<serde_json::Value>>) -> Respons
 
 /// Authenticate from the headers alone, by every enabled method in turn. An
 /// accepted request goes on with its body untouched, and the request span
-/// records `auth_method`. A rejected one never reaches the body limit, rmcp
+/// records `auth_method` and, when the method gives one (only `oauth`), the
+/// issuer's subject id as `sub`. A rejected one never reaches the body limit, rmcp
 /// or a render; unless it declares more than [`DRAIN_MAX_BYTES`], its body is
 /// read and discarded first (at most [`DRAIN_MAX_TIME`]) so that a client
 /// still uploading gets the `401` rather than a connection reset (issue #30).
@@ -594,7 +603,11 @@ async fn require_auth(
     let (mut parts, body) = req.into_parts();
     match auth.admit(&parts).await {
         Ok(principal) => {
-            tracing::Span::current().record("auth_method", principal.method);
+            let span = tracing::Span::current();
+            span.record("auth_method", principal.method);
+            if let Some(sub) = &principal.subject {
+                span.record("sub", sub.as_str());
+            }
             tracing::debug!(
                 principal = %principal.id,
                 auth_method = principal.method,

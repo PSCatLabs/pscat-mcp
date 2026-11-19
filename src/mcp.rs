@@ -1548,8 +1548,9 @@ impl PscatMcp {
             Ok(d) => d,
             Err(err) => return render_failure(err),
         };
+        let owner = self.cap_owner(&ext);
         let outcome = tokio::select! {
-            r = self.service.render(args.into_request()) => r,
+            r = self.service.render_as(owner.as_deref(), args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
@@ -1593,8 +1594,9 @@ impl PscatMcp {
             Ok(d) => d,
             Err(err) => return failure_with("Chalkboard failed", err),
         };
+        let owner = self.cap_owner(&ext);
         let outcome = tokio::select! {
-            r = self.service.generate(args.into_request()) => r,
+            r = self.service.generate_as(owner.as_deref(), args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
@@ -1640,8 +1642,9 @@ impl PscatMcp {
             Ok(d) => d,
             Err(err) => return failure_with("Handwrite failed", err),
         };
+        let owner = self.cap_owner(&ext);
         let outcome = tokio::select! {
-            r = self.service.generate(args.into_request()) => r,
+            r = self.service.generate_as(owner.as_deref(), args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
@@ -1688,8 +1691,9 @@ impl PscatMcp {
             Ok(d) => d,
             Err(err) => return sheet_failure(err),
         };
+        let owner = self.cap_owner(&ext);
         let outcome = tokio::select! {
-            r = self.service.generate(args.into_request()) => r,
+            r = self.service.generate_as(owner.as_deref(), args.into_request()) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         let out = match outcome {
@@ -1735,9 +1739,11 @@ impl PscatMcp {
         &self,
         Parameters(args): Parameters<ValidateArgs>,
         ct: CancellationToken,
+        ext: Extensions,
     ) -> CallToolResult {
+        let owner = self.cap_owner(&ext);
         let outcome = tokio::select! {
-            r = self.service.validate(args.source) => r,
+            r = self.service.validate_as(owner.as_deref(), args.source) => r,
             () = ct.cancelled() => Err(cancelled()),
         };
         match outcome {
@@ -2249,6 +2255,18 @@ fn principal(transport: Transport, ext: &Extensions) -> Result<String, RenderErr
                     "this request has no authenticated client, so it cannot own a job",
                 )
             }),
+    }
+}
+
+impl PscatMcp {
+    /// Whose share of the render slots a synchronous call takes
+    /// ([`crate::config::LimitsConfig::renders_per_principal`]): the job
+    /// owner ([`principal`]), so every auth method's principal is limited
+    /// alike. stdio's one local user is not limited, and an HTTP request
+    /// without a principal (never past the auth layer) is not refused for
+    /// it here.
+    fn cap_owner(&self, ext: &Extensions) -> Option<String> {
+        principal(self.transport, ext).ok()
     }
 }
 

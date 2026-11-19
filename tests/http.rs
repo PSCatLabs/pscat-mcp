@@ -71,7 +71,10 @@ impl Drop for TestServer {
 }
 
 async fn start(service: Arc<RenderService>) -> TestServer {
-    let auth: Arc<dyn Authenticator> = Arc::new(BearerTokenAuth::new([TOKEN]));
+    start_with_auth(service, Arc::new(BearerTokenAuth::new([TOKEN]))).await
+}
+
+async fn start_with_auth(service: Arc<RenderService>, auth: Arc<dyn Authenticator>) -> TestServer {
     let ct = CancellationToken::new();
     let cfg = mcp_server_config(
         &http_config(IpAddr::V4(Ipv4Addr::LOCALHOST)),
@@ -627,6 +630,9 @@ impl RenderBackend for CountingBackend {
 async fn concurrent_renders_are_isolated_and_bounded() {
     let limits = LimitsConfig {
         max_concurrent_renders: Some(2),
+        // One token sends every call: the per-principal cap (issue #160,
+        // tested on its own below) would hold it to one slot.
+        max_renders_per_principal: Some(0),
         ..LimitsConfig::default()
     };
     let max = Arc::new(AtomicUsize::new(0));
@@ -755,6 +761,69 @@ async fn full_queue_returns_server_busy() {
         || processes_with(&tag).is_empty(),
     )
     .await;
+}
+
+/// The per-principal cap (issue #160): with 2 slots each token may hold 1.
+/// The first token's never-ending render holds its share, so its second
+/// call is refused as `server_busy` while the free slot stays free, and the
+/// other token's call takes it. Once the first render is cancelled (its
+/// connection closed), the first token renders again.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_token_cannot_take_every_slot() {
+    const OTHER: &str = "test-token-other-9876543210";
+    let tag = format!("pscat-mcp-share-{}", uuid::Uuid::new_v4());
+    let limits = LimitsConfig {
+        max_concurrent_renders: Some(2),
+        queue_timeout_ms: 300,
+        render_timeout_ms: 60_000,
+        interp_time_limit_ms: Some(0),
+        max_steps: 0,
+        ..LimitsConfig::default()
+    };
+    assert_eq!(limits.renders_per_principal(), Some(1));
+    let backend = SubprocessBackend::new(worker_exe(), limits.clone()).with_tag(tag.clone());
+    let srv = start_with_auth(
+        Arc::new(RenderService::new(Arc::new(backend), limits)),
+        Arc::new(BearerTokenAuth::new([TOKEN, OTHER])),
+    )
+    .await;
+
+    let url = srv.mcp();
+    let slow = tokio::spawn(async move {
+        post(&url, Some(TOKEN), None, &render_call(1, "{ } loop", 20, 20)).await
+    });
+    wait_for("worker started", Duration::from_secs(30), || {
+        processes_with(&tag).len() == 1
+    })
+    .await;
+
+    let quick = |id| render_call(id, &solid(1, 0, 0), 20, 20);
+    let (status, _, resp) = post(&srv.mcp(), Some(TOKEN), None, &quick(2)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(resp["result"]["isError"], true, "{resp}");
+    assert_eq!(error_code(&resp["result"]), Some("server_busy"), "{resp}");
+    let error = &resp["result"]["structuredContent"]["error"];
+    assert_eq!(error["input"]["code"], "renders_per_principal", "{resp}");
+    assert_eq!(srv.service.counters.executed.load(Ordering::SeqCst), 1);
+
+    // The other token still gets the free slot.
+    let (status, _, resp) = post(&srv.mcp(), Some(OTHER), None, &quick(3)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_ne!(resp["result"]["isError"], true, "{resp}");
+
+    // Cancel the slow render: the first token's share is free again.
+    assert!(!slow.is_finished(), "the slow render ended on its own");
+    slow.abort();
+    let _ = slow.await;
+    wait_for(
+        "worker killed after disconnect",
+        Duration::from_secs(30),
+        || processes_with(&tag).is_empty(),
+    )
+    .await;
+    let (status, _, resp) = post(&srv.mcp(), Some(TOKEN), None, &quick(4)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_ne!(resp["result"]["isError"], true, "{resp}");
 }
 
 // ------------------------------------------------------ configuration rules
