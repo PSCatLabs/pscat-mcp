@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::jobs::JobStore;
 use crate::render::{ErrorCode, InputDiagnostic, RenderError};
+use crate::short_link::LinkError;
 
 /// How a tool returns what it rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -150,11 +151,40 @@ pub fn redact_render_links(text: &str) -> String {
     }
 }
 
+/// `path` (a URL without its query) with the render id of a short link
+/// (`/a/<render_id>/...`, #163) replaced by `[redacted]`, also where JSON
+/// escapes the slashes (`\/a\/<render_id>`).
+fn redact_short_link_id(path: &str) -> String {
+    const MARKS: [&str; 2] = ["/a/", "\\/a\\/"];
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    loop {
+        let next = MARKS
+            .iter()
+            .filter_map(|m| rest.find(m).map(|i| (i, m.len())))
+            .min();
+        let Some((i, len)) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..i + len]);
+        rest = &rest[i + len..];
+        let id_len = rest
+            .find(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+            .unwrap_or(rest.len());
+        if id_len > 0 {
+            out.push_str("[redacted]");
+        }
+        rest = &rest[id_len..];
+    }
+}
+
 /// `text` with the query string of every `http(s)://` URL replaced by
 /// `[redacted]`, also where JSON escapes the slashes (`https:\/\/`). A signed
 /// URL's query (`X-Goog-Signature`, ...) is what makes it a capability, so
 /// a client that sends one back (in a tool argument, say) never has it
-/// recorded (capture mode). A URL ends at whitespace, a quote, `<`, `>`, a
+/// recorded (capture mode). A short link's render id, in its path, is
+/// redacted too. A URL ends at whitespace, a quote, `<`, `>`, a
 /// backtick, or a backslash escaping a quote or whitespace (`\"`, `\n`);
 /// other JSON escapes (`\/`, `&`) are part of it.
 pub fn redact_url_queries(text: &str) -> String {
@@ -192,7 +222,7 @@ pub fn redact_url_queries(text: &str) -> String {
         out.push_str(&rest[..i + len]);
         rest = &rest[i + len..];
         let path = run(rest, Some('?'));
-        out.push_str(&rest[..path]);
+        out.push_str(&redact_short_link_id(&rest[..path]));
         rest = &rest[path..];
         if let Some(query) = rest.strip_prefix('?') {
             out.push_str("?[redacted]");
@@ -225,6 +255,10 @@ pub enum LinkScheme {
     /// An `https:` URL anyone holding it can fetch until it expires (a
     /// signed URL; #140).
     Https,
+    /// A short `https:` link on this server, `/a/<render_id>/<n>.<ext>`,
+    /// that redirects to a signed URL minted when it is opened; anyone
+    /// holding it can fetch the object until it expires (#163).
+    Short,
 }
 
 /// The link to one stored artifact.
@@ -303,6 +337,24 @@ pub trait ArtifactStore: Send + Sync {
     ) -> StoreFuture<'a, Option<ReadArtifact>> {
         let _ = (owner, render_id, n);
         Box::pin(async { None })
+    }
+
+    /// Whether this store's links are short links served by
+    /// [`Self::redeem`] at `/a/...` (`gcs` with a public origin, #163).
+    fn serves_short_links(&self) -> bool {
+        false
+    }
+
+    /// Answer the short link `path` with `query`: the URL to redirect to,
+    /// or why not. A store without short links answers
+    /// [`LinkError::NotFound`].
+    fn redeem<'a>(
+        &'a self,
+        path: &'a str,
+        query: Option<&'a str>,
+    ) -> StoreFuture<'a, Result<String, LinkError>> {
+        let _ = (path, query);
+        Box::pin(async { Err(LinkError::NotFound) })
     }
 }
 
@@ -517,6 +569,22 @@ mod tests {
         let out = redact_url_queries(r#""https://h/p?a=1\u0026X-Goog-Signature=beef""#);
         assert_eq!(out, r#""https://h/p?[redacted]""#);
         assert_eq!(redact_url_queries("no urls ?a=b"), "no urls ?a=b");
+        // A short link: the query and the render id in its path.
+        let id = "0b9c2f7e-1a2b-4c3d-8e9f-001122334455";
+        let out = redact_url_queries(&format!(
+            r#"{{"a":"https://h.test/a/{id}/1.png?e=1&s=tok","b":"https:\/\/h.test\/a\/{id}\/2.svg?e=1"}}"#
+        ));
+        assert!(!out.contains(id) && !out.contains("tok"), "{out}");
+        assert!(
+            out.contains("https://h.test/a/[redacted]/1.png?[redacted]"),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"https:\/\/h.test\/a\/[redacted]\/2.svg?[redacted]"#),
+            "{out}"
+        );
+        // Bare ids outside a URL (a job id) are kept.
+        assert_eq!(redact_url_queries(id), id);
         assert_eq!(redact_url_queries("https://h/p"), "https://h/p");
         assert_eq!(
             redact_url_queries("http://h/p?q é"),

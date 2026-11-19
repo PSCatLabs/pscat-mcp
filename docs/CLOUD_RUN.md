@@ -219,6 +219,9 @@ account's Google-managed key. Nothing in the configuration is a credential.
 | `PSCAT_MCP_ARTIFACT_DELIVERY` | `inline` (the default) keeps existing clients' results unchanged; a call asks for links with `delivery` |
 | `PSCAT_MCP_ARTIFACT_QUOTA_BYTES` | bytes one token may upload per TTL, **per instance** |
 | `PSCAT_MCP_AUTH` | without `none`: the server refuses to start with `none` and `gcs` |
+| `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` | the service's public `https` origin (no path), e.g. `https://mcp.example.com`; unset, the origin of `PSCAT_MCP_OAUTH_RESOURCE`. Makes [short links](#short-links) |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` | the mounted link secret, e.g. `/secrets/link/secret`; required with a public origin |
+| `PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE` | during a rotation only: the previous secret |
 
 Never set the `PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT` variables in a
 deployment: they exist to point the server at a local fake in tests.
@@ -295,6 +298,66 @@ container otherwise). See "Sandbox" below.
 with a `delivery_note`. Each failure logs one WARN, `artifact links failed`,
 with `code`, `stage` and `status` only; a 403 at `upload` or `signing`
 usually means a missing grant above.
+
+### Short links
+
+With a public origin the links are short links on the service itself,
+`https://<origin>/a/<render_id>/<n>.<ext>?e=...&s=...` (README, "Short
+links"), which redirect to a V4 signed URL minted when opened. A signed URL
+in the link breaks when ChatGPT appends `utm_source=chatgpt.com` or a model
+re-types the signature; a short link does not.
+
+**Before deploying a revision with this change** to a service that has
+`gcs` links and `PSCAT_MCP_OAUTH_RESOURCE` (an `https` URL), create and
+mount the secret: the origin defaults to the OAuth resource's, and **the
+revision refuses to start with a public origin and no secret**. To keep the
+old direct signed URLs instead, set `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=direct`.
+
+1. Create the secret, 48 random bytes, in Secret Manager, and let the
+   runtime account read it:
+
+   ```bash
+   openssl rand -base64 48 | tr -d '\n' | \
+     gcloud secrets create pscat-link-secret --project PROJECT --data-file=-
+   gcloud secrets add-iam-policy-binding pscat-link-secret --project PROJECT \
+     --member serviceAccount:SA --role roles/secretmanager.secretAccessor
+   ```
+
+2. Mount it as a file (each secret needs its own directory) and point the
+   server at it, with the public origin:
+
+   ```bash
+   gcloud run services update SERVICE --region REGION \
+     --update-secrets /secrets/link/secret=pscat-link-secret:latest \
+     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE=/secrets/link/secret,PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN=https://HOST
+   ```
+
+   `HOST` is the host clients use (the `run.app` URL or a custom domain).
+   The file is read once at startup, so a new secret version takes effect
+   with a new revision, as for the allowlist. Every instance reads the same
+   secret, so a link made by one instance opens on any other.
+
+3. **Rotation.** Add a new version, mount the old one as the previous
+   secret, deploy, and drop it once links made before have expired (at
+   most `PSCAT_MCP_ARTIFACT_URL_TTL_SECS` later):
+
+   ```bash
+   openssl rand -base64 48 | tr -d '\n' | \
+     gcloud secrets versions add pscat-link-secret --project PROJECT --data-file=-
+   gcloud run services update SERVICE --region REGION \
+     --update-secrets /secrets/link/secret=pscat-link-secret:latest,/secrets/link-previous/secret=pscat-link-secret:OLD_VERSION \
+     --update-env-vars PSCAT_MCP_ARTIFACT_LINK_SECRET_PREVIOUS_FILE=/secrets/link-previous/secret
+   ```
+
+   Deploying with no previous secret ends every link made before, which
+   is how to revoke them all at once.
+
+**The route.** `GET`/`HEAD /a/...` needs no `Authorization`: the token is
+the capability. A refused link (wrong token, path or expiry) costs nothing
+but a hash; a valid one costs one IAM `signBlob` call on the instance that
+answers it, so the IAM quota is what someone holding valid links can spend
+by opening them over and over. There is no per-IP rate limit on it. The
+request logs show the path as `/a/[redacted]`, never the query.
 
 ## Font packs
 

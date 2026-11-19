@@ -21,6 +21,8 @@
 //!   [`artifacts::ArtifactStore`] trait and its memory backend.
 //! * [`gcs`] — the Cloud Storage artifact store: uploads and keyless V4
 //!   signed URLs (server process only).
+//! * [`short_link`] — short artifact links on this server (`/a/...`),
+//!   redirecting to a signed URL minted when opened.
 //! * [`pscat_extras`] — the one module that calls `#[doc(hidden)]` PSCat APIs.
 
 #![warn(missing_docs)]
@@ -45,6 +47,7 @@ pub mod pscat_extras;
 pub mod render;
 pub mod sandbox;
 pub mod sheet;
+pub mod short_link;
 pub mod telemetry;
 pub mod worker;
 
