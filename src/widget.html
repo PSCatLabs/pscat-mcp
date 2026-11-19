@@ -108,11 +108,24 @@ img { display: block; max-width: 100%; height: auto; border: 1px solid var(--lin
     });
   }
 
-  // ChatGPT: window.openai.toolOutput is the structuredContent.
+  // ChatGPT: window.openai.toolOutput is the structuredContent. The
+  // openai:set_globals event also fires for theme, display mode and height
+  // changes: redraw only when the output itself changed, so the image is
+  // not fetched again (a new link redirect) and does not flicker.
+  var lastOutput = null;
+  var lastJson = null;
   function fromOpenAI() {
     try {
       var o = window.openai;
-      if (o && o.toolOutput && typeof o.toolOutput === "object") { render(o.toolOutput); }
+      if (o && o.toolOutput && typeof o.toolOutput === "object") {
+        var out = o.toolOutput;
+        if (out === lastOutput) { return; }
+        var json = JSON.stringify(out);
+        lastOutput = out;
+        if (json === lastJson) { return; }
+        lastJson = json;
+        render(out);
+      }
     } catch (e) { /* not ChatGPT */ }
   }
   fromOpenAI();

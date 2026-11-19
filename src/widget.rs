@@ -227,6 +227,14 @@ mod tests {
         assert!(HTML.contains("if (!isHttps(it.url))"));
         assert!(HTML.contains("img.src = it.url"));
         assert!(HTML.contains("prefers-color-scheme: dark"));
+        // openai:set_globals also fires for theme and size changes: the page
+        // redraws (and refetches the image) only for a new tool output.
+        assert!(HTML.contains("if (out === lastOutput) { return; }"));
+        assert!(HTML.contains("var json = JSON.stringify(out);"));
+        assert!(HTML.contains("if (json === lastJson) { return; }"));
+        let guard = HTML.find("if (json === lastJson)").unwrap();
+        let draw = HTML[guard..].find("render(out)").map(|i| guard + i);
+        assert!(draw.is_some(), "render(out) comes after the checks");
         // Both ways the result arrives, and the handshake.
         for needle in [
             "window.openai",
