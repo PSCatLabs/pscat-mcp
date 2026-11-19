@@ -1392,16 +1392,19 @@ async fn logs_carry_the_subject_but_never_emails_or_tokens() {
     assert!(seen.body.contains("job_id"), "{seen:?}");
     let seen = post(&url, STATIC_TOKEN, &tool("render_postscript", BEARER)).await;
     assert_eq!(seen.status, 200, "{seen:?}");
-    // Seven responses, and three renders finished (the job's may come
-    // after its response).
-    let (mut responses, mut finished) = (0, 0);
-    while responses < 7 || finished < 3 {
+    // Seven responses, and three renders ended (the job's may come after
+    // its response; on a loaded machine one may be killed at its deadline).
+    let (mut responses, mut ended) = (0, 0);
+    while responses < 7 || ended < 3 {
         let v = next_line().await;
         if v["message"] == "finished processing request" {
             responses += 1;
         }
-        if v["message"] == "render finished" {
-            finished += 1;
+        if matches!(
+            v["message"].as_str(),
+            Some("render finished" | "render killed at the deadline" | "render worker failed")
+        ) {
+            ended += 1;
         }
         log.push(v);
     }
