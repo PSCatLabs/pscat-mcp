@@ -270,6 +270,12 @@ pub struct WorkerResult {
     /// What a review sheet holds (its one artifact is the sheet).
     #[serde(default)]
     pub sheet: Option<SheetReport>,
+    /// The system-call filter the worker runs under: a fixed token,
+    /// `seccomp` or `none` ([`crate::sandbox::WorkerFilter`]). Set by the
+    /// worker after its filter check, on every result it writes; absent from
+    /// a result the server built itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
 }
 
 impl WorkerResult {
@@ -287,6 +293,7 @@ impl WorkerResult {
             elapsed_ms: 0,
             capabilities: None,
             sheet: None,
+            sandbox: None,
         }
     }
 
@@ -311,16 +318,19 @@ pub const EXIT_NO_SANDBOX: i32 = 4;
 pub fn run_stdio(max_job_bytes: usize) -> i32 {
     // First, while the worker has one thread and before any untrusted byte
     // is read.
-    if let Err(e) = crate::sandbox::install() {
-        eprintln!("render worker: refusing to run without its seccomp filter: {e}");
-        return EXIT_NO_SANDBOX;
-    }
+    let filter = match crate::sandbox::install() {
+        Ok(filter) => filter,
+        Err(e) => {
+            eprintln!("render worker: refusing to run without its seccomp filter: {e}");
+            return EXIT_NO_SANDBOX;
+        }
+    };
     let mut input = Vec::new();
     let read = std::io::stdin()
         .lock()
         .take(max_job_bytes as u64 + 1)
         .read_to_end(&mut input);
-    let result = match read {
+    let mut result = match read {
         Err(e) => WorkerResult::fail(WorkerFailure::BadJob {
             message: format!("reading the job failed: {e}"),
         }),
@@ -337,6 +347,9 @@ pub fn run_stdio(max_job_bytes: usize) -> i32 {
             }),
         },
     };
+    // What `install` reported, not a constant: the server logs it and
+    // `get_renderer_info` shows it.
+    result.sandbox = Some(filter.as_str().to_string());
     let mut out = std::io::stdout().lock();
     let written = serde_json::to_writer(&mut out, &result).is_ok() && out.flush().is_ok();
     if written { 0 } else { 3 }

@@ -66,7 +66,7 @@ authentication and container packaging.
 | `review_sheet` | Composes one labelled PNG from several programs, each rendered at several resolutions, to compare candidates side by side (PSCat's `pscat sheet`; the layout, label and caption strips, zoom and frames are PSCat's own). Args as in the PSCat plugin, without `out_path`: `entries` (required, 1 to `PSCAT_MCP_MAX_SHEET_CELLS` rows), each with `source` (required), `label` (at most 200 characters; default `program N`), `width`/`height` in points 1–8000 and a `dpi` list; top-level `width`/`height` (default 612×792), `dpi` (default `[72]`), `labels` and `sizes` (default true). A `dpi` item is a number 9–1200, or `{"dpi": 9, "zoom": 4}` to draw that render enlarged with nearest-neighbour sampling (2–16). Each cell is drawn at its true pixel size with a hairline, the label above the row and `WxH px` under each cell; its text line gives the cell's size in points and its dpi, as `64x64 pt at 36 dpi = 32x32 px`; a program that shows several pages gives its last one. A cell whose program fails (a PostScript error, or its own step, time or memory limit) is drawn as far as it got and the sheet still succeeds. Every budget (cells, source bytes in all and per entry, each cell's sides, the cells' pixels, the sheet's pixels and sides, time enough for every cell) is checked before a worker starts, with `error.input.code` naming it (`cells`, `sources`, `source`, `deadline`, `cell_side`, `cell_pixels`, `sheet_side`, `sheet_pixels`). The whole sheet is one worker job in one render slot, with its own deadline (`PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`); each cell runs on a fresh interpreter with the render's step and time limits and at most an equal share of the time left. Returns one PNG image block and a text line per cell; `structuredContent` has the sheet's size and, for every cell, its row and column, dpi, zoom, render size in pixels and points (`width_pt`, `height_pt`), place on the sheet and, if it failed, its error code and a bounded PSCat report (under 24 KB with 32 failed cells). | same |
 | `validate_postscript` | Tokenizer pass, then executes the program in the same sandbox and discards the output. Returns the PostScript error (name, offending command, line), lint findings (blank page, stack leak, unbalanced `gsave`), page count and stdout. | same |
 | `describe_art_capabilities` | Lists the creative capabilities of the linked PSCat build: fonts, Type 3 faces, mood palettes, page templates, artkit and style-pack procedures, native operators, config dials. The whole catalog is about 280 KB, so a reply is one bounded view (under 24 KB, in both `content` and `structuredContent`, which carry the same information; some clients, Claude Code among them, give the model only the `structuredContent` JSON). No arguments: an index of every kind with its names, and installed font packs. `kind` (`font`, `type3_face`, `palette`, `template`, `procedure`, `operator`, `dial`): that kind's names with a one-line description each, 100 at a time (`offset`, `limit` 1–100). `names` (up to 20, optionally narrowed by `kind`): full entries with parameters, defining library file, `run` lines that load it, example and availability; unknown names are listed under `not_found`, and names that do not fit the reply under `omitted`. Runs no PostScript. The catalog is read once in a worker process, so it matches what renders can reach, and kept for the life of the server; later calls take no render slot. Server file paths are not reported. | same |
-| `get_renderer_info` | PSCat version, formats, limits in force, capability notes. Runs nothing. | same |
+| `get_renderer_info` | PSCat version, formats, limits in force, capability notes, and the `sandbox` (the workers' filter, the server's dumpable flag). Runs nothing. | same |
 | `start_render` | Starts `render_postscript` as a background job, for a render past the sync deadline: the same arguments (checked here, before a job is accepted), and it returns a `job_id` (a random UUID) at once with state `queued`. The job runs under the job deadline (`PSCAT_MCP_JOB_TIMEOUT_MS`, 10 minutes) and every other render limit. Only with async jobs on (always over stdio; `PSCAT_MCP_ASYNC_JOBS` over HTTP). A cap or the results budget refuses it with `server_busy` or `results_budget_exceeded`. | not read-only, not idempotent, non-destructive, closed-world |
 | `render_status` | A job's `state` (`queued`, `running`, `done`, `failed`, `cancelled`), `elapsed_seconds`, `timeout_seconds`, and `job_error` (code and message) for a failed job or `expires_in_seconds` for a finished one. Under 2 KB. An unknown, expired or other client's `job_id` is `unknown_job`. | read-only, idempotent |
 | `render_result` | A finished job's result: what `render_postscript` returns (the same content blocks and envelope, within the same output caps), or the failed render's error with `isError`. A queued or running job is `job_not_finished`, a cancelled one `cancelled`. It can be fetched again until the job expires. | read-only, idempotent |
@@ -1025,7 +1025,8 @@ untrusted code. Each render or validation:
    (`pidfd_getfd`) or load BPF; those calls fail with `EPERM`. A worker
    that cannot install the filter refuses the job (`worker_failed`). The
    server makes itself non-dumpable, so the worker cannot read or write the
-   server's memory through `/proc` either;
+   server's memory through `/proc` either. `get_renderer_info` reports both
+   (see "Checking the sandbox" below);
 4. runs under **PSCat's own limits**: steps, time and heap growth (exact per
    process via PSCat's counting allocator), plus a pixel cap on
    `setpagedevice`; file reads are confined to PSCat's built-in `lib/` (also
@@ -1064,6 +1065,30 @@ verifies costs one IAM `signBlob` call, so the instance's IAM quota is what
 a holder of valid links can spend. Use a short TTL and a bucket with uniform access, public
 access prevention and a 1-day lifecycle rule
 ([`docs/CLOUD_RUN.md`](docs/CLOUD_RUN.md#cloud-storage-artifact-links)).
+
+**Checking the sandbox.** A control that fails closed shows nothing when it
+works, so the server says so. `get_renderer_info` has a `sandbox` object:
+
+```json
+"sandbox": {"worker_filter": "seccomp", "server_dumpable": false}
+```
+
+* `worker_filter` is what a worker reported in its job response after it
+  checked its own filter: `seccomp` on Linux, `none` where the system has no
+  filter (macOS, development only). A worker that cannot install the filter
+  refuses the job, so `seccomp` is positive evidence and its absence on
+  Linux is a failure, not a quiet downgrade. The server starts no worker
+  until it has a job (`get_renderer_info` runs none), so the value is
+  `unknown` until the first job of any kind has finished; after that it
+  stays. A deploy check that wants it should render once first.
+* `server_dumpable` is read from the kernel when asked: `false` on Linux
+  (the server refuses to start otherwise), always `true` elsewhere, where
+  there is no such flag.
+
+The log has the same two facts, once each: at startup `sandbox: the server
+process is non-dumpable` (on a system with no such flag, `...is dumpable`),
+and `sandbox: the render worker's system-call filter` with a `worker_filter`
+field at INFO the first time a worker finishes a job, never per request.
 
 PSCat has no operators for processes, network or environment access. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full table (and [docs/CLOUD_RUN.md](docs/CLOUD_RUN.md) for deployment) of which
@@ -1255,6 +1280,7 @@ GitHub Actions runs these on every pull request and push to `main`:
 | Suite | Covers |
 |---|---|
 | `tests/backend.rs` | real PNG/SVG/PDF renders with pixel checks, a generated page held to its plan (a `handwrite` note's height laid out in the worker within a pixel budget, a note over the budget refused before it is drawn, a page that misses the plan a bad job), deadline kill and no surviving process, cancel kills the worker, `halftone` in the worker job, PSCat step and memory limits (a PDF too big for the memory limit refused while it is written), file read/write refused, output caps, crash/protocol errors, the child's rlimits/env/cwd, the worker's art catalog, a `review_sheet` composed in one job and its exact size checked against the budget before any cell runs |
+| `tests/sandbox_signal.rs` | the sandbox signal: a real `serve-stdio` server reports `sandbox.worker_filter` `unknown` and `server_dumpable` before any render, then `seccomp` (Linux) or `none` (elsewhere) after three renders, with text and `structuredContent` the same; its stderr has the worker-filter line and the non-dumpable line exactly once each (not per render), the first after the first render started and the second at startup; a real worker names its filter in its job response, a failed job included, and the backend keeps the first answer. The Linux values are asserted under `cfg(target_os = "linux")`, so they run in CI on Linux and not on a macOS machine |
 | `tests/worker_sandbox.rs` | Linux only: a child that installs the worker's seccomp filter gets `EPERM` from `socket` (IPv4, IPv6, Unix, netlink, packet), `socketpair`, `connect` to 169.254.169.254, `bind`, `listen`, `accept`, `io_uring_setup`, `ptrace`, `process_vm_readv` and `pidfd_getfd` (and `PermissionDenied` from std's TCP and UDP), while pipes, files, a 64 MiB allocation and a new thread (which inherits the filter) still work; a child of a process that ran the server's `harden_server` cannot open its parent's `/proc/<pid>/mem` (`EACCES`), nor can the parent of a real `serve-stdio` open the server's; a real `render-worker` started by the backend carries one more seccomp filter than its parent (`Seccomp_filters`, as a container runtime may have installed one already) and `NoNewPrivs: 1`, and holds no socket. Every other suite renders through real workers, so on Linux it runs under the filter too |
 | `tests/mcp_stdio.rs` | rmcp client over stdio: initialize, tool list (one `EXPECTED_TOOLS` table), annotations and schemas, the art catalog (index, kind pages and named entries with size ceilings, argument errors, no server paths, load lines usable in a render), PNG image content with pixel checks, `halftone` (pure black-and-white pixels, tone kept, every page, refused for SVG/PDF), SVG/PDF resources, PostScript errors without images, a PDF over the memory limit as `limit_exceeded` (`memory`), pre-execution rejections, argument type errors with the structured envelope, validation, renderer info checked against `Cargo.lock` |
 | `tests/svg_cap.rs` | how SVG is returned, over stdio: up to `PSCAT_MCP_SVG_BLOB_THRESHOLD_BYTES` a text resource, over it a blob resource holding the same SVG byte for byte (`returned_as` in `structuredContent`, every key checked against the output schema, the text summary naming the limit), every page counted together and never mixed, exactly at the limit still text, 0 for every SVG a blob, PNG and PDF unaffected, an SVG over the output cap `output_too_large` with `error.input.code` `output_bytes` and its whole size, the limit in `get_renderer_info` and the tool descriptions, its default pulled down by a small output cap, a limit above the output cap refused at startup, the deprecated alias working with a startup warning, and both names set together refused at startup |

@@ -7,12 +7,14 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 use crate::config::LimitsConfig;
+use crate::sandbox::WorkerFilter;
 use crate::worker::{WorkerJob, WorkerResult};
 
 /// Why a backend produced no [`WorkerResult`].
@@ -44,6 +46,12 @@ pub type BackendFuture<'a> =
 pub trait RenderBackend: Send + Sync + 'static {
     /// Run `job`, giving up after `deadline`.
     fn execute(&self, job: WorkerJob, deadline: Duration) -> BackendFuture<'_>;
+
+    /// The system-call filter the workers run under, once a worker has said
+    /// so; `None` before that (and always, for a backend with no workers).
+    fn worker_filter(&self) -> Option<WorkerFilter> {
+        None
+    }
 }
 
 /// Most bytes of worker stderr kept for diagnostics; the rest is drained.
@@ -73,6 +81,9 @@ pub struct SubprocessBackend {
     /// `<dir>/fonts/packs/`. `None`: the worker's environment is the one
     /// variable it always had, and only the compiled-in fonts exist.
     pub font_pack_dir: Option<PathBuf>,
+    /// What the first worker to finish a job said about its filter. Shared
+    /// by clones; set once, which is also what makes the log line once.
+    filter: Arc<OnceLock<WorkerFilter>>,
 }
 
 impl SubprocessBackend {
@@ -83,6 +94,7 @@ impl SubprocessBackend {
             limits,
             tag: None,
             font_pack_dir: None,
+            filter: Arc::new(OnceLock::new()),
         }
     }
 
@@ -169,6 +181,21 @@ impl SubprocessBackend {
         cmd
     }
 
+    /// Keep what a worker said about its filter, and log it the first time.
+    /// Only the fixed tokens count: a worker's answer is data, not text to
+    /// pass on.
+    fn note_filter(&self, token: Option<&str>) {
+        let Some(filter) = token.and_then(WorkerFilter::from_token) else {
+            return;
+        };
+        if self.filter.set(filter).is_ok() {
+            tracing::info!(
+                worker_filter = filter.as_str(),
+                "sandbox: the render worker's system-call filter (reported by its first job)"
+            );
+        }
+    }
+
     async fn run(&self, job: WorkerJob, deadline: Duration) -> Result<WorkerResult, BackendError> {
         let started = Instant::now();
         let input = serde_json::to_vec(&job)
@@ -243,6 +270,7 @@ impl SubprocessBackend {
 
         match serde_json::from_slice::<WorkerResult>(&stdout) {
             Ok(result) => {
+                self.note_filter(result.sandbox.as_deref());
                 tracing::debug!(
                     pid = worker.pid,
                     source_bytes,
@@ -273,6 +301,10 @@ impl SubprocessBackend {
 impl RenderBackend for SubprocessBackend {
     fn execute(&self, job: WorkerJob, deadline: Duration) -> BackendFuture<'_> {
         Box::pin(self.run(job, deadline))
+    }
+
+    fn worker_filter(&self) -> Option<WorkerFilter> {
+        self.filter.get().copied()
     }
 }
 
