@@ -17,7 +17,8 @@
           "renderer.version": "{{pscat_version}}",
           "renderer.revision": "{{pscat_revision}}",
           "limits.max_source_bytes": 262144,
-          "limits.max_side_px": 8000
+          "limits.max_side_px": 8000,
+          "sandbox.worker_filter": "unknown"
         },
         "renders_executed": 0
       }

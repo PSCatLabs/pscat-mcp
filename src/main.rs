@@ -154,6 +154,19 @@ fn run(
         eprintln!("pscat-mcp-server: {e}");
         return std::process::ExitCode::FAILURE;
     }
+    // Once, at startup: the positive record that the flag is in force (the
+    // line above is the only other outcome). `get_renderer_info` reports it.
+    if pscat_mcp::sandbox::server_dumpable() {
+        tracing::info!(
+            server_dumpable = true,
+            "sandbox: the server process is dumpable (no non-dumpable flag on this system)"
+        );
+    } else {
+        tracing::info!(
+            server_dumpable = false,
+            "sandbox: the server process is non-dumpable"
+        );
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
