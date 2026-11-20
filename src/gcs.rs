@@ -36,7 +36,8 @@
 //!
 //! The HTTP client is the hyper + rustls (ring) stack the OAuth resource
 //! server uses; no Google SDK. Every call has its own timeout
-//! (`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`), a response size cap
+//! (`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`), one deadline over the whole `put`
+//! (`PSCAT_MCP_ARTIFACT_GCS_DEADLINE_MS`, #149), a response size cap
 //! ([`MAX_RESPONSE_BYTES`]) and follows no redirect.
 //!
 //! **Secrets.** A signed URL is a bearer capability until it expires, and the
@@ -192,6 +193,9 @@ pub struct GcsSettings {
     pub quota: usize,
     /// The timeout of each call.
     pub timeout: Duration,
+    /// The deadline of one whole `put` (#149): credentials, every upload and
+    /// every signature together, including any wait for the token.
+    pub deadline: Duration,
     /// The metadata server's base URL.
     pub metadata_endpoint: String,
     /// The IAM Credentials base URL.
@@ -209,6 +213,7 @@ impl std::fmt::Debug for GcsSettings {
             .field("ttl", &self.ttl)
             .field("quota", &self.quota)
             .field("timeout", &self.timeout)
+            .field("deadline", &self.deadline)
             .field("short_links", &self.short_links.is_some())
             .finish_non_exhaustive()
     }
@@ -255,6 +260,7 @@ impl GcsSettings {
             ttl: config.ttl(),
             quota: config.artifact_quota_bytes,
             timeout: Duration::from_millis(config.artifact_gcs_timeout_ms),
+            deadline: Duration::from_millis(config.artifact_gcs_deadline_ms),
             metadata_endpoint: base(
                 config
                     .artifact_gcs_metadata_endpoint
@@ -402,6 +408,8 @@ enum Failure {
     Status(u16),
     /// No answer within the timeout.
     Timeout,
+    /// The whole `put` ran past its deadline.
+    Deadline,
     /// The connection or request failed.
     Transport,
     /// The answer was too large or not what was expected.
@@ -413,6 +421,7 @@ impl Failure {
         match self {
             Failure::Status(_) => "status",
             Failure::Timeout => "timeout",
+            Failure::Deadline => "deadline",
             Failure::Transport => "transport",
             Failure::BadResponse => "bad_response",
         }
@@ -477,6 +486,13 @@ impl std::fmt::Debug for Token {
 struct CachedToken {
     token: Token,
     refresh_at: SystemTime,
+}
+
+/// How far one `put` got: whether an upload was started (its objects may
+/// exist), and the stage it is in (the one a deadline is blamed on).
+struct Progress {
+    uploaded: bool,
+    stage: Stage,
 }
 
 /// Bytes one principal uploaded and when.
@@ -791,8 +807,9 @@ impl GcsArtifactStore {
         id: &str,
         objects: &[ArtifactObject],
         at: SystemTime,
-        uploaded: &mut bool,
+        progress: &mut Progress,
     ) -> Result<Vec<ArtifactLink>, GcsError> {
+        progress.stage = Stage::Credentials;
         let token = self.token().await?;
         let signer = match self.settings.short_links {
             Some(_) => None,
@@ -810,13 +827,15 @@ impl GcsArtifactStore {
                 )
             })
             .collect();
+        progress.stage = Stage::Upload;
         for (i, (name, object)) in names.iter().zip(objects).enumerate() {
-            *uploaded = true;
+            progress.uploaded = true;
             self.upload(&token, name, i + 1, object).await?;
         }
         let Some(signer) = signer else {
             return Ok(self.short_links(id, objects, at));
         };
+        progress.stage = Stage::Signing;
         let mut links = Vec::with_capacity(names.len());
         for name in &names {
             let unsigned = v4_string_to_sign(
@@ -974,15 +993,34 @@ impl ArtifactStore for GcsArtifactStore {
                 .fold(RENDER_CHARGE_BYTES, |n, o| n.saturating_add(o.bytes.len()));
             self.reserve(owner, charge, at)?;
             let id = uuid::Uuid::new_v4().to_string();
-            let mut uploaded = false;
-            match self.put_inner(&id, &objects, at, &mut uploaded).await {
+            let mut progress = Progress {
+                uploaded: false,
+                stage: Stage::Credentials,
+            };
+            // One deadline over the whole call, the wait for the token
+            // included: a degraded Google answers each call within its own
+            // timeout, and a page makes two calls, so the sum can outlast
+            // the request (#149). Dropping the future on the deadline
+            // abandons the call in flight and releases any lock it holds.
+            // The result carries no link, so the objects already uploaded
+            // are unreachable (and the lifecycle rule deletes them).
+            let done = tokio::time::timeout(
+                self.settings.deadline,
+                self.put_inner(&id, &objects, at, &mut progress),
+            )
+            .await
+            .unwrap_or(Err(GcsError {
+                stage: progress.stage,
+                failure: Failure::Deadline,
+            }));
+            match done {
                 Ok(links) => Ok(StoredRender {
                     render_id: id,
                     expires_at: at + self.settings.ttl,
                     links,
                 }),
                 Err(e) => {
-                    if !uploaded {
+                    if !progress.uploaded {
                         self.refund(owner, charge, at);
                     }
                     Err(e.into_render_error())
@@ -1175,6 +1213,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             quota: 1,
             timeout: Duration::from_secs(1),
+            deadline: Duration::from_secs(2),
             metadata_endpoint: DEFAULT_METADATA_ENDPOINT.into(),
             iam_endpoint: DEFAULT_IAM_ENDPOINT.into(),
             storage_endpoint: DEFAULT_STORAGE_ENDPOINT.into(),

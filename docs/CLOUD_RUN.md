@@ -155,7 +155,10 @@ the deployment wires:
 * **Request timeout.** The Cloud Run request timeout must be more than
   max(`PSCAT_MCP_RENDER_TIMEOUT_MS`, `PSCAT_MCP_MAX_SHEET_TIMEOUT_MS`) +
   `PSCAT_MCP_QUEUE_TIMEOUT_MS` (30 s by default: the sheet deadline
-  defaults to the render timeout). 60 s is a good default.
+  defaults to the render timeout). With `gcs` links, add
+  `PSCAT_MCP_ARTIFACT_GCS_DEADLINE_MS` (20 s by default): the upload runs
+  after the render, so the three add up (50 s by default). 60 s is a good
+  default.
 * **CPU allocation.** Keep "CPU only during requests" (the default). The
   server does no background work unless async jobs are on, which this
   deployment should not do (see below).
@@ -293,7 +296,10 @@ keeps it from the metadata server (reachable from every process in the
 container otherwise). See "Sandbox" below.
 
 **Failures.** If the metadata server, IAM or Storage fails or times out
-(`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`, 10 s each), a `url` call returns
+(`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`, 10 s each), or the whole upload of a
+call takes longer than `PSCAT_MCP_ARTIFACT_GCS_DEADLINE_MS` (20 s: a
+multi-page call makes two Google calls a page, so a slow Google could
+otherwise outlast the request timeout), a `url` call returns
 `storage_unavailable` and a `both` or `auto` call returns its output inline
 with a `delivery_note`. Each failure logs one WARN, `artifact links failed`,
 with `code`, `stage` and `status` only; a 403 at `upload` or `signing`

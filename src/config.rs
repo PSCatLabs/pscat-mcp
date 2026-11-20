@@ -764,6 +764,17 @@ pub struct ArtifactConfig {
     )]
     pub artifact_gcs_timeout_ms: u64,
 
+    /// `gcs`: the deadline of one whole upload (credentials, every page's
+    /// upload and signature together), in milliseconds. Past it the call
+    /// stops with `storage_unavailable`. Keep it below the Cloud Run
+    /// request timeout less the render timeout and the queue timeout.
+    #[arg(
+        long,
+        env = "PSCAT_MCP_ARTIFACT_GCS_DEADLINE_MS",
+        default_value_t = 20_000
+    )]
+    pub artifact_gcs_deadline_ms: u64,
+
     /// For tests only: the metadata server's base URL (default
     /// `http://metadata.google.internal`). Must be `https`, or `http` on a
     /// loopback host.
@@ -841,6 +852,7 @@ impl Default for ArtifactConfig {
             artifact_prefix: DEFAULT_ARTIFACT_PREFIX.to_string(),
             artifact_signer: None,
             artifact_gcs_timeout_ms: 10_000,
+            artifact_gcs_deadline_ms: 20_000,
             artifact_gcs_metadata_endpoint: None,
             artifact_gcs_iam_endpoint: None,
             artifact_gcs_storage_endpoint: None,
@@ -947,6 +959,9 @@ impl ArtifactConfig {
         }
         if self.artifact_gcs_timeout_ms == 0 {
             return Err("artifact-gcs-timeout-ms must be positive".into());
+        }
+        if self.artifact_gcs_deadline_ms == 0 {
+            return Err("artifact-gcs-deadline-ms must be positive".into());
         }
         for (name, value) in [
             (
