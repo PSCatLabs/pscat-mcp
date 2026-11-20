@@ -1315,6 +1315,16 @@ async fn logs_carry_the_subject_but_never_emails_or_tokens() {
         )
         .env("PSCAT_MCP_LOG_FORMAT", "json")
         .env("RUST_LOG", "info")
+        // The first OAuth request makes the server fetch the issuer's
+        // metadata and keys from the mock above, and the renders each start a
+        // worker. All answer in milliseconds, so the server's defaults (5 s
+        // per fetch, 20 s per render) are far above what the test needs; but
+        // a machine starved for seconds (parallel builds) can miss them, and
+        // the test then fails on a 401 or a killed render that say nothing
+        // about the logs. These bound a hang, not the work.
+        .env("PSCAT_MCP_OAUTH_JWKS_TIMEOUT_MS", "60000")
+        .env("PSCAT_MCP_RENDER_TIMEOUT_MS", "100000")
+        .env("PSCAT_MCP_QUEUE_TIMEOUT_MS", "100000")
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -1329,7 +1339,9 @@ async fn logs_carry_the_subject_but_never_emails_or_tokens() {
         }
     });
     let mut next_line = async || -> Value {
-        let line = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+        // Above the render timeout set above, so a render the server gives
+        // up on is seen as its log line rather than as a silent test.
+        let line = tokio::time::timeout(Duration::from_secs(150), rx.recv())
             .await
             .expect("a log line in time")
             .expect("the server is still running");
