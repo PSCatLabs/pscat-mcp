@@ -1213,6 +1213,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             quota: 1,
             timeout: Duration::from_secs(1),
+            deadline: Duration::from_secs(2),
             metadata_endpoint: DEFAULT_METADATA_ENDPOINT.into(),
             iam_endpoint: DEFAULT_IAM_ENDPOINT.into(),
             storage_endpoint: DEFAULT_STORAGE_ENDPOINT.into(),
