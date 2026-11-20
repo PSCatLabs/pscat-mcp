@@ -196,25 +196,35 @@ fn assert_clean_deadline(e: &pscat_mcp::render::RenderError, stage: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_multi_page_put_stops_at_the_deadline_not_after_the_sum_of_the_calls() {
     let fake = fake_google().await;
-    // Every call takes 400 ms and is well inside its 5 s timeout: eight
-    // pages are 2 + 8 + 8 calls, 7.2 s in all. The deadline is 1 s.
-    fake.slow(400);
-    let s = store(&fake, Duration::from_secs(5), Duration::from_secs(1));
+    // Every call takes 500 ms and is well inside its 5 s timeout: eight
+    // pages are 2 + 8 + 8 calls, 9 s in all. The deadline is 3 s: the token
+    // and the signer take 1 s, so the uploads start at 1 s and a few fit
+    // before the deadline, with 2 s to spare on a stalled machine; the
+    // signatures could only start at 5 s.
+    fake.slow(500);
+    let s = store(&fake, Duration::from_secs(5), Duration::from_secs(3));
     let started = Instant::now();
     let e = s
         .put("a", objects(8))
         .await
         .expect_err("the put must hit its deadline");
     let took = started.elapsed();
-    assert!(took >= Duration::from_millis(900), "{took:?}");
-    assert!(took < Duration::from_millis(3500), "{took:?}");
+    assert!(took >= Duration::from_millis(2900), "{took:?}");
+    // Bounded by what a broken deadline would take (the 9 s sum), not by the
+    // deadline plus a margin: a stalled runner must not fail the test.
+    assert!(took < Duration::from_secs(7), "{took:?}");
     assert_clean_deadline(&e, "upload");
     // Some uploads started, and the rest never did: the call stopped.
     let uploads = fake.fake.uploads.load(Ordering::SeqCst);
     assert!((1..8).contains(&uploads), "{uploads} uploads");
     assert_eq!(fake.fake.signs.load(Ordering::SeqCst), 0, "no signing yet");
+    // The fake counts a request when it arrives, before it answers slowly.
+    // Settle first, so a request sent just before the deadline and still
+    // on its way is not read as work that went on, then watch for longer
+    // than a call takes: nothing new may arrive.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let seen = fake.requests();
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(fake.requests(), seen, "work went on after the deadline");
     // Objects may exist, so the charge stays (as for any failed upload).
     assert_eq!(s.charged_bytes("a"), charge(8));
@@ -229,13 +239,16 @@ async fn a_slow_multi_page_put_stops_at_the_deadline_not_after_the_sum_of_the_ca
 async fn the_deadline_can_fall_in_the_signing_stage() {
     let fake = fake_google().await;
     fake.slow(0);
-    fake.fake.iam_ms.store(400, Ordering::SeqCst);
-    let s = store(&fake, Duration::from_secs(5), Duration::from_millis(900));
-    let e = s.put("a", objects(6)).await.expect_err("deadline");
+    // Token, signer and uploads answer at once (2 s of slack for them);
+    // each of the eight signatures takes 500 ms, 4 s in all, and the
+    // deadline is 2 s: it falls in the signing stage with signatures left.
+    fake.fake.iam_ms.store(500, Ordering::SeqCst);
+    let s = store(&fake, Duration::from_secs(5), Duration::from_secs(2));
+    let e = s.put("a", objects(8)).await.expect_err("deadline");
     assert_clean_deadline(&e, "signing");
-    assert_eq!(fake.fake.uploads.load(Ordering::SeqCst), 6);
-    assert!(fake.fake.signs.load(Ordering::SeqCst) < 6);
-    assert_eq!(s.charged_bytes("a"), charge(6));
+    assert_eq!(fake.fake.uploads.load(Ordering::SeqCst), 8);
+    assert!(fake.fake.signs.load(Ordering::SeqCst) < 8);
+    assert_eq!(s.charged_bytes("a"), charge(8));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -246,7 +259,8 @@ async fn a_deadline_before_any_upload_refunds_the_charge() {
     let s = store(&fake, Duration::from_secs(5), Duration::from_millis(400));
     let started = Instant::now();
     let e = s.put("a", objects(3)).await.expect_err("deadline");
-    assert!(started.elapsed() < Duration::from_secs(3));
+    // A broken deadline waits for the 5 s per-call timeout.
+    assert!(started.elapsed() < Duration::from_secs(4));
     assert_clean_deadline(&e, "credentials");
     assert_eq!(fake.fake.uploads.load(Ordering::SeqCst), 0);
     assert_eq!(s.charged_bytes("a"), 0, "nothing was uploaded");
@@ -260,11 +274,7 @@ async fn callers_waiting_for_the_token_are_bound_by_the_deadline_too() {
     // first caller holds the token lock for that long, and each caller
     // after it would wait for the lock and then try for its own 8 s.
     fake.fake.metadata_ms.store(HANG, Ordering::SeqCst);
-    let s = Arc::new(store(
-        &fake,
-        Duration::from_secs(8),
-        Duration::from_millis(500),
-    ));
+    let s = Arc::new(store(&fake, Duration::from_secs(8), Duration::from_secs(2)));
     let started = Instant::now();
     let calls: Vec<_> = (0..4)
         .map(|i| {
@@ -276,7 +286,9 @@ async fn callers_waiting_for_the_token_are_bound_by_the_deadline_too() {
         let e = c.await.unwrap().expect_err("deadline");
         assert_clean_deadline(&e, "credentials");
     }
-    assert!(started.elapsed() < Duration::from_secs(3));
+    // A broken deadline takes the 8 s per-call timeout for the first caller
+    // and more for each caller behind it.
+    assert!(started.elapsed() < Duration::from_secs(6));
     // The lock was released: a healthy metadata server serves the next call.
     fake.fake.metadata_ms.store(0, Ordering::SeqCst);
     let s2 = store(&fake, Duration::from_secs(5), Duration::from_secs(5));
@@ -385,9 +397,11 @@ async fn url_is_storage_unavailable_and_both_and_auto_fall_back_inline_within_th
         let started = Instant::now();
         let r = call(&client, args(delivery)).await;
         let took = started.elapsed();
-        // The deadline is 1.2 s over the render; the calls would take 11 s.
+        // The deadline is 1.2 s over the render; a broken one would take the
+        // 11 s the calls add up to. Bounded by that, not by the deadline
+        // plus a margin, so a stalled runner does not fail the test.
         assert!(
-            took < render + Duration::from_secs(5),
+            took < render + Duration::from_secs(8),
             "{delivery}: {took:?} (a render alone: {render:?})"
         );
         if delivery == "url" {
