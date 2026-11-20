@@ -610,7 +610,22 @@ in the container).
 The HTTP client is the OAuth server's stack (hyper, hyper-rustls with ring
 and webpki roots), typed over `Full<Bytes>` for the POSTs; no Google SDK.
 Each call has its own timeout (`PSCAT_MCP_ARTIFACT_GCS_TIMEOUT_MS`), reads
-at most 64 KiB of response and follows no redirect. The three base URLs
+at most 64 KiB of response and follows no redirect. Over all of a `put`
+(token, signer, every upload and signature, one after the other: a page is
+two calls, so a 10-page render is about 22) there is one deadline,
+`PSCAT_MCP_ARTIFACT_GCS_DEADLINE_MS` (#149, 20 s by default): `put` wraps
+its work in one `tokio::time::timeout`, so a degraded Google costs at most
+the deadline, not the sum of the calls' timeouts, which could pass the Cloud
+Run request timeout and show the client a platform timeout in place of
+`storage_unavailable` and its fallback. The wait for the token lock and the
+signer lock is inside it too (a caller behind a stalled refresh would
+otherwise wait for each earlier caller's timeout in turn). The deadline
+drops the work in flight, which releases a lock it holds; the failed call
+returns no link, so objects already uploaded cannot be reached (the
+lifecycle rule deletes them), and, as for any failure after an upload began,
+the quota charge stays (a deadline before the first upload refunds it). The
+calls are sequential on purpose; uploading and signing pages concurrently
+would cut the latency but is not done. The three base URLs
 (metadata server, IAM Credentials, Storage uploads) can be overridden for
 tests only, by hidden flags (`PSCAT_MCP_ARTIFACT_GCS_*_ENDPOINT`) that must
 be `https`, or `http` on a loopback host; the built-in metadata default is
@@ -619,7 +634,9 @@ plain `http://metadata.google.internal`, as the metadata server requires.
 **Failures.** Any failure of those calls (status, timeout, transport, an
 unexpected answer) is `storage_unavailable` (`ErrorCode::StorageUnavailable`,
 added for this; retryable), logged once as a WARN with `code`, `stage`
-(`credentials`, `upload`, `signing`), `failure` and at most `status`. Its
+(`credentials`, `upload`, `signing`; for a deadline, the stage it was in),
+`failure` (`status`, `timeout`, `transport`, `bad_response`, or `deadline`
+for the whole-upload deadline) and at most `status`. Its
 message names the stage and status and says to retry or use `inline`; it
 never holds a URL, the bucket, a token or a response body, and neither does
 any `Debug` form (the token and the settings print redacted). In
@@ -864,7 +881,7 @@ the same binary). A pre-forked pool is a possible later optimisation.
 | Async jobs held | per principal and in all (unfinished), `server_busy` | 4, 16 |
 | Async job results | byte budget (largest result reserved while a job runs), TTL after it finishes | 128 MiB, 1 h |
 | Stored artifacts (memory links) | per-principal quota; the async job results budget, shared; TTL after storing | 32 MiB, 128 MiB, 30 min |
-| Uploaded artifacts (`gcs` links) | per-principal bytes within one TTL, per instance; signed URL lifetime (at most 7 days); each Google call's timeout and 64 KiB response cap | 32 MiB, 30 min, 10 s |
+| Uploaded artifacts (`gcs` links) | per-principal bytes within one TTL, per instance; signed URL lifetime (at most 7 days); each Google call's timeout, one deadline over a whole call's upload, and the 64 KiB response cap | 32 MiB, 30 min, 10 s, 20 s |
 
 PSCat has **no operators for processes, network or environment access**
 (see PSCat's `SECURITY.md`). The worker's environment is cleared anyway
