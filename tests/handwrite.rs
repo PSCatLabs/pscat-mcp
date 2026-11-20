@@ -13,7 +13,9 @@ mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
-const CALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// Above the render timeout that the half-a-million-lines test gives the
+/// server, so that the server reports a slow call.
+const CALL_TIMEOUT: Duration = Duration::from_secs(200);
 
 /// A client on a server started with the extra `PSCAT_MCP_*` variables.
 async fn start(env: &[(&str, &str)]) -> Client {
@@ -344,7 +346,20 @@ async fn a_note_too_tall_for_the_pixel_cap_is_a_structured_error() {
 /// not a deadline kill.
 #[tokio::test]
 async fn a_text_of_half_a_million_lines_is_refused_not_killed() {
-    let client = start(&[("PSCAT_MCP_MAX_HANDWRITE_BYTES", "1048576")]).await;
+    // Counting half a million lines is real interpreter work: about 8 s of
+    // wall time on an idle machine with a debug build, against a default
+    // interpreter limit of 18 s (the render timeout less a margin). The
+    // limit is wall-clock time, so a machine that gives the worker a third
+    // of a core (parallel builds, a test run at background priority) trips
+    // it and the call is `limit_exceeded`: not the refusal this test is
+    // about. The render timeout is raised so that the test measures what it
+    // names; a runaway count is still stopped by the step limit and by the
+    // client's own `CALL_TIMEOUT`.
+    let client = start(&[
+        ("PSCAT_MCP_MAX_HANDWRITE_BYTES", "1048576"),
+        ("PSCAT_MCP_RENDER_TIMEOUT_MS", "170000"),
+    ])
+    .await;
     let text = "a\n".repeat(500_000);
     let r = call(&client, json!({"text": text, "width": 8000})).await;
     let s = assert_fails(&r, "invalid_dimensions");
