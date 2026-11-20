@@ -43,6 +43,8 @@ boundaries are, and where to extend it.
                            • Linux: seccomp filter (sandbox.rs) before the job is
                              read; no sockets, io_uring, ptrace (refuses without);
                              the server itself is non-dumpable
+                           • names its filter ("seccomp" | "none") in every
+                             WorkerResult (the `sandbox` field)
                            • Generate jobs: generate.rs writes the program here
                              (a review sheet: sheet.rs renders every cell and
                              composes the PNG here)
@@ -1024,6 +1026,39 @@ and the `ALLOW` and `ERRNO` actions, all of which gVisor implements, so it
 is expected to work on Cloud Run's first generation as on a regular
 kernel. `tests/worker_sandbox.rs` checks it on every Linux test run (CI's
 Linux job is x86_64).
+
+### Reporting the sandbox
+
+The controls above fail closed, so a working one leaves no trace. Two
+signals give positive evidence (#146):
+
+* **The worker's filter.** `sandbox::install` returns the filter it put in
+  force (`WorkerFilter::Seccomp` after the self-check on Linux,
+  `WorkerFilter::None` elsewhere), and `worker::run_stdio` writes that fixed
+  token (`seccomp` or `none`) in the `sandbox` field of every
+  `WorkerResult`, failed jobs included. The backend (`SubprocessBackend`)
+  keeps the first token it accepts in a shared `OnceLock`, and only the two
+  tokens a worker can send count; anything else is ignored. The first time
+  the `OnceLock` is set the backend logs one INFO line, `sandbox: the render
+  worker's system-call filter ...`, with a `worker_filter` field, so it
+  appears once per server process, never per request. The `RenderBackend`
+  trait has a `worker_filter()` method (default `None`) that
+  `RenderService::worker_filter` forwards.
+* **The server's dumpable flag.** `main` logs one INFO line at startup,
+  after `harden_server` succeeded (`sandbox: the server process is
+  non-dumpable`; on a system without the flag, `... is dumpable`).
+  `sandbox::server_dumpable` reads `PR_GET_DUMPABLE` from the kernel when
+  asked, so what `get_renderer_info` reports is what is in force; elsewhere
+  than Linux it is `true`.
+
+`get_renderer_info` reports them as `sandbox: {worker_filter,
+server_dumpable}`. The server starts no worker for `get_renderer_info`
+(it runs no PostScript, and a probe job would count as a render in the
+logs and counters), so before the first job has finished `worker_filter` is
+`unknown`; after that it is the token the first finished job reported and
+does not change. An operator or deploy check that wants positive
+evidence renders once, then calls `get_renderer_info`. This is
+read-only, small, and the same in `content` and `structuredContent`.
 
 ## Security boundaries
 

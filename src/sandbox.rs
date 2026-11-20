@@ -45,6 +45,43 @@
 //! then requires `CAP_SYS_PTRACE` for that access, which the container
 //! drops. It also means the server never writes a core dump.
 
+/// What the worker's system-call filter is, as `get_renderer_info` reports
+/// it (`sandbox.worker_filter`) and as a worker names it in its job
+/// response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerFilter {
+    /// The seccomp filter described above is in force (Linux).
+    Seccomp,
+    /// There is no filter: this system has none (macOS, for development).
+    None,
+    /// No worker has run yet, so the server does not know. Never sent by a
+    /// worker; `get_renderer_info` reports it until the first job ends.
+    Unknown,
+}
+
+impl WorkerFilter {
+    /// The fixed token a worker puts in its job response, and the value
+    /// `get_renderer_info` reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkerFilter::Seccomp => "seccomp",
+            WorkerFilter::None => "none",
+            WorkerFilter::Unknown => "unknown",
+        }
+    }
+
+    /// The filter a worker's token names. Only the two tokens a worker can
+    /// send are accepted; anything else is `None`.
+    pub fn from_token(token: &str) -> Option<WorkerFilter> {
+        match token {
+            "seccomp" => Some(WorkerFilter::Seccomp),
+            "none" => Some(WorkerFilter::None),
+            _ => None,
+        }
+    }
+}
+
 /// Install the worker's system-call filter in the calling process.
 ///
 /// Must be called while the process has a single thread: a seccomp filter
@@ -55,8 +92,9 @@
 ///
 /// On Linux the filter is checked after installing (a socket must be
 /// refused, an ordinary call must still work), so an `Ok` means it is in
-/// force. Elsewhere this does nothing and returns `Ok`.
-pub fn install() -> Result<(), String> {
+/// force and the answer is [`WorkerFilter::Seccomp`]. Elsewhere this does
+/// nothing and the answer is [`WorkerFilter::None`].
+pub fn install() -> Result<WorkerFilter, String> {
     imp::install()
 }
 
@@ -68,7 +106,8 @@ pub fn install() -> Result<(), String> {
 /// Called by `serve-http` and `serve-stdio` before the runtime starts and
 /// before any worker exists. Workers are not affected: `execve` makes the
 /// worker dumpable again, which only exposes the worker to the server.
-/// Elsewhere than Linux this does nothing and returns `Ok`.
+/// Elsewhere than Linux this does nothing and returns `Ok`
+/// ([`server_dumpable`] then stays `true`).
 pub fn harden_server() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -86,6 +125,22 @@ pub fn harden_server() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether this process is dumpable, read from the kernel (`PR_GET_DUMPABLE`)
+/// each time, so it is what is in force and not what was asked for.
+/// `false` after [`harden_server`] on Linux. Always `true` elsewhere: there
+/// is no such flag, and [`harden_server`] does nothing.
+pub fn server_dumpable() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a plain prctl query.
+        unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -189,7 +244,7 @@ mod imp {
         format!("{what} failed: {}", std::io::Error::last_os_error())
     }
 
-    pub(super) fn install() -> Result<(), String> {
+    pub(super) fn install() -> Result<super::WorkerFilter, String> {
         let mut filter = program();
         let prog = sock_fprog {
             len: u16::try_from(filter.len()).expect("short filter"),
@@ -210,7 +265,8 @@ mod imp {
                 return Err(os_error("prctl(PR_SET_SECCOMP)"));
             }
         }
-        verify()
+        verify()?;
+        Ok(super::WorkerFilter::Seccomp)
     }
 
     /// Check that the filter is in force: a socket is refused with EPERM
@@ -244,8 +300,8 @@ mod imp {
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
-    pub(super) fn install() -> Result<(), String> {
-        Ok(())
+    pub(super) fn install() -> Result<super::WorkerFilter, String> {
+        Ok(super::WorkerFilter::None)
     }
 }
 
@@ -277,5 +333,29 @@ mod tests {
         }
         // The architecture mismatch also lands on the deny.
         assert_eq!(1 + 1 + usize::from(p[1].jf), len - 1);
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::WorkerFilter;
+
+    #[test]
+    fn a_worker_can_send_only_seccomp_or_none() {
+        assert_eq!(
+            WorkerFilter::from_token("seccomp"),
+            Some(WorkerFilter::Seccomp)
+        );
+        assert_eq!(WorkerFilter::from_token("none"), Some(WorkerFilter::None));
+        for other in ["unknown", "Seccomp", "", "seccomp ", "a worker's own text"] {
+            assert_eq!(WorkerFilter::from_token(other), None, "{other:?}");
+        }
+        for f in [WorkerFilter::Seccomp, WorkerFilter::None] {
+            assert_eq!(WorkerFilter::from_token(f.as_str()), Some(f));
+        }
+        assert_eq!(
+            serde_json::to_string(&WorkerFilter::Unknown).unwrap(),
+            "\"unknown\""
+        );
     }
 }

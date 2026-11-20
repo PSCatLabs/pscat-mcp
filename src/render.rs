@@ -1168,6 +1168,13 @@ impl RenderService {
         })
     }
 
+    /// The system-call filter the workers run under, as the first finished
+    /// job reported it; `None` until a worker has run (or with a backend
+    /// that has none).
+    pub fn worker_filter(&self) -> Option<crate::sandbox::WorkerFilter> {
+        self.backend.worker_filter()
+    }
+
     /// PSCat's art catalog, read in a worker process so it reflects the
     /// environment renders run in (fonts, font packs), not the server's.
     ///

@@ -585,6 +585,14 @@ worker cannot read the server's memory (and a token in it) through
 needs the network), so give the service account only what the server
 needs. On the second generation the worker's `RLIMIT_AS` also applies.
 
+To check both on a running instance instead of inferring them from the
+absence of a failure: render once, then call `get_renderer_info` and read
+`sandbox` (`worker_filter` `seccomp`, `server_dumpable` `false`). Before the
+first job has finished `worker_filter` is `unknown`. The log has the same
+facts once each: `sandbox: the server process is non-dumpable` at startup
+and `sandbox: the render worker's system-call filter` at INFO after the
+first job.
+
 ## Logging and metrics
 
 Logs are JSON on stderr: one line per request with `request_id`, method,

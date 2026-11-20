@@ -79,6 +79,7 @@ use crate::render::{
     ArtCatalog, DEFAULT_PAGE_POINTS, ErrorCode, GenerateRequest, InputDiagnostic, JobRequest,
     RenderError, RenderOutput, RenderRequest, RenderService, TaskCall, ValidationReport, cancelled,
 };
+use crate::sandbox::{self, WorkerFilter};
 use crate::sheet::{
     MAX_LABEL_CHARS, MAX_PAGE_POINTS, MAX_ZOOM, SheetCellReport, SheetEntryParams, SheetParams,
 };
@@ -829,6 +830,8 @@ pub struct RendererInfo {
     pub jobs: JobsInfo,
     /// What a program can and cannot reach.
     pub capabilities: Vec<String>,
+    /// The process isolation in force.
+    pub sandbox: SandboxInfo,
     /// Font packs, present only when the operator configured a font-pack
     /// directory (`PSCAT_MCP_FONT_PACK_DIR`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -837,6 +840,22 @@ pub struct RendererInfo {
     /// the operator turned them on (`PSCAT_MCP_ARTIFACT_LINKS`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_links: Option<ArtifactLinksInfo>,
+}
+
+/// Process isolation, in `get_renderer_info`: what the server and its render
+/// workers run under.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SandboxInfo {
+    /// The system-call filter of the render workers, as a worker reported it
+    /// in its first job response: `seccomp` (Linux), `none` (no filter on
+    /// this system), or `unknown` before the first worker job has finished
+    /// (the server starts no worker until one is needed).
+    pub worker_filter: WorkerFilter,
+    /// Whether the server process is dumpable. `false` on Linux (it makes
+    /// itself non-dumpable at startup, so a worker cannot read its memory
+    /// through `/proc`); always `true` elsewhere, where there is no such
+    /// flag.
+    pub server_dumpable: bool,
 }
 
 /// Artifact links, in `get_renderer_info`.
@@ -1487,6 +1506,13 @@ impl PscatMcp {
                     .to_string()
             }))
             .collect(),
+            sandbox: SandboxInfo {
+                worker_filter: self
+                    .service
+                    .worker_filter()
+                    .unwrap_or(WorkerFilter::Unknown),
+                server_dumpable: sandbox::server_dumpable(),
+            },
             font_packs,
             artifact_links: self.service.artifacts().map(|store| {
                 let c = self.service.artifact_config();
@@ -2001,8 +2027,10 @@ impl PscatMcp {
         description = "Reports the PSCat renderer version, this server's version, the supported \
                        output formats with their MIME types, the limits in force (source size, \
                        timeout, pixels, pages, output size, dpi range, concurrency) and what \
-                       programs can access, and the installed font packs when the server has \
-                       a font-pack directory. Runs no PostScript.",
+                       programs can access, the process sandbox (the render workers' \
+                       system-call filter and whether the server is dumpable), and the \
+                       installed font packs when the server has a font-pack directory. Runs no \
+                       PostScript.",
         annotations(
             title = "PSCat renderer info",
             read_only_hint = true,
