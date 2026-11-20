@@ -13,7 +13,9 @@ mod common;
 
 type Client = RunningService<RoleClient, ()>;
 
-const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a call may take, above the server's own timeouts
+/// ([`SERVER_TIMEOUTS`]) so that a slow render is reported by the server.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Two halves (red | blue) with a green square in the bottom-left corner of
 /// a 200x100 page.
@@ -54,9 +56,25 @@ async fn start() -> Client {
 }
 
 /// A client on a server started from the executable at `exe`.
+///
+/// The server gets render and queue timeouts far above its defaults (20 s and
+/// 10 s). Nothing here depends on them: the first `describe_art_capabilities`
+/// of a server reads the catalog in a worker, and every render runs in one,
+/// each a new process with a debug build's start-up under it. On an idle
+/// machine that takes milliseconds; on one that is starved (parallel builds,
+/// a test run at low priority) a worker can miss a 20 s deadline and the
+/// call then fails with `timeout` or `server_busy`, which says nothing about
+/// the code under test. A real hang still fails, at the client's own
+/// [`CALL_TIMEOUT`].
 async fn start_with(exe: impl AsRef<std::ffi::OsStr>) -> Client {
-    common::start_stdio(exe, &[]).await
+    common::start_stdio(exe, SERVER_TIMEOUTS).await
 }
+
+/// The server's own timeouts for this file's tests: see [`start_with`].
+const SERVER_TIMEOUTS: &[(&str, &str)] = &[
+    ("PSCAT_MCP_RENDER_TIMEOUT_MS", "100000"),
+    ("PSCAT_MCP_QUEUE_TIMEOUT_MS", "100000"),
+];
 
 async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
     let Value::Object(args) = args else {
@@ -1082,6 +1100,9 @@ async fn describe_art_capabilities_lists_a_kind_in_pages() {
     let tool = capabilities_tool(&client).await;
     let schema = tool.output_schema.as_ref().unwrap();
     let index = call(&client, "describe_art_capabilities", json!({})).await;
+    // The first call reads the catalog in a worker: say what went wrong if it
+    // did (a worker error, a timeout) instead of failing on a missing field.
+    assert_eq!(index.is_error, Some(false), "{}", text_of(&index));
     let index = structured(&index)["index"].as_array().unwrap().clone();
 
     let mut largest = (0, 0);

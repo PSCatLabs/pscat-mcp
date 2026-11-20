@@ -719,10 +719,20 @@ fn gcs_and_a_default_without_links_refuse_to_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quick_tasks_call_applies_its_delivery() {
+    // "Quick" means done before `task_after_ms`: a call still running then
+    // becomes a task and returns a handle, not the result this test reads.
+    // The default is 2 s, and a render that starts a worker (and the first
+    // handwriting, which loads a font) can take longer than that on a loaded
+    // machine, so this test lets a call run for up to a minute and still be
+    // synchronous. The render timeout must stay above it (config check).
     let service = pscat_mcp::build_service_with(
-        LimitsConfig::default(),
+        LimitsConfig {
+            render_timeout_ms: 120_000,
+            ..LimitsConfig::default()
+        },
         JobsConfig {
             tasks: true,
+            task_after_ms: 60_000,
             ..JobsConfig::default()
         }
         .enabled(),

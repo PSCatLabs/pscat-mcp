@@ -7,13 +7,22 @@
 //! `RUST_LOG` says. Each test sends an `initialize` whose `clientInfo.name`
 //! is a marker, then checks the server's stderr: the marker is absent at the
 //! default filter and with `RUST_LOG` raising `rmcp` to INFO and to TRACE.
+//!
+//! The server's stderr (and, for `serve-stdio`, its stdin) is a regular file
+//! here, never a pipe. A pipe's far end closes only when *every* process
+//! holding it has exited, and on macOS a process can hold one by accident:
+//! `std` makes a pipe with `pipe()` and sets close-on-exec in a second step,
+//! so a `fork` by another thread between the two (the tests of this binary
+//! start servers in parallel) hands the write end to that child, which keeps
+//! it past its `exec`. Waiting for EOF on a killed server's stderr then waits
+//! for that unrelated process too (#166). A file has no such end: once the
+//! server is reaped, everything it wrote is in the file.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 const SERVER: &str = env!("CARGO_BIN_EXE_pscat-mcp-server");
 const TOKEN: &str = "test-token-0123456789";
@@ -36,38 +45,79 @@ fn tools_list() -> Value {
     json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 }
 
+/// A file in the temp directory that is removed when the value is dropped.
+/// A server's stderr (and the input of `serve-stdio`) goes to one: see the
+/// header for why it is not a pipe.
+struct LogFile(PathBuf);
+
+impl LogFile {
+    fn new(what: &str) -> Self {
+        Self(std::env::temp_dir().join(format!(
+            "pscat-mcp-logging-{what}-{}",
+            uuid::Uuid::new_v4().simple()
+        )))
+    }
+
+    /// Create (or empty) the file for a child to write to.
+    fn create(&self) -> std::fs::File {
+        std::fs::File::create(&self.0).expect("create the log file")
+    }
+
+    /// Everything written so far. The writer is another process, so this is
+    /// a snapshot until it has been reaped.
+    fn read(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(&self.0).unwrap_or_default()).into_owned()
+    }
+}
+
+impl Drop for LogFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Run `serve-stdio` through the handshake and one request, and return its
 /// stderr. `rust_log` of `None` leaves `RUST_LOG` unset.
 fn stdio_stderr(rust_log: Option<&str>) -> String {
-    use std::io::Write as _;
+    // The three messages are the server's whole input: a file ends at its
+    // end, so the server sees end of input after `tools/list` without a pipe
+    // whose write end another process could hold open.
+    let input = LogFile::new("in");
+    let lines: Vec<String> = [initialize(), initialized(), tools_list()]
+        .iter()
+        .map(Value::to_string)
+        .collect();
+    std::fs::write(&input.0, lines.join("\n") + "\n").expect("write the input");
+    let stderr = LogFile::new("err");
     let mut cmd = Command::new(SERVER);
     cmd.arg("serve-stdio")
         .env("PSCAT_MCP_LOG_FORMAT", "json")
         .env_remove("RUST_LOG")
-        .stdin(Stdio::piped())
+        .stdin(std::fs::File::open(&input.0).expect("open the input"))
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(stderr.create());
     if let Some(v) = rust_log {
         cmd.env("RUST_LOG", v);
     }
     let mut child = cmd.spawn().expect("start the server");
-    let mut stdin = child.stdin.take().unwrap();
-    for msg in [initialize(), initialized(), tools_list()] {
-        writeln!(stdin, "{msg}").unwrap();
-    }
     // End of input ends the server, after it has handled the lines above in
-    // order: the handshake is logged before `tools/list` is served.
-    drop(stdin);
-    // A server that does not stop on end of input is killed after a deadline
-    // rather than hanging the test.
+    // order: the handshake is logged before `tools/list` is served. A server
+    // that does not stop is killed after a deadline rather than hanging the
+    // test.
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || tx.send(child.wait_with_output()));
+    std::thread::spawn(move || tx.send(child.wait()));
     match rx.recv_timeout(Duration::from_secs(60)) {
-        Ok(out) => String::from_utf8_lossy(&out.expect("server output").stderr).into_owned(),
+        Ok(status) => {
+            status.expect("wait for the server");
+            stderr.read()
+        }
         Err(_) => {
             let _ = Command::new("kill").arg(pid.to_string()).status();
-            panic!("serve-stdio did not stop at end of input");
+            panic!(
+                "serve-stdio did not stop at end of input; stderr so far: {}",
+                stderr.read()
+            );
         }
     }
 }
@@ -93,10 +143,76 @@ fn stdio_rust_log_cannot_bring_the_client_info_back() {
 struct Server {
     child: tokio::process::Child,
     base: String,
-    logs: tokio::task::JoinHandle<String>,
-    /// The stderr lines read so far, for a test that waits for one.
-    seen: Arc<Mutex<String>>,
+    /// The server's stderr (a file, see the header).
+    log: LogFile,
 }
+
+impl Server {
+    /// The stderr lines written so far, for a test that waits for one.
+    fn seen(&self) -> String {
+        self.log.read()
+    }
+
+    /// Wait until the server has logged `needle`, and return the log so far.
+    /// A line is written by the server's own tasks, some time after the
+    /// request that causes it has been answered, so a test waits for the
+    /// line rather than for a time.
+    async fn wait_for_log(&mut self, needle: &str) -> String {
+        let deadline = Instant::now() + LOG_WAIT;
+        loop {
+            let seen = self.seen();
+            if seen.contains(needle) {
+                return seen;
+            }
+            assert!(
+                self.child.try_wait().expect("poll the server").is_none(),
+                "the server exited before it logged {needle:?}: {seen}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the server never logged {needle:?}: {seen}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Wait until the server has no child process (its workers). Polls
+    /// `pgrep -P`, which exits 1 when nothing matches.
+    async fn wait_for_no_workers(&self) {
+        let pid = self.child.id().expect("the server is running").to_string();
+        let deadline = Instant::now() + LOG_WAIT;
+        loop {
+            let found = tokio::process::Command::new("pgrep")
+                .args(["-P", &pid])
+                .stdout(Stdio::null())
+                .status()
+                .await
+                .expect("run pgrep")
+                .success();
+            if !found {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server's worker outlived its request"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Kill the server and return everything it logged. `kill` returns once
+    /// the server is reaped, and the file then holds all it wrote: there is
+    /// no end of file to wait for.
+    async fn stop(mut self) -> String {
+        self.child.kill().await.expect("kill the server");
+        self.log.read()
+    }
+}
+
+/// How long a test waits for the server to log a line it has been asked to
+/// produce. It is a ceiling for a loaded runner, not a delay: the wait ends
+/// as soon as the line is in the file.
+const LOG_WAIT: Duration = Duration::from_secs(120);
 
 async fn start_http(rust_log: Option<&str>) -> Server {
     start_http_with(rust_log, &[]).await
@@ -104,12 +220,14 @@ async fn start_http(rust_log: Option<&str>) -> Server {
 
 /// `serve-http` on a free port with extra environment variables.
 async fn start_http_with(rust_log: Option<&str>, env: &[(&str, &str)]) -> Server {
+    let log = LogFile::new("err");
     let mut cmd = tokio::process::Command::new(SERVER);
     cmd.args(["serve-http", "--bind", "127.0.0.1", "--port", "0"])
         .env("PSCAT_MCP_AUTH_TOKENS", TOKEN)
         .env("PSCAT_MCP_LOG_FORMAT", "json")
         .env_remove("RUST_LOG")
-        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .stderr(log.create())
         .kill_on_drop(true);
     for (k, v) in env {
         cmd.env(k, v);
@@ -117,38 +235,23 @@ async fn start_http_with(rust_log: Option<&str>, env: &[(&str, &str)]) -> Server
     if let Some(v) = rust_log {
         cmd.env("RUST_LOG", v);
     }
-    let mut child = cmd.spawn().expect("start the server");
-    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
-    // The listening line is the server's own, at INFO, under either filter.
-    let mut collected = String::new();
-    let mut addr = String::new();
-    while let Some(line) = lines.next_line().await.unwrap() {
-        collected.push_str(&line);
-        collected.push('\n');
-        if let Some(i) = line.find("\"addr\":\"") {
-            addr = line[i + 8..].split('"').next().unwrap().to_string();
-            break;
-        }
-    }
-    assert!(!addr.is_empty(), "serve-http did not report an address");
-    let seen = Arc::new(Mutex::new(collected.clone()));
-    let shared = Arc::clone(&seen);
-    let logs = tokio::spawn(async move {
-        while let Ok(Some(line)) = lines.next_line().await {
-            collected.push_str(&line);
-            collected.push('\n');
-            let mut s = shared.lock().unwrap();
-            s.push_str(&line);
-            s.push('\n');
-        }
-        collected
-    });
-    Server {
+    let child = cmd.spawn().expect("start the server");
+    let mut server = Server {
         child,
-        base: format!("http://{addr}/mcp"),
-        logs,
-        seen,
-    }
+        base: String::new(),
+        log,
+    };
+    // The listening line is the server's own, at INFO, under either filter.
+    let seen = server.wait_for_log("\"addr\":\"").await;
+    let line = seen
+        .lines()
+        .find(|l| l.contains("\"addr\":\""))
+        .expect("the listening line");
+    let i = line.find("\"addr\":\"").unwrap();
+    let addr = line[i + 8..].split('"').next().unwrap();
+    assert!(!addr.is_empty(), "serve-http did not report an address");
+    server.base = format!("http://{addr}/mcp");
+    server
 }
 
 /// POST one JSON-RPC message to the server, as a client would, and return the
@@ -177,7 +280,7 @@ async fn post(
 /// and return its stderr. The server is stateless: each request is served by
 /// its own rmcp service, which logs its handshake before it answers.
 async fn http_stderr(rust_log: Option<&str>) -> String {
-    let mut server = start_http(rust_log).await;
+    let server = start_http(rust_log).await;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -189,11 +292,7 @@ async fn http_stderr(rust_log: Option<&str>) -> String {
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("render_postscript"), "{body}");
 
-    server.child.kill().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), server.logs)
-        .await
-        .expect("stderr closed")
-        .unwrap()
+    server.stop().await
 }
 
 // Over HTTP the server is stateless, and rmcp 3.9 builds the dumped
@@ -283,12 +382,8 @@ fn no_program_text(logs: &str) {
     }
 }
 
-async fn stop(mut server: Server) -> String {
-    server.child.kill().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), server.logs)
-        .await
-        .expect("stderr closed")
-        .unwrap()
+async fn stop(server: Server) -> String {
+    server.stop().await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -377,7 +472,7 @@ async fn an_interpreter_time_limit_logs_limit_time() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_queue_timeout_logs_server_busy_with_the_wait() {
     const QUEUE_MS: u64 = 300;
-    let server = start_http_with(
+    let mut server = start_http_with(
         None,
         &[
             ("PSCAT_MCP_MAX_CONCURRENT_RENDERS", "1"),
@@ -397,17 +492,16 @@ async fn a_queue_timeout_logs_server_busy_with_the_wait() {
         render_code(&h, &base, 1, &format!("({SOURCE_MARKER}) pop {{ }} loop")).await
     });
     // The slow program holds the slot once its render has started.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !server.seen.lock().unwrap().contains("render started") {
-        assert!(std::time::Instant::now() < deadline, "no render started");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    server.wait_for_log("render started").await;
     let got = render_code(&http, &server.base, 2, &format!("({SOURCE_MARKER}) pop")).await;
     assert_eq!(got.as_deref(), Some("server_busy"));
     assert!(!slow.is_finished(), "the slow program ended by itself");
     // Ends the slow render (the server kills its worker when the client
-    // goes) before the server is stopped.
+    // goes) before the server is stopped: killing the server first would
+    // leave the worker running its loop on its own until its deadline, taking
+    // a core from every other test.
     slow.abort();
+    server.wait_for_no_workers().await;
 
     let logs = stop(server).await;
     let busy: Vec<Value> = json_lines(&logs)
@@ -578,20 +672,8 @@ async fn rmcp_warnings_still_get_through_at_trace() {
         .expect("request");
     assert_eq!(resp.status().as_u16(), 403);
     // The server logs from its own tasks: wait for the line.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !server.seen.lock().unwrap().contains("disallowed Origin") {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no rmcp WARN line: {}",
-            server.seen.lock().unwrap()
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    server.child.kill().await.unwrap();
-    let logs = tokio::time::timeout(Duration::from_secs(30), server.logs)
-        .await
-        .expect("stderr closed")
-        .unwrap();
+    server.wait_for_log("disallowed Origin").await;
+    let logs = server.stop().await;
     let warned: Vec<Value> = json_lines(&logs)
         .into_iter()
         .filter(|l| {
