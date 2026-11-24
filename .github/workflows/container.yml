@@ -93,7 +93,7 @@ jobs:
         run: SKIP_BUILD=1 IMAGE=pscat-mcp:ci scripts/container-eval.sh
       - name: Upload eval reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: server-evals-container
           path: target/eval/
