@@ -1182,8 +1182,9 @@ answers. That is a platform delay, not a pscat-mcp problem.
 Short links (#163) are tested in CI against the local fake only
 (`tests/artifacts_gcs.rs`). This check runs them against the real APIs on
 the staging service, with the grants and the link secret of
-[`CLOUD_RUN.md`](CLOUD_RUN.md#short-links) in place. **Not run yet**; record
-the result below when it is.
+[`CLOUD_RUN.md`](CLOUD_RUN.md#short-links) in place. Run on 2026-11-19
+(steps 1 to 3, 5 and 7) and 2026-11-22 (step 4); the results are below.
+Steps marked "not recorded" are still open.
 
 1. Deploy the revision under test with `gcs` links,
    `PSCAT_MCP_ARTIFACT_LINK_SECRET_FILE` mounted and
@@ -1211,8 +1212,14 @@ the result below when it is.
 
 | Item | Result |
 |---|---|
-| Date, revision | not run |
-| Steps 1 to 7 | not run |
+| Date, revision | 2026-11-19, staging image sha-be9a12b, run by the pscat-cloud session; step 4 on 2026-11-22, staging image sha-0f1e8fd |
+| 1. Startup with and without the secret | Started with `PSCAT_MCP_ARTIFACT_PUBLIC_ORIGIN` set and the secret pinned to one Secret Manager version. The refusal without the secret was not recorded |
+| 2. `download_url` | A 112-character `<short-link>` from a bearer render |
+| 3. `utm_source` appended | Plain GET: `302` to a `storage.googleapis.com` V4 URL, then `200` `image/png`. With `&utm_source=chatgpt.com` appended: `200` `image/png`. Headers not recorded |
+| 4. A link opened from a chat | Yes: the owner and a second person downloaded renders from the server in the ChatGPT and Claude mobile apps |
+| 5. Token changed; after the TTL | One token character changed: `403`. The `410` after the TTL was not recorded |
+| 6. Service logs | Not recorded |
+| 7. Cloud Run request log | `httpRequest.requestUrl` holds the full link with its query (seen in a probe before short links were on). A log exclusion for `^https?://[^/]+/a/` now drops those entries: none afterwards, and none containing `s=` or `X-Goog-Signature` |
 
 ## ChatGPT widget check
 
@@ -1240,3 +1247,7 @@ link with `<short-link>` or `<signed-url>`.
 | `review_sheet` and `handwrite` with `delivery` `url`: panel and picture | Not tested yet |
 | Any error text, or the browser console of the panel | Not tested yet |
 | Size of the largest `structuredContent` that still rendered, if a limit was hit | Not tested yet |
+
+On 2026-11-22 the owner and a second person downloaded renders from the
+staging server in the ChatGPT and Claude mobile apps; see the
+[short-link check](#short-link-check), step 4.
