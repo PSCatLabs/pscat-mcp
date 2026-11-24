@@ -30,9 +30,9 @@ it; it depends on PSCat's Rust library at a release tag:
 
 | | |
 |---|---|
-| Crate | `pscat` 0.7.0-rc.5 (`default-features = false`) |
-| Source | `https://github.com/PSCatLabs/pscat`, tag `v0.7.0-rc.5` |
-| Commit | `cbbf8fed3002c4f865fab0992559c1db38bb7c7c` (recorded in `Cargo.lock`) |
+| Crate | `pscat` 0.7.0 (`default-features = false`) |
+| Source | `https://github.com/PSCatLabs/pscat`, tag `v0.7.0` |
+| Commit | `51a4b2e5c57e567353ab7643ab4f28b064b72eb6` (recorded in `Cargo.lock`) |
 
 It is a git dependency because crates.io only has 0.6.3, which lacks the
 `Interp::set_limits` and `Interp::set_read_roots` APIs this server relies on.

@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/PSCatLabs/pscat",
-  "tag": "v0.7.0-rc.5",
-  "version": "0.7.0-rc.5",
-  "commit": "cbbf8fed3002c4f865fab0992559c1db38bb7c7c",
+  "tag": "v0.7.0",
+  "version": "0.7.0",
+  "commit": "51a4b2e5c57e567353ab7643ab4f28b064b72eb6",
   "path": "plugin/skills",
   "license": "MIT OR Apache-2.0",
   "copyright": [
